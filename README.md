@@ -181,7 +181,7 @@ The webhook path itself only writes to your store; it never calls the Paddle API
 
 ## Known issues (v0.1.1)
 
-- **past_due grace can drift.** The grace start is computed from the stored row, so concurrent `past_due` deliveries can extend grace by the gap between them. A lost or late recovery event can also merge two `past_due` episodes into one and end grace early (the customer is denied). `reconcile` can repair state after an outage.
+- **past_due grace can drift.** The grace start is computed from the stored row, so concurrent `past_due` deliveries can extend grace by the gap between them. A lost or late recovery event can also merge two `past_due` episodes into one and end grace early (the customer is denied). `reconcile` does **not** correct a drifted grace start (it carries the stored value forward); fix it by hand with `UPDATE paddle_subscriptions SET past_due_since = '<first past_due time>' WHERE subscription_id = '<sub_id>'`, or wait for the subscription to leave `past_due`.
 - **Health does not split failure counts per reason.** `failedLast24h` is a single total; only the latest reason is reported.
 
 ## Verification status
