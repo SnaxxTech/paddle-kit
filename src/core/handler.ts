@@ -31,7 +31,18 @@ export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<
         const prev = await d.store.getSubscription(ev.subscription.subscriptionId);
         const pastDueSince = nextPastDueSince(prev, ev.subscription.status, ev.occurredAt);
         const { applied } = await d.store.upsertSubscription({ ...ev.subscription, pastDueSince });
-        if (!applied) return { status: 'stale', reason: 'out_of_order' };
+        if (!applied) {
+          if (
+            ev.subscription.status === 'past_due' &&
+            prev?.status === 'past_due' &&
+            prev.pastDueSince &&
+            Date.parse(prev.pastDueSince) > Date.parse(ev.occurredAt)
+          ) {
+            // an older past_due event arrived late: pull the grace clock back (same lastEventAt applies)
+            await d.store.upsertSubscription({ ...prev, pastDueSince: ev.occurredAt });
+          }
+          return { status: 'stale', reason: 'out_of_order' };
+        }
         return { status: 'processed', reason: ev.subscription.userId ? null : 'no_user_id' };
       }
       case 'customer': {
@@ -47,7 +58,12 @@ export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<
 
   return async function handle(req: Request): Promise<Response> {
     if (req.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
-    const rawBody = await req.text();
+    let rawBody: string;
+    try {
+      rawBody = await req.text();
+    } catch {
+      return reject('missing_body', 400);
+    }
     if (!rawBody) return reject('missing_body', 400);
 
     const verified = await verifySignature({
@@ -69,8 +85,10 @@ export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<
     if (!ev) return reject('bad_payload', 400);
 
     const tag = { eventId: ev.eventId, eventType: ev.eventType };
+    let recorded = false;
     try {
       const { alreadyDone } = await d.store.recordEvent({ ...tag, occurredAt: ev.occurredAt, receivedAt: d.now().toISOString() });
+      recorded = true;
       if (alreadyDone) return json({ received: true, duplicate: true }, 200);
       const outcome = await apply(ev);
       await d.store.markEvent(ev.eventId, outcome.status, outcome.reason);
@@ -79,6 +97,7 @@ export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<
     } catch {
       d.log({ level: 'error', reason: 'store_error', ...tag });
       try {
+        if (!recorded) throw new Error('event row never written');
         await d.store.markEvent(ev.eventId, 'failed', 'store_error');
       } catch {
         try {

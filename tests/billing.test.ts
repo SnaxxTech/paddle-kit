@@ -57,3 +57,11 @@ describe('handleHealth', () => {
     expect(await ok.json()).toMatchObject({ lastEventAt: null, failedLast24h: 0 });
   });
 });
+
+describe('config exposure', () => {
+  it('does not expose the webhook secret', () => {
+    const billing = createBilling({ ...base(), webhookSecret: 'super-secret-value' });
+    expect('webhookSecret' in billing.config).toBe(false);
+    expect(JSON.stringify(billing.config)).not.toContain('super-secret-value');
+  });
+});

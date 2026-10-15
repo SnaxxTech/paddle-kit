@@ -16,7 +16,7 @@ export interface BillingConfig {
 }
 
 export interface Billing {
-  config: Readonly<BillingConfig>;
+  config: Readonly<Omit<BillingConfig, 'webhookSecret'>>;
   store: Store;
   log: Logger;
   handleWebhook(req: Request): Promise<Response>;
@@ -46,8 +46,9 @@ export function createBilling(config: BillingConfig): Billing {
     now,
   });
 
+  const { webhookSecret: _omitted, ...publicConfig } = config;
   return {
-    config,
+    config: publicConfig,
     store: config.store,
     log,
     handleWebhook,

@@ -69,6 +69,15 @@ describe('webhook handler', () => {
     expect((await store.getSubscription(id))?.pastDueSince).toBe('2026-10-10T00:00:00Z');
   });
 
+  it('keeps the earliest past_due start when events arrive out of order', async () => {
+    const id = loadFixture('subscription.created').data.id;
+    await handle(post(JSON.stringify(subscriptionEvent({ eventId: 'o1', eventType: 'subscription.updated', occurredAt: '2026-10-12T00:00:00Z', data: { status: 'past_due' } }))));
+    await handle(post(JSON.stringify(subscriptionEvent({ eventId: 'o2', eventType: 'subscription.past_due', occurredAt: '2026-10-10T00:00:00Z', data: { status: 'past_due' } }))));
+    const sub = await store.getSubscription(id);
+    expect(sub?.pastDueSince).toBe('2026-10-10T00:00:00Z');
+    expect(sub?.status).toBe('past_due');
+  });
+
   it('ignores unknown event types with 200', async () => {
     const body = JSON.stringify({ event_id: 'evt_p', event_type: 'payout.paid', occurred_at: '2026-10-15T00:00:00Z', data: {} });
     expect((await handle(post(body))).status).toBe(200);
@@ -98,9 +107,29 @@ describe('webhook handler', () => {
       const spy = vi.spyOn(store, 'upsertSubscription').mockRejectedValueOnce(new Error('connection reset'));
       expect((await handle(post(body))).status).toBe(500);
       expect((await store.health(NOW)).lastFailureReason).toBe('store_error');
+      expect((await store.health(NOW)).failedLast24h).toBe(1);
       spy.mockImplementation(real);
       expect((await handle(post(body))).status).toBe(200);
       expect(await store.getSubscription(loadFixture('subscription.created').data.id)).not.toBeNull();
+    });
+
+    it('recordEvent failure → 500 and health shows store_error', async () => {
+      vi.spyOn(store, 'recordEvent').mockRejectedValueOnce(new Error('events table down'));
+      expect((await handle(post(body))).status).toBe(500);
+      const h = await store.health(NOW);
+      expect(h.lastFailureReason).toBe('store_error');
+      expect(h.failedLast24h).toBe(1);
+    });
+
+    it('unreadable request body → 400 missing_body, no throw', async () => {
+      const req = new Request('https://app.test/api/paddle', {
+        method: 'POST',
+        body: new ReadableStream({ start(c) { c.error(new Error('abort')); } }),
+        duplex: 'half',
+      } as any);
+      const res = await handle(req);
+      expect(res.status).toBe(400);
+      expect((await store.health(NOW)).lastFailureReason).toBe('missing_body');
     });
 
     it('total store outage → 500 and a log line, no throw', async () => {
