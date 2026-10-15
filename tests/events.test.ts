@@ -45,6 +45,12 @@ describe('parseEvent', () => {
     expect(ev.subscription.userId).toBeNull();
   });
 
+  it.each(['a\u0000b', '\u0007', 'x\ny', '\u007f'])('treats userId %j (control characters) as no user', (userId) => {
+    const ev = parseEvent(subscriptionEvent({ data: { custom_data: { userId } } }));
+    if (ev?.kind !== 'subscription') throw new Error('expected subscription');
+    expect(ev.subscription.userId).toBeNull();
+  });
+
   it('treats subscription.imported like a subscription event', () => {
     expect(parseEvent(subscriptionEvent({ eventType: 'subscription.imported' }))?.kind).toBe('subscription');
   });

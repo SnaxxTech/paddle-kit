@@ -44,7 +44,10 @@ export function memoryStore(): Store {
       return s ? clone(s) : null;
     },
     async getSubscriptionsByUser(userId) {
-      return [...subs.values()].filter((s) => s.userId === userId).map(clone);
+      return [...subs.values()]
+        .filter((s) => s.userId === userId)
+        .sort((a, b) => Date.parse(b.lastEventAt) - Date.parse(a.lastEventAt))
+        .map(clone);
     },
     async health(now): Promise<Health> {
       const since = now.getTime() - DAY_MS;

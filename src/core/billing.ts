@@ -55,7 +55,12 @@ export function createBilling(config: BillingConfig): Billing {
     async handleHealth(req) {
       if (!config.healthToken) return new Response(null, { status: 404 });
       if (req.headers.get('authorization') !== `Bearer ${config.healthToken}`) return new Response(null, { status: 401 });
-      return Response.json(await config.store.health(now()));
+      try {
+        return Response.json(await config.store.health(now()));
+      } catch {
+        log({ level: 'error', reason: 'store_error' });
+        return Response.json({ error: 'store_error' }, { status: 503 });
+      }
     },
     async hasAccess(userId, feature) {
       if (!userId) return false;

@@ -32,6 +32,9 @@ const STATUSES: ReadonlySet<string> = new Set(['active', 'trialing', 'past_due',
 const isObj = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const isStr = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
 const isTime = (v: unknown): v is string => isStr(v) && !Number.isNaN(Date.parse(v));
+// eslint-disable-next-line no-control-regex
+const hasControlChars = (v: string) => /[\u0000-\u001f\u007f-\u009f]/.test(v);
+const optUserId = (v: unknown): string | null => (isStr(v) && !hasControlChars(v) ? v : null);
 const optStr = (v: unknown): string | null => (isStr(v) ? v : null);
 
 export function parseEvent(json: unknown): NormalisedEvent | null {
@@ -53,7 +56,7 @@ export function parseEvent(json: unknown): NormalisedEvent | null {
       subscription: {
         subscriptionId: data.id,
         customerId: data.customer_id,
-        userId: isObj(data.custom_data) ? optStr(data.custom_data.userId) : null,
+        userId: isObj(data.custom_data) ? optUserId(data.custom_data.userId) : null,
         status: data.status as SubscriptionStatus,
         priceIds,
         currentPeriodEnd: isObj(data.current_billing_period) ? optStr(data.current_billing_period.ends_at) : null,

@@ -34,6 +34,13 @@ export function runStoreContract(name: string, makeStore: () => Promise<Store>):
       expect(await store.getSubscription('nope')).toBeNull();
     });
 
+    it('returns a user\'s subscriptions newest lastEventAt first', async () => {
+      await store.upsertSubscription(sub({ subscriptionId: 'sub_old', lastEventAt: '2026-10-01T00:00:00.000Z' }));
+      await store.upsertSubscription(sub({ subscriptionId: 'sub_new', lastEventAt: '2026-10-12T00:00:00.000Z' }));
+      await store.upsertSubscription(sub({ subscriptionId: 'sub_mid', lastEventAt: '2026-10-06T00:00:00.000Z' }));
+      expect((await store.getSubscriptionsByUser('user_1')).map((x) => x.subscriptionId)).toEqual(['sub_new', 'sub_mid', 'sub_old']);
+    });
+
     it('applies newer-or-equal, rejects older', async () => {
       await store.upsertSubscription(sub({ status: 'active', lastEventAt: '2026-10-10T00:00:00.000Z' }));
       expect(await store.upsertSubscription(sub({ status: 'canceled', lastEventAt: '2026-10-09T00:00:00.000Z' }))).toEqual({ applied: false });

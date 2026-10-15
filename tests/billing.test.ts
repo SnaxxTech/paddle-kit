@@ -56,6 +56,15 @@ describe('handleHealth', () => {
     expect(ok.status).toBe(200);
     expect(await ok.json()).toMatchObject({ lastEventAt: null, failedLast24h: 0 });
   });
+  it('503 store_error (and logs) instead of throwing when the store is down', async () => {
+    const logs: any[] = [];
+    const store = { ...memoryStore(), health: async () => { throw new Error('db down'); } };
+    const b = createBilling({ ...base(), store, healthToken: 'tok', log: (e) => logs.push(e) });
+    const res = await b.handleHealth(new Request('https://x/', { headers: { authorization: 'Bearer tok' } }));
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: 'store_error' });
+    expect(logs).toContainEqual({ level: 'error', reason: 'store_error' });
+  });
 });
 
 describe('config exposure', () => {

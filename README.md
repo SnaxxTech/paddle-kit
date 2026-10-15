@@ -11,7 +11,9 @@ Not for in-app purchases in store-distributed mobile apps. Google Play and the A
 npm i github:SnaxxTech/paddle-kit#v0.1.0
 ```
 
-Optional peer dependencies, install only what you use: `@paddle/paddle-node-sdk` (reconcile), `@paddle/paddle-js` (client checkout), `hono`, `express`.
+`memoryStore` (`paddle-kit/memory`) is for tests and local development only: its failure log is unbounded and it is not shared across instances. Use `postgresStore` in production.
+
+Optional peer dependencies, install only what you use: `@paddle/paddle-node-sdk` (reconcile), `@paddle/paddle-js` (client checkout), `hono`, `express`. Using `paddle-kit/express` also needs `@types/express` for its types.
 
 ## Environment variables
 
@@ -19,7 +21,7 @@ Optional peer dependencies, install only what you use: `@paddle/paddle-node-sdk`
 |---|---|---|
 | `PADDLE_ENV` | server | `sandbox` or `production`. Sandbox and live never mix. |
 | `PADDLE_NOTIFICATION_WEBHOOK_SECRET` | server | The notification destination's secret key. Required: `createBilling` throws if it is missing or empty. `billing.config` never contains it. |
-| `PADDLE_API_KEY` | `reconcile` only | `pdl_sdbx_...` for sandbox, `pdl_live_...` for production. A mismatch with `PADDLE_ENV` throws. |
+| `PADDLE_API_KEY` | `reconcile` only | `pdl_sdbx_...` for sandbox, `pdl_live_...` for production. A mismatch with `PADDLE_ENV` throws. Keys must carry the `pdl_sdbx_`/`pdl_live_` prefix; legacy unprefixed keys are rejected. |
 | `NEXT_PUBLIC_PADDLE_CLIENT_TOKEN` | browser | `test_...` for sandbox, `live_...` for production. A mismatch throws in `createCheckout`. |
 
 Production guard: `environment: 'production'` throws when `NODE_ENV` is set and is not `'production'`, unless you pass `allowProductionInDev: true`. Runtimes that do not define `NODE_ENV` (for example Cloudflare Workers) skip this guard.
@@ -80,7 +82,7 @@ export function UpgradeButton({ userId, email }: { userId: string; email: string
       onClick={async () => {
         const checkout = await createCheckout({
           token: process.env.NEXT_PUBLIC_PADDLE_CLIENT_TOKEN!,
-          environment: 'sandbox',
+          environment: process.env.NEXT_PUBLIC_PADDLE_ENV as 'sandbox' | 'production',
         });
         checkout.open({ priceId: 'pri_01abc', userId, email });
       }}
@@ -130,16 +132,17 @@ app.get('/paddle', paddleHealth(billing));
 
 ```ts
 import express from 'express';
-import { paddleWebhook } from 'paddle-kit/express';
+import { paddleWebhook, paddleHealth } from 'paddle-kit/express';
 import { billing } from './billing';
 
 const app = express();
 // Mount express.raw on the webhook route. Do NOT run express.json() before it.
 app.post('/paddle', express.raw({ type: '*/*' }), paddleWebhook(billing));
+app.get('/paddle', paddleHealth(billing)); // 404 unless healthToken is set
 app.use(express.json()); // fine, but only AFTER the webhook route
 ```
 
-If the body was already parsed, the adapter returns **500 `missing_raw_body`** by design (a re-serialised body can never match the signature) and records the failure.
+If the body was already parsed, the adapter returns **500 `missing_raw_body`** by design (a re-serialised body can never match the signature) and records the failure. If a handler throws, both Express handlers log `store_error` and answer **500 `{ "error": "store_error" }`** (Express 4 does not catch async rejections).
 
 ## Paddle events to subscribe
 
@@ -151,7 +154,9 @@ Create a notification destination (type: webhook) pointing at your route and sub
 
 ## Monitoring
 
-Set `healthToken` to expose the health route (`GET` on the same path, `Authorization: Bearer <token>`). Without `healthToken` the route returns 404; with a wrong token, 401. There is no pinger: the signal comes from real webhook traffic.
+Set `healthToken` to expose the health route (`GET` on the same path, `Authorization: Bearer <token>`). Without `healthToken` the route returns 404; with a wrong token, 401. If the store is down the route returns **503 `{ "error": "store_error" }`** (and logs `store_error`) instead of throwing. There is no pinger: the signal comes from real webhook traffic.
+
+A stale `lastEventAt` is the primary "alive" signal: if no verified event has arrived for longer than your normal traffic gap, investigate. `failedLast24h` includes unsigned bot requests on a public endpoint, so a non-zero count alone is not an outage.
 
 | Field | Meaning |
 |---|---|
@@ -173,6 +178,11 @@ await reconcile(billing, { apiKey: process.env.PADDLE_API_KEY! }); // { scanned,
 ```
 
 The webhook path itself only writes to your store; it never calls the Paddle API (Paddle's 5-second delivery deadline). Signature tolerance defaults to 5 seconds.
+
+## Known issues (v0.1.1)
+
+- **past_due grace can drift.** The grace start is computed from the stored row, so concurrent `past_due` deliveries can extend grace by the gap between them. A lost or late recovery event can also merge two `past_due` episodes into one and end grace early (the customer is denied). `reconcile` can repair state after an outage.
+- **Health does not split failure counts per reason.** `failedLast24h` is a single total; only the latest reason is reported.
 
 ## Verification status
 
