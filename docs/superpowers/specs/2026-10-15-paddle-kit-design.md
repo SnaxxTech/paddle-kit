@@ -65,7 +65,9 @@ const billing = createBilling({
 });
 ```
 
-Guards, enforced at construction (throw, not warn):
+Guards, enforced at construction (throw, not warn) — plus, in `reconcile` and
+`createCheckout`, an API-key / client-token prefix that does not match the
+environment (`pdl_sdbx_`/`test_` = sandbox, `pdl_live_`/`live_` = production):
 - `webhookSecret` missing or empty.
 - `environment: 'production'` while `NODE_ENV !== 'production'`, unless
   `allowProductionInDev: true` is passed explicitly. Prevents live keys in local runs.
@@ -157,7 +159,10 @@ numbered files, never edits to shipped ones.
 | Missing/malformed signature header | 400 | log `bad_signature_header` |
 | Signature mismatch | 401 | log `signature_mismatch` |
 | Timestamp outside tolerance | 401 | log `stale_timestamp` |
+| Empty body | 400 | log `missing_body` |
+| Body already parsed by the framework (Express) | 500 | log `missing_raw_body` |
 | Invalid JSON | 400 | log `bad_json` |
+| Valid JSON, missing required fields | 400 | log `bad_payload` |
 | Unknown event type | 200 | event `ignored` |
 | Out-of-order event | 200 | event `stale` |
 | Store failure | 500 (Paddle retries) | log `store_error`; event `failed` if writable |
@@ -169,8 +174,9 @@ content anywhere: they only increment a `paddle_failures` counter
 
 ## 8. Monitoring (critical module)
 
-1. **Alive:** `billing.health()` → `{ lastEventAt, lastFailureAt, lastFailureReason, failedLast24h }`.
-   Each adapter exposes it as an opt-in GET route. Signal comes from real webhook
+1. **Alive:** `billing.health()` → `{ lastEventAt, lastFailureAt, lastFailureReason, failedLast24h, unlinkedLast24h }`.
+   Adapters expose it as a GET route only when `healthToken` is configured
+   (`Authorization: Bearer <token>`; 404 otherwise). Signal comes from real webhook
    traffic; no pinger (zero added compute on free tiers).
 2. **Why it failed:** reason codes from §7, in the log line and in `paddle_events`
    (and in the log alone when the store itself is down).
