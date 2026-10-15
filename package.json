@@ -45,17 +45,17 @@
     }
   },
   "scripts": {
-    "build": "tsup && tsc -p tsconfig.build.json",
+    "build": "tsup",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "check:edge": "node scripts/check-edge.mjs",
     "smoke": "node scripts/smoke-pack.mjs"
   },
   "peerDependencies": {
-    "@paddle/paddle-node-sdk": "^3.10.0",
     "@paddle/paddle-js": "^1.0.0",
-    "hono": "^4.0.0",
-    "express": "^4.18.0 || ^5.0.0"
+    "@paddle/paddle-node-sdk": "^3.10.0",
+    "express": "^4.18.0 || ^5.0.0",
+    "hono": "^4.0.0"
   },
   "peerDependenciesMeta": {
     "@paddle/paddle-node-sdk": {
@@ -82,7 +82,7 @@
     "hono": "^4.13.13",
     "tsup": "^8.5.1",
     "tsx": "^4.23.15",
-    "typescript": "^7.0.2",
+    "typescript": "^5.9.3",
     "vitest": "^4.1.12"
   }
 }

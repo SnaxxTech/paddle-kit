@@ -12,7 +12,7 @@ export default defineConfig({
     'reconcile/index': 'src/reconcile/index.ts',
   },
   format: ['esm'],
-  dts: false, // tsup's dts plugin needs the TypeScript JS API, which TS 7 lacks; declarations come from tsc (see build script)
+  dts: true,
   clean: true,
   splitting: true,
   external: ['@paddle/paddle-node-sdk', '@paddle/paddle-js', 'hono', 'express'],
