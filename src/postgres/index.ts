@@ -1,0 +1,125 @@
+import type { EventStatus, Health, ReasonCode, Store, Subscription } from '../core/types';
+
+export { MIGRATIONS } from './migrations';
+
+export type SqlQuery = (text: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>;
+
+const iso = (v: unknown): string | null => (v == null ? null : new Date(v as string | Date).toISOString());
+const jsonParam = (v: unknown) => (v == null ? null : JSON.stringify(v));
+const DAY_MS = 86_400_000;
+
+function toSubscription(r: Record<string, unknown>): Subscription {
+  return {
+    subscriptionId: r.subscription_id as string,
+    customerId: r.customer_id as string,
+    userId: (r.user_id as string | null) ?? null,
+    status: r.status as Subscription['status'],
+    priceIds: r.price_ids as string[],
+    currentPeriodEnd: iso(r.current_period_end),
+    scheduledChange: (r.scheduled_change as Subscription['scheduledChange']) ?? null,
+    canceledAt: iso(r.canceled_at),
+    pastDueSince: iso(r.past_due_since),
+    lastEventAt: iso(r.last_event_at)!,
+    raw: r.raw,
+  };
+}
+
+export function postgresStore({ query }: { query: SqlQuery }): Store {
+  return {
+    async recordEvent(e) {
+      const { rows } = await query(
+        `INSERT INTO paddle_events (event_id, event_type, occurred_at, received_at, status)
+         VALUES ($1, $2, $3, $4, 'received')
+         ON CONFLICT (event_id) DO UPDATE SET event_id = paddle_events.event_id -- no-op so RETURNING yields the stored row
+         RETURNING status`,
+        [e.eventId, e.eventType, e.occurredAt, e.receivedAt],
+      );
+      const status = rows[0]?.status as EventStatus;
+      return { alreadyDone: status === 'processed' || status === 'ignored' || status === 'stale' };
+    },
+    async markEvent(eventId, status, reason) {
+      await query(`UPDATE paddle_events SET status = $2, reason = $3 WHERE event_id = $1`, [eventId, status, reason]);
+    },
+    async recordFailure(reason, at) {
+      await query(
+        `INSERT INTO paddle_failures (bucket, reason, hits, last_at)
+         VALUES (date_trunc('minute', $1::timestamptz), $2, 1, $1::timestamptz)
+         ON CONFLICT (bucket, reason) DO UPDATE
+           SET hits = paddle_failures.hits + 1, last_at = GREATEST(paddle_failures.last_at, EXCLUDED.last_at)`,
+        [at.toISOString(), reason],
+      );
+    },
+    async upsertCustomer(c) {
+      const { rows } = await query(
+        `INSERT INTO paddle_customers (customer_id, email, last_event_at) VALUES ($1, $2, $3)
+         ON CONFLICT (customer_id) DO UPDATE
+           SET email = EXCLUDED.email, last_event_at = EXCLUDED.last_event_at, updated_at = now()
+           WHERE paddle_customers.last_event_at <= EXCLUDED.last_event_at
+         RETURNING customer_id`,
+        [c.customerId, c.email, c.lastEventAt],
+      );
+      return { applied: rows.length > 0 };
+    },
+    async upsertSubscription(s) {
+      const { rows } = await query(
+        `INSERT INTO paddle_subscriptions
+           (subscription_id, customer_id, user_id, status, price_ids, current_period_end, scheduled_change,
+            canceled_at, past_due_since, last_event_at, raw)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, $8, $9, $10, $11::jsonb)
+         ON CONFLICT (subscription_id) DO UPDATE SET
+           customer_id = EXCLUDED.customer_id,
+           user_id = COALESCE(EXCLUDED.user_id, paddle_subscriptions.user_id),
+           status = EXCLUDED.status,
+           price_ids = EXCLUDED.price_ids,
+           current_period_end = EXCLUDED.current_period_end,
+           scheduled_change = EXCLUDED.scheduled_change,
+           canceled_at = EXCLUDED.canceled_at,
+           past_due_since = EXCLUDED.past_due_since,
+           last_event_at = EXCLUDED.last_event_at,
+           raw = EXCLUDED.raw,
+           updated_at = now()
+         WHERE paddle_subscriptions.last_event_at <= EXCLUDED.last_event_at
+         RETURNING subscription_id`,
+        [
+          s.subscriptionId, s.customerId, s.userId, s.status, jsonParam(s.priceIds), s.currentPeriodEnd,
+          jsonParam(s.scheduledChange), s.canceledAt, s.pastDueSince, s.lastEventAt, jsonParam(s.raw ?? {}),
+        ],
+      );
+      return { applied: rows.length > 0 };
+    },
+    async getSubscription(id) {
+      const { rows } = await query(`SELECT * FROM paddle_subscriptions WHERE subscription_id = $1`, [id]);
+      return rows[0] ? toSubscription(rows[0]) : null;
+    },
+    async getSubscriptionsByUser(userId) {
+      const { rows } = await query(`SELECT * FROM paddle_subscriptions WHERE user_id = $1 ORDER BY last_event_at DESC`, [userId]);
+      return rows.map(toSubscription);
+    },
+    async health(now): Promise<Health> {
+      const since = new Date(now.getTime() - DAY_MS).toISOString();
+      const until = now.toISOString();
+      const { rows: [agg] } = await query(
+        `SELECT
+           (SELECT max(received_at) FROM paddle_events WHERE status IN ('processed','ignored','stale')) AS last_event_at,
+           (SELECT count(*)::int FROM paddle_events WHERE status = 'failed' AND received_at > $1 AND received_at <= $2) AS failed_events,
+           (SELECT coalesce(sum(hits), 0)::int FROM paddle_failures WHERE last_at > $1 AND last_at <= $2) AS failed_requests,
+           (SELECT count(*)::int FROM paddle_events WHERE reason = 'no_user_id' AND received_at > $1 AND received_at <= $2) AS unlinked`,
+        [since, until],
+      );
+      const { rows: [last] } = await query(
+        `SELECT at, reason FROM (
+           SELECT received_at AS at, reason FROM paddle_events WHERE status = 'failed'
+           UNION ALL
+           SELECT last_at AS at, reason FROM paddle_failures
+         ) f ORDER BY at DESC LIMIT 1`,
+      );
+      return {
+        lastEventAt: iso(agg?.last_event_at),
+        lastFailureAt: iso(last?.at),
+        lastFailureReason: (last?.reason as ReasonCode | undefined) ?? null,
+        failedLast24h: Number(agg?.failed_events ?? 0) + Number(agg?.failed_requests ?? 0),
+        unlinkedLast24h: Number(agg?.unlinked ?? 0),
+      };
+    },
+  };
+}
