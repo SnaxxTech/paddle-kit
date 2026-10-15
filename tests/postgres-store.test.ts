@@ -49,3 +49,15 @@ it('out-of-order + duplicate deliveries converge in real Postgres', async () => 
   const evs = (await db.query<{ event_id: string; status: string }>('SELECT event_id, status FROM paddle_events ORDER BY event_id')).rows;
   expect(evs).toEqual([{ event_id: 'c', status: 'stale' }, { event_id: 'u', status: 'processed' }]);
 });
+
+it('accepts a raw payload containing a NUL character (jsonb rejects \\u0000)', async () => {
+  const db = await freshDb();
+  const store = postgresStore({ query: (t, p) => db.query(t, p) as any });
+  const s = {
+    subscriptionId: 'sub_nul', customerId: 'ctm_1', userId: 'user_1', status: 'active' as const, priceIds: ['p'],
+    currentPeriodEnd: null, scheduledChange: null, canceledAt: null, pastDueSince: null,
+    lastEventAt: '2026-10-10T00:00:00.000Z', raw: { custom_data: 'a\u0000b', 'k\u0000': 1, back: 'x\\u0000y' },
+  };
+  expect(await store.upsertSubscription(s)).toEqual({ applied: true });
+  expect(((await store.getSubscription('sub_nul'))!.raw as any).custom_data).toBe('ab');
+});

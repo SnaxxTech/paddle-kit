@@ -5,7 +5,11 @@ export { MIGRATIONS } from './migrations';
 export type SqlQuery = (text: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>;
 
 const iso = (v: unknown): string | null => (v == null ? null : new Date(v as string | Date).toISOString());
-const jsonParam = (v: unknown) => (v == null ? null : JSON.stringify(v));
+// jsonb rejects \u0000; drop NUL escapes (but keep an escaped backslash followed by "u0000" intact).
+const jsonParam = (v: unknown) =>
+  v == null ? null : JSON.stringify(v).replace(/\\\\|\\u0000/g, (m) => (m === '\\\\' ? m : ''));
+// Timestamps are stored at millisecond precision so stored values compare equal to the JS-Date-derived ISO strings read back.
+const ms = (n: number) => `date_trunc('milliseconds', $${n}::timestamptz)`;
 const DAY_MS = 86_400_000;
 
 function toSubscription(r: Record<string, unknown>): Subscription {
@@ -29,7 +33,7 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
     async recordEvent(e) {
       const { rows } = await query(
         `INSERT INTO paddle_events (event_id, event_type, occurred_at, received_at, status)
-         VALUES ($1, $2, $3, $4, 'received')
+         VALUES ($1, $2, ${ms(3)}, ${ms(4)}, 'received')
          ON CONFLICT (event_id) DO UPDATE SET event_id = paddle_events.event_id -- no-op so RETURNING yields the stored row
          RETURNING status`,
         [e.eventId, e.eventType, e.occurredAt, e.receivedAt],
@@ -43,7 +47,7 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
     async recordFailure(reason, at) {
       await query(
         `INSERT INTO paddle_failures (bucket, reason, hits, last_at)
-         VALUES (date_trunc('minute', $1::timestamptz), $2, 1, $1::timestamptz)
+         VALUES (date_trunc('minute', $1::timestamptz), $2, 1, ${ms(1)})
          ON CONFLICT (bucket, reason) DO UPDATE
            SET hits = paddle_failures.hits + 1, last_at = GREATEST(paddle_failures.last_at, EXCLUDED.last_at)`,
         [at.toISOString(), reason],
@@ -51,7 +55,7 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
     },
     async upsertCustomer(c) {
       const { rows } = await query(
-        `INSERT INTO paddle_customers (customer_id, email, last_event_at) VALUES ($1, $2, $3)
+        `INSERT INTO paddle_customers (customer_id, email, last_event_at) VALUES ($1, $2, ${ms(3)})
          ON CONFLICT (customer_id) DO UPDATE
            SET email = EXCLUDED.email, last_event_at = EXCLUDED.last_event_at, updated_at = now()
            WHERE paddle_customers.last_event_at <= EXCLUDED.last_event_at
@@ -65,7 +69,7 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
         `INSERT INTO paddle_subscriptions
            (subscription_id, customer_id, user_id, status, price_ids, current_period_end, scheduled_change,
             canceled_at, past_due_since, last_event_at, raw)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, $8, $9, $10, $11::jsonb)
+         VALUES ($1, $2, $3, $4, $5::jsonb, ${ms(6)}, $7::jsonb, ${ms(8)}, ${ms(9)}, ${ms(10)}, $11::jsonb)
          ON CONFLICT (subscription_id) DO UPDATE SET
            customer_id = EXCLUDED.customer_id,
            user_id = COALESCE(EXCLUDED.user_id, paddle_subscriptions.user_id),
@@ -107,7 +111,7 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
         [since, until],
       );
       const { rows: [last] } = await query(
-        `SELECT at, reason FROM (
+        `SELECT at, coalesce(reason, 'store_error') AS reason FROM (
            SELECT received_at AS at, reason FROM paddle_events WHERE status = 'failed'
            UNION ALL
            SELECT last_at AS at, reason FROM paddle_failures

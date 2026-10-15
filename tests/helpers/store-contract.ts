@@ -179,5 +179,22 @@ export function runStoreContract(name: string, makeStore: () => Promise<Store>):
       expect(again?.status).toBe('active');
       expect(again?.priceIds).toEqual(['pri_pro']);
     });
+
+    it('re-upserting a read-back row with the same lastEventAt applies, despite sub-millisecond precision', async () => {
+      await store.upsertSubscription(sub({ lastEventAt: '2026-10-10T00:00:00.621022Z' }));
+      const back = await store.getSubscription('sub_1');
+      expect(back).not.toBeNull();
+      expect(await store.upsertSubscription({ ...back!, status: 'past_due' })).toEqual({ applied: true });
+      expect((await store.getSubscription('sub_1'))?.status).toBe('past_due');
+      // Same millisecond, different microseconds: equal at ms precision, so it applies.
+      expect(await store.upsertSubscription(sub({ status: 'paused', lastEventAt: '2026-10-10T00:00:00.621999Z' }))).toEqual({ applied: true });
+      expect((await store.getSubscription('sub_1'))?.status).toBe('paused');
+    });
+
+    it('reports store_error for a failed event marked with a null reason', async () => {
+      await store.recordEvent(ev('evt_nr', '2026-10-15T11:00:00.000Z'));
+      await store.markEvent('evt_nr', 'failed', null);
+      expect((await store.health(new Date('2026-10-15T12:00:00.000Z'))).lastFailureReason).toBe('store_error');
+    });
   });
 }
