@@ -75,5 +75,108 @@ export function runStoreContract(name: string, makeStore: () => Promise<Store>):
         unlinkedLast24h: 1,
       });
     });
+
+    it('counts a failure hit only inside the (now-24h, now] window', async () => {
+      const now = new Date('2026-10-15T12:00:00.000Z');
+      const cases: [string, string, number][] = [
+        ['exactly now-24h', '2026-10-14T12:00:00.000Z', 0],
+        ['exactly now', '2026-10-15T12:00:00.000Z', 1],
+        ['1 minute in the future', '2026-10-15T12:01:00.000Z', 0],
+      ];
+      for (const [label, at, expected] of cases) {
+        const fresh = await makeStore();
+        await fresh.recordFailure('signature_mismatch', new Date(at));
+        expect((await fresh.health(now)).failedLast24h, `recordFailure at ${label}`).toBe(expected);
+      }
+    });
+
+    it('counts a failed event only inside the (now-24h, now] window', async () => {
+      const now = new Date('2026-10-15T12:00:00.000Z');
+      const cases: [string, string, number][] = [
+        ['exactly now-24h', '2026-10-14T12:00:00.000Z', 0],
+        ['exactly now', '2026-10-15T12:00:00.000Z', 1],
+        ['1 minute in the future', '2026-10-15T12:01:00.000Z', 0],
+      ];
+      for (const [label, receivedAt, expected] of cases) {
+        const fresh = await makeStore();
+        await fresh.recordEvent(ev('evt_w', receivedAt));
+        await fresh.markEvent('evt_w', 'failed', 'store_error');
+        expect((await fresh.health(now)).failedLast24h, `failed event received at ${label}`).toBe(expected);
+      }
+    });
+
+    it('takes lastFailure from a failed event received after every recordFailure hit', async () => {
+      await store.recordFailure('signature_mismatch', new Date('2026-10-15T11:00:00.000Z'));
+      await store.recordFailure('stale_timestamp', new Date('2026-10-15T11:10:00.000Z'));
+      await store.recordEvent(ev('evt_late_fail', '2026-10-15T11:30:00.000Z'));
+      await store.markEvent('evt_late_fail', 'failed', 'store_error');
+      const h = await store.health(new Date('2026-10-15T12:00:00.000Z'));
+      expect(h.lastFailureAt).toBe('2026-10-15T11:30:00.000Z');
+      expect(h.lastFailureReason).toBe('store_error');
+      expect(h.failedLast24h).toBe(3);
+    });
+
+    it('recordEvent on an existing id never changes the stored status or receivedAt', async () => {
+      const now = new Date('2026-10-15T12:00:00.000Z');
+      await store.recordEvent(ev('evt_f2'));
+      await store.markEvent('evt_f2', 'failed', 'store_error');
+      expect(await store.recordEvent(ev('evt_f2'))).toEqual({ alreadyDone: false });
+      const failed = await store.health(now);
+      expect(failed.failedLast24h).toBe(1);
+      expect(failed.lastFailureReason).toBe('store_error');
+
+      await store.recordEvent(ev('evt_p', '2026-10-15T10:00:00.000Z'));
+      await store.markEvent('evt_p', 'processed', null);
+      const before = await store.health(now);
+      expect(await store.recordEvent(ev('evt_p', '2026-10-15T11:00:00.000Z'))).toEqual({ alreadyDone: true });
+      expect((await store.health(now)).lastEventAt).toBe(before.lastEventAt);
+      expect(before.lastEventAt).toBe('2026-10-15T10:00:00.000Z');
+    });
+
+    it('does not count an unlinked event received two days ago', async () => {
+      await store.recordEvent(ev('evt_old_unlinked', '2026-10-13T12:00:00.000Z'));
+      await store.markEvent('evt_old_unlinked', 'processed', 'no_user_id');
+      expect((await store.health(new Date('2026-10-15T12:00:00.000Z'))).unlinkedLast24h).toBe(0);
+    });
+
+    it('a rejected stale upsert does not backfill a stored null userId', async () => {
+      await store.upsertSubscription(sub({ userId: null, lastEventAt: '2026-10-10T00:00:00.000Z' }));
+      expect(await store.upsertSubscription(sub({ userId: 'user_x', lastEventAt: '2026-10-09T00:00:00.000Z' }))).toEqual({ applied: false });
+      expect((await store.getSubscription('sub_1'))?.userId).toBeNull();
+    });
+
+    it('a newer upsert with a different userId replaces the stored one', async () => {
+      await store.upsertSubscription(sub({ userId: 'user_1', lastEventAt: '2026-10-10T00:00:00.000Z' }));
+      expect(await store.upsertSubscription(sub({ userId: 'user_2', lastEventAt: '2026-10-11T00:00:00.000Z' }))).toEqual({ applied: true });
+      expect((await store.getSubscription('sub_1'))?.userId).toBe('user_2');
+    });
+
+    it('applies a customer with an equal lastEventAt', async () => {
+      await store.upsertCustomer({ customerId: 'ctm_1', email: 'a@x.com', lastEventAt: '2026-10-10T00:00:00.000Z' });
+      expect(await store.upsertCustomer({ customerId: 'ctm_1', email: 'b@x.com', lastEventAt: '2026-10-10T00:00:00.000Z' })).toEqual({ applied: true });
+    });
+
+    it('compares lastEventAt as instants across timestamp formats', async () => {
+      await store.upsertSubscription(sub({ status: 'active', lastEventAt: '2026-10-10T00:00:00.000Z' }));
+      // Same instant written with a +01:00 offset: equal, so it applies.
+      expect(await store.upsertSubscription(sub({ status: 'canceled', lastEventAt: '2026-10-10T01:00:00+01:00' }))).toEqual({ applied: true });
+      // One second earlier as an instant: rejected.
+      expect(await store.upsertSubscription(sub({ status: 'active', lastEventAt: '2026-10-09T23:59:59Z' }))).toEqual({ applied: false });
+      expect((await store.getSubscription('sub_1'))?.status).toBe('canceled');
+    });
+
+    it('isolates stored subscriptions from mutation of inputs and outputs', async () => {
+      const input = sub();
+      await store.upsertSubscription(input);
+      input.status = 'canceled';
+      input.priceIds.push('pri_extra');
+      const got = await store.getSubscription('sub_1');
+      expect(got?.status).toBe('active');
+      expect(got?.priceIds).toEqual(['pri_pro']);
+      if (got) { got.status = 'canceled'; got.priceIds.push('pri_extra'); }
+      const again = await store.getSubscription('sub_1');
+      expect(again?.status).toBe('active');
+      expect(again?.priceIds).toEqual(['pri_pro']);
+    });
   });
 }
