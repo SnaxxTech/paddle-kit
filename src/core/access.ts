@@ -22,7 +22,7 @@ export function grantsAccess(sub: Subscription, now: Date, graceDays: number): b
 
 export function decideAccess(subs: Subscription[], feature: string, policy: AccessPolicy, now: Date): boolean {
   return subs.some(
-    (s) => grantsAccess(s, now, policy.pastDueGraceDays) && s.priceIds.some((p) => policy.entitlements[p]?.includes(feature) ?? false),
+    (s) => grantsAccess(s, now, policy.pastDueGraceDays) && s.priceIds.some((p) => Object.hasOwn(policy.entitlements, p) && policy.entitlements[p]!.includes(feature)),
   );
 }
 

@@ -37,6 +37,9 @@ describe('decideAccess', () => {
   it('unknown price grants nothing and does not throw', () => {
     expect(decideAccess([sub({ priceIds: ['pri_new_unmapped'] })], 'pro', policy, NOW)).toBe(false);
   });
+  it.each(['constructor', '__proto__', 'toString'])('price id %s that collides with an Object.prototype key grants nothing and does not throw', (id) => {
+    expect(decideAccess([sub({ priceIds: [id] })], 'pro', policy, NOW)).toBe(false);
+  });
   it('multi-item: the mapped item still grants', () => {
     expect(decideAccess([sub({ priceIds: ['pri_addon_unmapped', 'pri_team'] })], 'team', policy, NOW)).toBe(true);
   });
