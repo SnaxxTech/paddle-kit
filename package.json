@@ -1,6 +1,6 @@
 {
   "name": "paddle-kit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -22,6 +22,10 @@
     "./postgres": {
       "types": "./dist/postgres/index.d.ts",
       "import": "./dist/postgres/index.js"
+    },
+    "./sqlite": {
+      "types": "./dist/sqlite/index.d.ts",
+      "import": "./dist/sqlite/index.js"
     },
     "./next": {
       "types": "./dist/next/index.d.ts",
@@ -76,8 +80,10 @@
     "@electric-sql/pglite": "^0.5.10",
     "@paddle/paddle-js": "^1.6.5",
     "@paddle/paddle-node-sdk": "^3.10.0",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.5",
+    "better-sqlite3": "^12.11.1",
     "express": "^5.3.0",
     "hono": "^4.13.13",
     "tsup": "^8.5.1",

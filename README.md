@@ -116,6 +116,42 @@ export default async function Dashboard() {
 - `pg` `Pool#query`, `@neondatabase/serverless` `Pool#query` and PGlite `db.query` match directly. Wrap in an arrow (as above) so `this` stays bound.
 - Neon's HTTP driver: use `neon(url, { fullResults: true }).query`. Calling `neon(...)` itself as `sql(text, params)` throws in `@neondatabase/serverless` v1+. **UNVERIFIED by us** (not run against a real Neon HTTP endpoint).
 
+### SQLite (better-sqlite3)
+
+`sqliteStore` takes `{ db }`, any object with `prepare(sql)` (returning `run`/`get`/`all`) and `exec(sql)`; `better-sqlite3` matches directly. Node only (not for edge runtimes). Run the migrations once at startup; they are `CREATE ... IF NOT EXISTS` on `paddle_*` tables, so re-running is harmless. Timestamps are stored as epoch milliseconds (INTEGER).
+
+```ts
+import Database from 'better-sqlite3';
+import { createBilling } from 'paddle-kit/core';
+import { SQLITE_MIGRATIONS, sqliteStore } from 'paddle-kit/sqlite';
+
+const db = new Database('app.db');
+for (const m of SQLITE_MIGRATIONS) db.exec(m.sql);
+
+export const billing = createBilling({
+  environment: 'sandbox',
+  webhookSecret: process.env.PADDLE_NOTIFICATION_WEBHOOK_SECRET,
+  store: sqliteStore({ db }),
+  entitlements: { pri_01abc: ['pro'] },
+});
+```
+
+### Checkout: several line items and Paddle.js events
+
+```ts
+import { createCheckout } from 'paddle-kit/client';
+
+const checkout = await createCheckout({
+  token: 'test_...',
+  environment: 'sandbox',
+  onEvent: (e) => console.log(e), // optional: every Paddle.js event (e.g. checkout.completed)
+});
+// One price:
+checkout.open({ priceId: 'pri_01abc', userId: 'org_1' });
+// Several line items (pass exactly one of priceId or items):
+checkout.open({ items: [{ priceId: 'pri_base', quantity: 1 }, { priceId: 'pri_extra', quantity: 12 }], userId: 'org_1' });
+```
+
 ## Hono
 
 ```ts
