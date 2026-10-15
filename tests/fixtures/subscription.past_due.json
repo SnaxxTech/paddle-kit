@@ -1,0 +1,215 @@
+{
+  "event_id": "ntfsimevt_01m50vy8gbbvbf30wk7wt065p5",
+  "event_type": "subscription.past_due",
+  "occurred_at": "2026-10-15T22:46:47.563376Z",
+  "notification_id": "ntfsimntf_01m50vyfewv8hnwr23168edk68",
+  "data": {
+    "id": "sub_01hv8x29kz0t586xy6zn1a62ny",
+    "items": [
+      {
+        "price": {
+          "id": "pri_01gsz8x8sawmvhz1pv30nge1ke",
+          "name": "Monthly (per seat)",
+          "type": "standard",
+          "status": "active",
+          "quantity": {
+            "maximum": 999,
+            "minimum": 1
+          },
+          "tax_mode": "account_setting",
+          "created_at": "2023-02-23T13:55:22.538367Z",
+          "product_id": "pro_01gsz4t5hdjse780zja8vvr7jg",
+          "unit_price": {
+            "amount": "3000",
+            "currency_code": "USD"
+          },
+          "updated_at": "2024-04-11T13:54:52.254748Z",
+          "custom_data": null,
+          "description": "Monthly",
+          "import_meta": null,
+          "trial_period": null,
+          "billing_cycle": {
+            "interval": "month",
+            "frequency": 1
+          },
+          "unit_price_overrides": []
+        },
+        "status": "active",
+        "product": {
+          "id": "pro_01gsz4t5hdjse780zja8vvr7jg",
+          "name": "AeroEdit Pro",
+          "type": "standard",
+          "status": "active",
+          "image_url": "https://paddle.s3.amazonaws.com/user/165798/bT1XUOJAQhOUxGs83cbk_pro.png",
+          "created_at": "2023-02-23T12:43:46.605Z",
+          "updated_at": "2024-04-05T15:53:44.687Z",
+          "custom_data": {
+            "features": {
+              "sso": false,
+              "route_planning": true,
+              "payment_by_invoice": false,
+              "aircraft_performance": true,
+              "compliance_monitoring": true,
+              "flight_log_management": true
+            },
+            "suggested_addons": [
+              "pro_01h1vjes1y163xfj1rh1tkfb65",
+              "pro_01gsz97mq9pa4fkyy0wqenepkz"
+            ],
+            "upgrade_description": "Move from Basic to Pro to take advantage of aircraft performance, advanced route planning, and compliance monitoring."
+          },
+          "description": "Designed for professional pilots, including all features plus in Basic plus compliance monitoring, route optimization, and third-party integrations.",
+          "import_meta": null,
+          "tax_category": "standard"
+        },
+        "quantity": 20,
+        "recurring": true,
+        "created_at": "2024-04-12T10:38:00.761Z",
+        "updated_at": "2024-04-12T10:49:38.76Z",
+        "trial_dates": null,
+        "next_billed_at": "2024-05-12T10:37:59.556997Z",
+        "previously_billed_at": "2024-04-12T10:37:59.556997Z"
+      },
+      {
+        "price": {
+          "id": "pri_01h1vjfevh5etwq3rb416a23h2",
+          "name": "Monthly (recurring addon)",
+          "type": "standard",
+          "status": "active",
+          "quantity": {
+            "maximum": 100,
+            "minimum": 1
+          },
+          "tax_mode": "account_setting",
+          "created_at": "2023-06-01T13:31:12.625056Z",
+          "product_id": "pro_01h1vjes1y163xfj1rh1tkfb65",
+          "unit_price": {
+            "amount": "10000",
+            "currency_code": "USD"
+          },
+          "updated_at": "2024-04-09T07:23:00.907834Z",
+          "custom_data": null,
+          "description": "Monthly",
+          "import_meta": null,
+          "trial_period": null,
+          "billing_cycle": {
+            "interval": "month",
+            "frequency": 1
+          },
+          "unit_price_overrides": []
+        },
+        "status": "active",
+        "product": {
+          "id": "pro_01h1vjes1y163xfj1rh1tkfb65",
+          "name": "Analytics addon",
+          "type": "standard",
+          "status": "active",
+          "image_url": "https://paddle.s3.amazonaws.com/user/165798/97dRpA6SXzcE6ekK9CAr_analytics.png",
+          "created_at": "2023-06-01T13:30:50.302Z",
+          "updated_at": "2024-04-05T15:47:17.163Z",
+          "custom_data": null,
+          "description": "Unlock advanced insights into your flight data with enhanced analytics and reporting features. Includes customizable reporting templates and trend analysis across flights.",
+          "import_meta": null,
+          "tax_category": "standard"
+        },
+        "quantity": 1,
+        "recurring": true,
+        "created_at": "2024-04-12T10:38:00.761Z",
+        "updated_at": "2024-04-12T10:38:00.761Z",
+        "trial_dates": null,
+        "next_billed_at": "2024-05-12T10:37:59.556997Z",
+        "previously_billed_at": "2024-04-12T10:37:59.556997Z"
+      },
+      {
+        "price": {
+          "id": "pri_01gsz95g2zrkagg294kpstx54r",
+          "name": "Monthly (recurring addon)",
+          "type": "standard",
+          "status": "active",
+          "quantity": {
+            "maximum": 1,
+            "minimum": 1
+          },
+          "tax_mode": "account_setting",
+          "created_at": "2023-02-23T13:59:52.159927Z",
+          "product_id": "pro_01gsz92krfzy3hcx5h5rtgnfwz",
+          "unit_price": {
+            "amount": "25000",
+            "currency_code": "USD"
+          },
+          "updated_at": "2024-04-09T07:27:48.018296Z",
+          "custom_data": null,
+          "description": "Monthly (recurring addon)",
+          "import_meta": null,
+          "trial_period": null,
+          "billing_cycle": {
+            "interval": "month",
+            "frequency": 1
+          },
+          "unit_price_overrides": []
+        },
+        "status": "active",
+        "product": {
+          "id": "pro_01gsz92krfzy3hcx5h5rtgnfwz",
+          "name": "VIP support",
+          "type": "standard",
+          "status": "active",
+          "image_url": "https://paddle.s3.amazonaws.com/user/165798/qgyipKJwRtq98YNboipo_vip-support.png",
+          "created_at": "2023-02-23T13:58:17.615Z",
+          "updated_at": "2024-04-05T15:44:02.893Z",
+          "custom_data": null,
+          "description": "Get exclusive access to our expert team of product specialists, available to help you make the most of your AeroEdit subscription.",
+          "import_meta": null,
+          "tax_category": "standard"
+        },
+        "quantity": 1,
+        "recurring": true,
+        "created_at": "2024-04-12T10:49:38.765Z",
+        "updated_at": "2024-04-12T10:49:38.765Z",
+        "trial_dates": null,
+        "next_billed_at": "2024-05-12T10:37:59.556997Z",
+        "previously_billed_at": "2024-04-12T10:49:38.765Z"
+      }
+    ],
+    "status": "past_due",
+    "discount": null,
+    "paused_at": null,
+    "address_id": "add_01hv8gq3318ktkfengj2r75gfx",
+    "created_at": "2024-04-12T10:38:00.761Z",
+    "started_at": "2024-04-12T10:37:59.556997Z",
+    "updated_at": "2026-10-15T22:46:47.507964Z",
+    "business_id": null,
+    "canceled_at": null,
+    "custom_data": null,
+    "customer_id": "ctm_01hv6y1jedq4p1n0yqn5ba3ky4",
+    "import_meta": null,
+    "billing_cycle": {
+      "interval": "month",
+      "frequency": 1
+    },
+    "currency_code": "USD",
+    "next_billed_at": "2024-05-12T10:37:59.556997Z",
+    "billing_details": null,
+    "collection_mode": "automatic",
+    "first_billed_at": "2024-04-12T10:37:59.556997Z",
+    "scheduled_change": null,
+    "consent_requirements": [
+      {
+        "id": "subconreq_01hv8z8vpk6z4r6ea5f6g2q8yz",
+        "status": "pending",
+        "voided_at": null,
+        "created_at": "2024-04-12T10:38:00.761Z",
+        "granted_at": null,
+        "requirement": "introductory_discount_ending",
+        "consent_period": {
+          "ends_at": "2024-05-12T10:37:59.556997Z",
+          "starts_at": "2024-05-05T10:37:59.556997Z"
+        }
+      }
+    ],
+    "current_billing_period": {
+      "ends_at": "2024-05-12T10:37:59.556997Z",
+      "starts_at": "2024-04-12T10:37:59.556997Z"
+    }
+  }
+}

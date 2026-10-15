@@ -186,7 +186,8 @@ The webhook path itself only writes to your store; it never calls the Paddle API
 
 ## Verification status
 
-- Test fixtures are Paddle docs example payloads (Apr 2024), **not** captures from the sandbox webhook simulator. A real sandbox checkout through a tunnel is still an open verification gap.
+- **Sandbox end to end (2026-10-16):** real Paddle-signed simulator deliveries through a tunnel into paddle-kit on Postgres (PGlite). A subscription for a known user turned `hasAccess` on, `past_due` kept access and started the grace clock, `canceled` turned it off, a failed-renewal burst ended `canceled`, a wrong webhook secret gave 401 with `signature_mismatch` in health, and `reconcile` ran against the real sandbox API. Test fixtures are those captured payloads (see `tests/fixtures/SOURCES.md`).
+- Still **UNVERIFIED**: a real checkout (Paddle.js with a test card) and a real renewal. In particular, whether `current_billing_period` advances when a renewal fails; the simulator's demo subscription keeps a fixed period.
 - The edge-runtime test and `npm run check:edge` cover API use, not every edge host's quirks; a deploy to a real edge target is **UNVERIFIED**.
 - The Neon HTTP driver usage above is **UNVERIFIED** by us.
 

@@ -1,16 +1,16 @@
 {
-  "event_id": "evt_01hv6y1jtn1fr98zq3cvarxx2e",
+  "event_id": "ntfsimevt_01m50vv408ze44qvhrqjkt2dmf",
   "event_type": "customer.created",
-  "occurred_at": "2024-04-11T15:57:25.205966Z",
-  "notification_id": "ntf_01hv6y1jx2m6n1qk95m0cj69dg",
+  "occurred_at": "2026-10-15T22:45:04.648555Z",
+  "notification_id": "ntfsimntf_01m50vv5e7996qczgbnfxpm4eq",
   "data": {
     "id": "ctm_01hv6y1jedq4p1n0yqn5ba3ky4",
     "name": "Jo Brown",
     "email": "jo@example.com",
     "locale": "en",
     "status": "active",
-    "created_at": "2024-04-11T15:57:24.813Z",
-    "updated_at": "2024-04-11T15:57:24.813Z",
+    "created_at": "2026-10-15T22:45:04.630984Z",
+    "updated_at": "2026-10-15T22:45:04.630994Z",
     "custom_data": null,
     "import_meta": null,
     "marketing_consent": false

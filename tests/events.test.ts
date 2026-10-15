@@ -25,6 +25,16 @@ describe('parseEvent', () => {
     }
   });
 
+  it('normalises a real subscription.past_due from a failed renewal', () => {
+    const raw = loadFixture('subscription.past_due');
+    const ev = parseEvent(raw);
+    if (ev?.kind !== 'subscription') throw new Error('expected subscription');
+    expect(ev.eventType).toBe('subscription.past_due');
+    expect(ev.subscription.status).toBe('past_due');
+    expect(ev.subscription.currentPeriodEnd).toBe(raw.data.current_billing_period.ends_at);
+    expect(ev.subscription.userId).toBeNull();
+  });
+
   it('maps scheduled_change and current_billing_period', () => {
     const ev = parseEvent(
       subscriptionEvent({
