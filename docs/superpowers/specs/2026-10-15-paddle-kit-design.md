@@ -141,11 +141,13 @@ Postgres schema, shipped as numbered SQL files in `migrations/`:
   short code (never secret or driver text).
 - `paddle_customers(customer_id PK, email, last_event_at, updated_at)` — the
   user link lives on subscriptions, where `custom_data.userId` arrives.
-- `paddle_failures(bucket timestamptz, reason, count, PK(bucket, reason))` —
+- `paddle_failures(bucket timestamptz, reason, hits, last_at, PK(bucket, reason))` —
   per-minute counters for failures that have no verified event id.
 - `paddle_subscriptions(subscription_id PK, customer_id, user_id, status,
-  price_ids text[], current_period_end, past_due_since, canceled_at,
-  last_event_at, raw jsonb, updated_at)`; index on `user_id`.
+  price_ids jsonb, current_period_end, scheduled_change jsonb, canceled_at,
+  past_due_since, last_event_at, raw jsonb, updated_at)`; index on `user_id`.
+  All timestamps are written at millisecond precision so read-back equals
+  stored (Paddle sends microseconds; JS dates hold milliseconds).
 
 **Migration / wipe risk:** additive only, new `paddle_`-prefixed tables, no
 change to any existing project table. Each project runs the migration itself;
