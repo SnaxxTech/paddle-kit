@@ -53,7 +53,7 @@ Web `Request` (raw body preserved), calls `core`, converts the `Response` back.
 ```ts
 const billing = createBilling({
   environment: 'sandbox' | 'production',
-  webhookSecret: process.env.PADDLE_WEBHOOK_SECRET,
+  webhookSecret: process.env.PADDLE_NOTIFICATION_WEBHOOK_SECRET,
   store: postgresStore({ sql }),
   // price → features this price unlocks
   entitlements: {
