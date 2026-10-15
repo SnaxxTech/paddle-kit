@@ -61,7 +61,7 @@ const billing = createBilling({
     pri_01def: ['pro', 'team'],
   },
   pastDueGraceDays: 7,
-  signatureToleranceSeconds: 5, // default taken from the official SDK; see §9
+  signatureToleranceSeconds: 5, // = @paddle/paddle-node-sdk 3.10.0 MAX_VALID_TIME_DIFFERENCE
 });
 ```
 
@@ -76,8 +76,11 @@ Guards, enforced at construction (throw, not warn):
 2. Parse `Paddle-Signature: ts=<unix>;h1=<hex>[;h1=<hex>]`. Multiple `h1`
    values are allowed (secret rotation); any match passes.
 3. Compute HMAC-SHA256 over `` `${ts}:${rawBody}` `` with the secret using Web
-   Crypto; compare in constant time.
-4. Reject if `|now − ts| > signatureToleranceSeconds`.
+   Crypto; compare in constant time. Mismatch → `signature_mismatch`.
+4. Then reject if `now > ts + signatureToleranceSeconds` (one-sided, as the
+   official SDK does; a future `ts` is not rejected) → `stale_timestamp`.
+   Checking the MAC first keeps a forged old header from being reported as
+   merely stale.
 5. Parse JSON, normalise to an internal event (`eventId`, `eventType`,
    `occurredAt`, entity payload).
 6. **Idempotency:** insert into `paddle_events` keyed by `event_id`; if it already
@@ -85,14 +88,22 @@ Guards, enforced at construction (throw, not warn):
 7. **Ordering:** for a subscription, apply the event only if its `occurred_at`
    is newer than the stored `last_event_at`; older events are recorded as
    `status = 'stale'` and acknowledged.
-8. Upsert customer / subscription inside one transaction with the event row update.
-9. Return 200.
+8. Upsert customer / subscription, then mark the event `processed`. No
+   interactive transaction is needed (Neon's HTTP driver has none): every write
+   is a single idempotent statement, the ordering guard lives in the upsert's
+   `WHERE`, and an event left in `received`/`failed` by a crash is simply
+   reprocessed on Paddle's retry.
+9. Return 200. The whole path must finish well inside Paddle's **5-second**
+   delivery deadline: store writes only, never a Paddle API call inline.
 
 Handled event types (v1): `subscription.created`, `subscription.updated`,
 `subscription.activated`, `subscription.trialing`, `subscription.past_due`,
 `subscription.paused`, `subscription.resumed`, `subscription.canceled`,
 `customer.created`, `customer.updated`, `transaction.completed`.
-Anything else is stored as `status = 'ignored'` and acknowledged with 200.
+`subscription.imported` is treated like `subscription.created`.
+`transaction.completed` is recorded as `processed` with no state change in v1
+(one-time purchases are deferred). Anything else is stored as
+`status = 'ignored'` and acknowledged with 200.
 
 ### User linking
 
@@ -118,15 +129,18 @@ config + `now`) so it is unit-testable without a store.
 ## 6. Storage
 
 `Store` interface (all methods async):
-`recordEvent`, `markEvent`, `upsertCustomer`, `upsertSubscription`,
-`getSubscriptionsByUser`, `getLastEventAt`, `withTransaction`.
+`recordEvent`, `markEvent`, `recordFailure`, `upsertCustomer`,
+`upsertSubscription`, `getSubscription`, `getSubscriptionsByUser`, `health`.
 
 Postgres schema, shipped as numbered SQL files in `migrations/`:
 
 - `paddle_events(event_id PK, event_type, occurred_at, received_at, status, reason)`
   — `status ∈ received|processed|ignored|stale|failed`, `reason` is our own
   short code (never secret or driver text).
-- `paddle_customers(customer_id PK, user_id, email, updated_at)`
+- `paddle_customers(customer_id PK, email, last_event_at, updated_at)` — the
+  user link lives on subscriptions, where `custom_data.userId` arrives.
+- `paddle_failures(bucket timestamptz, reason, count, PK(bucket, reason))` —
+  per-minute counters for failures that have no verified event id.
 - `paddle_subscriptions(subscription_id PK, customer_id, user_id, status,
   price_ids text[], current_period_end, past_due_since, canceled_at,
   last_event_at, raw jsonb, updated_at)`; index on `user_id`.
@@ -148,7 +162,10 @@ numbered files, never edits to shipped ones.
 | Out-of-order event | 200 | event `stale` |
 | Store failure | 500 (Paddle retries) | log `store_error`; event `failed` if writable |
 
-Unauthenticated failures are logged, not stored (no DB writes from unverified input).
+Paddle retries **every** non-2xx, so these codes only matter for logs and
+monitoring, not for retry behaviour. Unverified requests never write their
+content anywhere: they only increment a `paddle_failures` counter
+(reason × minute), so a flood costs one row per reason per minute.
 
 ## 8. Monitoring (critical module)
 
@@ -158,9 +175,10 @@ Unauthenticated failures are logged, not stored (no DB writes from unverified in
 2. **Why it failed:** reason codes from §7, in the log line and in `paddle_events`
    (and in the log alone when the store itself is down).
 3. **Where the owner sees it, how fast:** the health route (on demand), plus
-   Paddle's notification-failure emails to the account owner. Worst case is
-   bounded by Paddle's retry schedule — exact delay to be read from Paddle's
-   docs during implementation and written into the README.
+   Paddle's notification log. Paddle retries live deliveries 60 times over
+   ~3 days (sandbox: 3 times over ~15 min), then drops the event; so a broken
+   endpoint must be noticed within 3 days or `reconcile()` must run. Source:
+   Paddle's official `paddle-webhooks` agent skill, 2026-10-15.
 4. **Cost:** zero extra requests; one `paddle_events` row per webhook.
    `reconcile()` is opt-in, run by the project's existing cron; cost = one
    Paddle API list call per page of subscriptions.
@@ -171,10 +189,11 @@ Unauthenticated failures are logged, not stored (no DB writes from unverified in
 
 ## 9. Testing & acceptance
 
-- **Signature oracle:** the official `@paddle/paddle-node-sdk` webhook verifier
-  (dev dependency) must agree with `verifySignature` on valid, tampered,
-  rotated-secret and stale fixtures. The default tolerance is read from that
-  SDK's source, not assumed.
+- **Signature oracle:** the official `@paddle/paddle-node-sdk` (3.10.0)
+  `webhooks.isSignatureValid` must agree with `verifySignature` on valid,
+  tampered, wrong-secret and stale inputs. Known, intended divergence: with two
+  `h1` values the SDK keeps only the last one, we accept any; that case is
+  tested on its own, not against the oracle.
 - **Real payloads:** fixtures captured from Paddle's sandbox webhook simulator,
   not hand-written. Ordering and duplicate tests replay them shuffled and doubled.
 - **Pure access tests:** table-driven over status × grace × period end.
