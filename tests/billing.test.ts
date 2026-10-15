@@ -19,6 +19,15 @@ describe('createBilling guards', () => {
     vi.stubEnv('NODE_ENV', 'production');
     expect(() => createBilling({ ...base(), environment: 'production' })).not.toThrow();
   });
+  it('allows production when no NODE_ENV is available, as on Workers', () => {
+    const saved = (globalThis as any).process;
+    try {
+      (globalThis as any).process = undefined;
+      expect(() => createBilling({ ...base(), environment: 'production' })).not.toThrow();
+    } finally {
+      (globalThis as any).process = saved;
+    }
+  });
 });
 
 describe('hasAccess end to end through the webhook', () => {

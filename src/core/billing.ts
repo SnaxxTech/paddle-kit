@@ -32,7 +32,7 @@ const defaultLog: Logger = (entry) => console[entry.level](JSON.stringify({ sour
 export function createBilling(config: BillingConfig): Billing {
   if (!config.webhookSecret) throw new Error('paddle-kit: webhookSecret is required');
   const nodeEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.NODE_ENV;
-  if (config.environment === 'production' && nodeEnv !== 'production' && !config.allowProductionInDev) {
+  if (config.environment === 'production' && nodeEnv !== undefined && nodeEnv !== 'production' && !config.allowProductionInDev) {
     throw new Error('paddle-kit: environment "production" outside NODE_ENV=production; pass allowProductionInDev: true if intended');
   }
   const now = config.now ?? (() => new Date());
