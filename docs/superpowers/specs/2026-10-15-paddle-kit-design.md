@@ -36,13 +36,13 @@ Subpath exports:
 
 | Export | Contents | Runtime |
 |---|---|---|
-| `paddle-kit/core` | `verifySignature`, `createWebhookHandler`, event normalisation, `createBilling` (`hasAccess`, `getSubscription`), config types | Any Web-standard runtime (Node 20+, Vercel Edge, Cloudflare Workers) |
+| `paddle-kit/core` | `createBilling` (`handleWebhook`, `handleHealth`, `hasAccess`, `getSubscriptions`, `health`), `verifySignature`, `decideAccess`, all types | Any Web-standard runtime (Node 20+, Vercel Edge, Cloudflare Workers) |
 | `paddle-kit/next` | `createNextRoute(billing)` → App Router `POST` handler | Next.js 14+ |
-| `paddle-kit/hono` | `paddleWebhook(billing)` middleware | Hono |
-| `paddle-kit/express` | `paddleWebhook(billing)` with raw-body handling | Node / Express |
-| `paddle-kit/postgres` | `postgresStore({ sql })` + SQL migrations in `migrations/` | Any runtime with a Postgres client (Neon serverless, `pg`, `postgres`) |
+| `paddle-kit/hono` | `paddleWebhook(billing)`, `paddleHealth(billing)` handlers | Hono |
+| `paddle-kit/express` | `paddleWebhook(billing)` (raw-body handling), `paddleHealth(billing)` | Node / Express |
+| `paddle-kit/postgres` | `postgresStore({ query })` + `MIGRATIONS` / `migrations/001_init.sql` | Any runtime with a Postgres client (Neon serverless, `pg`, `postgres`) |
 | `paddle-kit/memory` | `memoryStore()` for tests and local dev | Any |
-| `paddle-kit/client` | `openCheckout({ priceId, userId, email })` wrapping Paddle.js | Browser |
+| `paddle-kit/client` | `createCheckout({ token, environment }).open({ priceId, userId, email })` wrapping Paddle.js | Browser |
 | `paddle-kit/reconcile` | `reconcile(billing)` — pulls state from the Paddle API | Node (uses `@paddle/paddle-node-sdk`) |
 
 Adapters contain no business logic: each converts its framework's request into a
@@ -54,7 +54,7 @@ Web `Request` (raw body preserved), calls `core`, converts the `Response` back.
 const billing = createBilling({
   environment: 'sandbox' | 'production',
   webhookSecret: process.env.PADDLE_NOTIFICATION_WEBHOOK_SECRET,
-  store: postgresStore({ sql }),
+  store: postgresStore({ query: (text, params) => pool.query(text, params) }),
   // price → features this price unlocks
   entitlements: {
     pri_01abc: ['pro'],
