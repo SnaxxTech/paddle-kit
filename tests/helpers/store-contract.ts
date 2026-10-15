@@ -158,11 +158,12 @@ export function runStoreContract(name: string, makeStore: () => Promise<Store>):
 
     it('compares lastEventAt as instants across timestamp formats', async () => {
       await store.upsertSubscription(sub({ status: 'active', lastEventAt: '2026-10-10T00:00:00.000Z' }));
-      // Same instant written with a +01:00 offset: equal, so it applies.
-      expect(await store.upsertSubscription(sub({ status: 'canceled', lastEventAt: '2026-10-10T01:00:00+01:00' }))).toEqual({ applied: true });
-      // One second earlier as an instant: rejected.
-      expect(await store.upsertSubscription(sub({ status: 'active', lastEventAt: '2026-10-09T23:59:59Z' }))).toEqual({ applied: false });
-      expect((await store.getSubscription('sub_1'))?.status).toBe('canceled');
+      // String-greater but instant 2026-10-09T23:30Z, which is older: must be rejected.
+      expect(await store.upsertSubscription(sub({ status: 'canceled', lastEventAt: '2026-10-10T00:30:00+01:00' }))).toEqual({ applied: false });
+      expect((await store.getSubscription('sub_1'))?.status).toBe('active');
+      // Same instant, different string: equal, so it applies.
+      expect(await store.upsertSubscription(sub({ status: 'past_due', lastEventAt: '2026-10-10T00:00:00Z' }))).toEqual({ applied: true });
+      expect((await store.getSubscription('sub_1'))?.status).toBe('past_due');
     });
 
     it('isolates stored subscriptions from mutation of inputs and outputs', async () => {
