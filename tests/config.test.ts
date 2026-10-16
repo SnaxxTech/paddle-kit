@@ -219,6 +219,23 @@ describe('readBillingEnv', () => {
     expect(problemsOf({ ...valid, PADDLE_PRICES: JSON.stringify({ ...nested, team: { monthly: ' ', yearly: 'pri_y' } }) })).toContain('team');
   });
 
+  it('leading or trailing whitespace in the secret, a price id or the client token is a problem, never echoed', () => {
+    const cases: Record<string, Record<string, string>> = {
+      PADDLE_NOTIFICATION_WEBHOOK_SECRET: { PADDLE_NOTIFICATION_WEBHOOK_SECRET: SECRET + '\n' },
+      NEXT_PUBLIC_PADDLE_CLIENT_TOKEN: { NEXT_PUBLIC_PADDLE_CLIENT_TOKEN: ' test_TOKEN_distinct_55' },
+      'PADDLE_PRICES flat': { PADDLE_PRICES: JSON.stringify({ ...nested, pack: 'pri_PRICE_pack_79 ' }) },
+      'PADDLE_PRICES nested': { PADDLE_PRICES: JSON.stringify({ ...nested, team: { monthly: ' pri_PRICE_team_m_77', yearly: 'pri_y' } }) },
+    };
+    for (const [name, over] of Object.entries(cases)) {
+      const { config, problems } = readBillingEnv({ ...valid, ...over }, OPTS);
+      expect(config, name).toBeNull();
+      expect(problems.length, name).toBeGreaterThan(0);
+      const all = problems.join('\n');
+      expect(all, name).toContain(name.split(' ')[0]);
+      for (const frag of ['DISTINCTIVE', 'TOKEN_distinct', 'PRICE_']) expect(all, name).not.toContain(frag);
+    }
+  });
+
   it('an invalid PADDLE_ENV does not also produce a client-token or api-key mismatch', () => {
     const { problems } = readBillingEnv({ ...valid, PADDLE_ENV: 'prod', NEXT_PUBLIC_PADDLE_CLIENT_TOKEN: 'live_t', PADDLE_API_KEY: 'pdl_live_k' }, OPTS);
     expect(problems).toEqual(['PADDLE_ENV must be "sandbox" or "production"']);

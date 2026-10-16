@@ -299,7 +299,7 @@ function paddleClient(base: string, apiKey: string, fetchImpl: FetchLike, known:
 export interface SyncOptions {
   apiKey: string;
   catalog: Catalog;
-  /** Full https URL Paddle should POST to. Enables the destination, client token and PADDLE_ENV steps. */
+  /** Full https URL Paddle should POST to. Enables the destination and client-token steps (PADDLE_ENV is always written). */
   webhookUrl?: string;
   /** Env file to read/write incrementally (mode 0600). Without it nothing is written and `env` is returned. */
   envFile?: string;

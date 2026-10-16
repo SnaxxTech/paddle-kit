@@ -192,6 +192,7 @@ describe('parseEvent', () => {
       expect(ev.adjustment).toEqual({
         adjustmentId: 'adj_01hvgf2s84dr6reszzg29zbvcm',
         action: 'refund',
+        type: 'partial',
         status: 'pending_approval',
         transactionId: 'txn_01hvcc93znj3mpqt1tenkjb04y',
         subscriptionId: 'sub_01hvccbx32q2gb40sqx7n42430',
@@ -213,6 +214,22 @@ describe('parseEvent', () => {
       if (ev?.kind !== 'adjustment') throw new Error('expected adjustment');
       expect(ev.adjustment.status).toBe('approved');
       expect(ev.adjustment.subscriptionId).toBeNull();
+    });
+
+    it('normalises adjustment type to full | partial | null', () => {
+      const typeOf = (t: unknown) => {
+        const raw = loadFixture('adjustment.created');
+        if (t === undefined) delete raw.data.type;
+        else raw.data.type = t;
+        const ev = parseEvent(raw);
+        if (ev?.kind !== 'adjustment') throw new Error('expected adjustment');
+        return ev.adjustment.type;
+      };
+      expect(typeOf('full')).toBe('full');
+      expect(typeOf('partial')).toBe('partial');
+      expect(typeOf('something_new')).toBeNull();
+      expect(typeOf(undefined)).toBeNull();
+      expect(typeOf(5)).toBeNull();
     });
 
     it.each(['id', 'transaction_id'])('returns null for an adjustment without data.%s', (field) => {

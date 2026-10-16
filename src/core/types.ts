@@ -61,6 +61,8 @@ export interface Adjustment {
   adjustmentId: string;
   /** refund | credit | chargeback | chargeback_warning | … */
   action: string;
+  /** `full` or `partial` (from Paddle's `type`); `null` when absent or not recognised. Only act on a `full` refund automatically. */
+  type: 'full' | 'partial' | null;
   /** pending_approval | approved | rejected | reversed */
   status: string;
   transactionId: string;

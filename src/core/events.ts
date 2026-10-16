@@ -132,6 +132,7 @@ export function parseEvent(json: unknown): NormalisedEvent | null {
       adjustment: {
         adjustmentId: data.id,
         action: optStr(data.action) ?? 'unknown',
+        type: data.type === 'full' || data.type === 'partial' ? data.type : null,
         status: optStr(data.status) ?? 'unknown',
         transactionId: data.transaction_id,
         subscriptionId: optStr(data.subscription_id),

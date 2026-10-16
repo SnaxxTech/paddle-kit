@@ -41,7 +41,8 @@ const WATCHED = [
 // ISO 8601 date-time with a mandatory timezone (Z or +hh:mm / +hhmm).
 const ISO_WITH_ZONE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/;
 
-const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0;
+// A usable id/secret: non-empty and without leading/trailing whitespace (a pasted newline would silently break signatures and lookups).
+const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0 && v === v.trim();
 const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
 function parsePrice(v: unknown): string | Record<string, string> | null {
@@ -72,7 +73,8 @@ export function readBillingEnv(
   }
 
   const webhookSecret = env.PADDLE_NOTIFICATION_WEBHOOK_SECRET;
-  if (!nonEmpty(webhookSecret)) problems.push('PADDLE_NOTIFICATION_WEBHOOK_SECRET is missing');
+  if (!webhookSecret?.trim()) problems.push('PADDLE_NOTIFICATION_WEBHOOK_SECRET is missing');
+  else if (webhookSecret !== webhookSecret.trim()) problems.push('PADDLE_NOTIFICATION_WEBHOOK_SECRET has leading or trailing whitespace');
 
   let prices: PriceMap | null = null;
   if (!env.PADDLE_PRICES) {
@@ -118,6 +120,7 @@ export function readBillingEnv(
   const envValid = !env.PADDLE_ENV || env.PADDLE_ENV === 'sandbox' || env.PADDLE_ENV === 'production';
   const clientToken = env.NEXT_PUBLIC_PADDLE_CLIENT_TOKEN ?? '';
   if (!clientToken.trim()) problems.push('NEXT_PUBLIC_PADDLE_CLIENT_TOKEN is missing');
+  else if (clientToken !== clientToken.trim()) problems.push('NEXT_PUBLIC_PADDLE_CLIENT_TOKEN has leading or trailing whitespace');
   else if (envValid && !clientToken.startsWith(environment === 'production' ? 'live_' : 'test_'))
     problems.push('NEXT_PUBLIC_PADDLE_CLIENT_TOKEN does not match PADDLE_ENV (test_ = sandbox, live_ = production)');
 
