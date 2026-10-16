@@ -78,6 +78,7 @@
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
+    "test:pg": "vitest run tests/pg-concurrency.test.ts",
     "typecheck": "tsc --noEmit",
     "check:edge": "node scripts/check-edge.mjs",
     "smoke": "node scripts/smoke-pack.mjs"
