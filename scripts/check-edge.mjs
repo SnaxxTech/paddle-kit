@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
-const EDGE_SAFE = ['core', 'memory', 'postgres', 'next', 'hono'];
+const EDGE_SAFE = ['core', 'memory', 'postgres', 'next', 'hono', 'plan', 'config'];
 const files = readdirSync('dist', { recursive: true })
   .map(String)
   .filter((f) => f.endsWith('.js'))

@@ -11,6 +11,8 @@ export default defineConfig({
     'express/index': 'src/express/index.ts',
     'client/index': 'src/client/index.ts',
     'reconcile/index': 'src/reconcile/index.ts',
+    'plan/index': 'src/plan/index.ts',
+    'config/index': 'src/config/index.ts',
   },
   format: ['esm'],
   dts: true,

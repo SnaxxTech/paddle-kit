@@ -46,6 +46,14 @@
     "./reconcile": {
       "types": "./dist/reconcile/index.d.ts",
       "import": "./dist/reconcile/index.js"
+    },
+    "./plan": {
+      "types": "./dist/plan/index.d.ts",
+      "import": "./dist/plan/index.js"
+    },
+    "./config": {
+      "types": "./dist/config/index.d.ts",
+      "import": "./dist/config/index.js"
     }
   },
   "scripts": {
