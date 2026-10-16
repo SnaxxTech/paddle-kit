@@ -20,7 +20,12 @@ export interface PlanInput {
    * app (e.g. a BILLING_ENFORCE flag) before acting on an `expired` plan.
    */
   launchAt: number | null;
-  /** Trial length in days. 0 (or negative / non-finite) means no trial. */
+  /**
+   * Trial length in days. 0 (or negative / non-finite) means no trial: the plan is `expired` immediately,
+   * even when `launchAt` is still in the future (`endedAt` is then the launch time). So gate enforcement
+   * on the launch (e.g. `now >= launchAt` or a BILLING_ENFORCE flag) before acting on `expired`.
+   * Apps with a free tier use `trialDays: 0` and treat `expired` as "free limits", not as a lockout.
+   */
   trialDays: number;
   /** Has an active paid subscription. */
   subscribed: boolean;

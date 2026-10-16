@@ -51,7 +51,7 @@ export interface Transaction {
   currency: string | null;
   /** Grand total (tax-inclusive) in the currency's lowest unit, as Paddle sends it (a string). */
   total: string | null;
-  /** Pre-tax subtotal in the lowest unit (string). Compare money against this, not `total`. */
+  /** Subtotal in the lowest unit (string): before discount and tax (net of tax for tax-inclusive prices). Don't equality-check it against a list price; verify by items and currency. */
   subtotal: string | null;
   occurredAt: string;
   raw: unknown;
@@ -69,7 +69,7 @@ export interface Adjustment {
   currency: string | null;
   /** Adjusted amount (tax-inclusive) in the currency's lowest unit, as Paddle sends it (a string). */
   total: string | null;
-  /** Pre-tax adjusted amount in the lowest unit (string). */
+  /** Adjusted amount before tax in the lowest unit (string). */
   subtotal: string | null;
   occurredAt: string;
   raw: unknown;

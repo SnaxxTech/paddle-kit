@@ -148,7 +148,7 @@ describe('readBillingEnv', () => {
 
   it('problem strings never contain any planted secret, token, key or price value', () => {
     const planted = {
-      PADDLE_ENV: 'bogus_ENV_VALUE_1',
+      PADDLE_ENV: 'production',
       PADDLE_NOTIFICATION_WEBHOOK_SECRET: SECRET,
       PADDLE_PRICES: JSON.stringify({ team: { monthly: 'pri_PLANTED_m', yearly: 7 }, pack: 'pri_PLANTED_p', bonus: ['pri_PLANTED_arr'] }),
       NEXT_PUBLIC_PADDLE_CLIENT_TOKEN: 'wrongprefix_TOKEN_PLANTED',
@@ -160,10 +160,67 @@ describe('readBillingEnv', () => {
     expect(config).toBeNull();
     expect(problems.length).toBeGreaterThanOrEqual(5);
     const all = problems.join('\n');
-    for (const value of Object.values(planted)) expect(all).not.toContain(value);
-    for (const frag of ['PLANTED', 'DISTINCTIVE', 'bogus_ENV_VALUE_1', 'pri_']) expect(all).not.toContain(frag);
-    // invalid JSON must not echo a fragment either
-    const bad = readBillingEnv({ ...valid, PADDLE_PRICES: '{"team": PLANTED_FRAG' }, OPTS);
-    expect(bad.problems.join('\n')).not.toContain('PLANTED_FRAG');
+    for (const [name, value] of Object.entries(planted)) if (name !== 'PADDLE_ENV') expect(all).not.toContain(value); // PADDLE_ENV's valid value is legitimately named in messages
+    for (const frag of ['PLANTED', 'DISTINCTIVE', 'pri_']) expect(all).not.toContain(frag);
+    // an unknown PADDLE_ENV value is not echoed either
+    const bogus = readBillingEnv({ ...valid, PADDLE_ENV: 'bogus_ENV_VALUE_1' }, OPTS);
+    expect(bogus.problems.join('\n')).toContain('PADDLE_ENV');
+    expect(bogus.problems.join('\n')).not.toContain('bogus_ENV_VALUE_1');
+  });
+
+  it('invalid PADDLE_PRICES JSON never echoes any fragment of the value (parser messages quote it)', () => {
+    for (const raw of ['{"team": PLANTED_FRAG_1', '{"team": "x", PLANTED_FRAG_2: 1}', 'PLANTED_FRAG_3 {']) {
+      const { config, problems } = readBillingEnv({ ...valid, PADDLE_PRICES: raw }, OPTS);
+      expect(config).toBeNull();
+      expect(problems.join('\n')).toContain('PADDLE_PRICES');
+      expect(problems.join('\n')).not.toContain('PLANTED_FRAG');
+    }
+  });
+
+  it('a distinctive extra PADDLE_PRICES key is never echoed, even when its value is malformed', () => {
+    const extra = { ...nested, EXTRA_KEY_PLANTED_88: ['pri_EXTRA_VAL_PLANTED'], other_PLANTED_KEY_2: 3 };
+    const { config, problems } = readBillingEnv({ ...valid, PADDLE_PRICES: JSON.stringify(extra) }, OPTS);
+    expect(config).toBeNull();
+    expect(problems.join('\n')).toContain('PADDLE_PRICES');
+    expect(problems.join('\n')).not.toContain('PLANTED');
+    // a malformed REQUIRED entry may be named (the caller supplied the key), but never its value
+    const req = readBillingEnv({ ...valid, PADDLE_PRICES: JSON.stringify({ ...nested, team: { monthly: 'pri_VAL_PLANTED_9', yearly: 4 } }) }, OPTS);
+    expect(req.problems.join('\n')).toContain('team');
+    expect(req.problems.join('\n')).not.toContain('PLANTED');
+  });
+
+  describe('requiredCycles', () => {
+    const cycles = { ...OPTS, requiredCycles: ['monthly', 'yearly'] };
+    it('passes when every nested required entry has every cycle; flat entries are exempt', () => {
+      expect(readBillingEnv(valid, cycles).problems).toEqual([]);
+    });
+    it('names the required key and the missing cycle, never the price id', () => {
+      const prices = { team: { monthly: 'pri_ONLY_MONTHLY_PLANTED' }, pack: 'pri_p' };
+      const { config, problems } = readBillingEnv({ ...valid, PADDLE_PRICES: JSON.stringify(prices) }, cycles);
+      expect(config).toBeNull();
+      const all = problems.join('\n');
+      expect(all).toContain('team');
+      expect(all).toContain('yearly');
+      expect(all).not.toContain('monthly"'); // the present cycle is not reported
+      expect(all).not.toContain('PLANTED');
+    });
+    it('only enforced for requiredPrices, not for extra entries; absent option enforces nothing', () => {
+      const prices = { ...nested, bonus: { monthly: 'pri_b' } };
+      expect(readBillingEnv({ ...valid, PADDLE_PRICES: JSON.stringify(prices) }, cycles).problems).toEqual([]);
+      const thin = { team: { monthly: 'pri_t' }, pack: 'pri_p' };
+      expect(readBillingEnv({ ...valid, PADDLE_PRICES: JSON.stringify(thin) }, OPTS).problems).toEqual([]);
+    });
+  });
+
+  it('whitespace-only ids and secret are problems', () => {
+    expect(problemsOf({ ...valid, PADDLE_NOTIFICATION_WEBHOOK_SECRET: '   ' })).toContain('PADDLE_NOTIFICATION_WEBHOOK_SECRET');
+    expect(readBillingEnv({ ...valid, PADDLE_NOTIFICATION_WEBHOOK_SECRET: '\t\n ' }, OPTS).config).toBeNull();
+    expect(problemsOf({ ...valid, PADDLE_PRICES: JSON.stringify({ ...nested, pack: '  ' }) })).toContain('pack');
+    expect(problemsOf({ ...valid, PADDLE_PRICES: JSON.stringify({ ...nested, team: { monthly: ' ', yearly: 'pri_y' } }) })).toContain('team');
+  });
+
+  it('an invalid PADDLE_ENV does not also produce a client-token or api-key mismatch', () => {
+    const { problems } = readBillingEnv({ ...valid, PADDLE_ENV: 'prod', NEXT_PUBLIC_PADDLE_CLIENT_TOKEN: 'live_t', PADDLE_API_KEY: 'pdl_live_k' }, OPTS);
+    expect(problems).toEqual(['PADDLE_ENV must be "sandbox" or "production"']);
   });
 });

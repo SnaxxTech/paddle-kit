@@ -64,9 +64,11 @@ export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<
         return applied ? { status: 'processed', reason: null } : { status: 'stale', reason: 'out_of_order' };
       }
       case 'transaction': {
-        const ctx: HookContext = { eventId: ev.eventId, eventType: ev.eventType, store: d.store };
         // transaction.paid is record-only: the hook fires once, on transaction.completed (Paddle's fully-processed signal)
-        if (ev.eventType === 'transaction.completed') await runHook(d.onTransaction && (() => d.onTransaction!(ev.transaction, ctx)));
+        if (ev.eventType === 'transaction.completed') {
+          const ctx: HookContext = { eventId: ev.eventId, eventType: ev.eventType, store: d.store };
+          await runHook(d.onTransaction && (() => d.onTransaction!(ev.transaction, ctx)));
+        }
         return { status: 'processed', reason: null };
       }
       case 'adjustment': {

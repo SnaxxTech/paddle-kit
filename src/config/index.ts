@@ -19,6 +19,11 @@ export interface BillingEnv {
 export interface ReadBillingEnvOptions {
   /** Price keys that must be present in PADDLE_PRICES with non-empty ids. */
   requiredPrices: string[];
+  /**
+   * Billing cycles every nested (cycle map) entry of `requiredPrices` must have, e.g. `['monthly', 'yearly']`.
+   * Flat entries (one-time prices) are not affected. Unset: no cycle is required.
+   */
+  requiredCycles?: string[];
   /** Make BILLING_LAUNCH_AT mandatory. */
   requireLaunchAt?: boolean;
 }
@@ -36,7 +41,7 @@ const WATCHED = [
 // ISO 8601 date-time with a mandatory timezone (Z or +hh:mm / +hhmm).
 const ISO_WITH_ZONE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/;
 
-const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
+const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0;
 const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
 function parsePrice(v: unknown): string | Record<string, string> | null {
@@ -67,7 +72,7 @@ export function readBillingEnv(
   }
 
   const webhookSecret = env.PADDLE_NOTIFICATION_WEBHOOK_SECRET;
-  if (!webhookSecret) problems.push('PADDLE_NOTIFICATION_WEBHOOK_SECRET is missing');
+  if (!nonEmpty(webhookSecret)) problems.push('PADDLE_NOTIFICATION_WEBHOOK_SECRET is missing');
 
   let prices: PriceMap | null = null;
   if (!env.PADDLE_PRICES) {
@@ -96,14 +101,24 @@ export function readBillingEnv(
       if (malformed) problems.push('PADDLE_PRICES has an entry that is not a price id or a map of cycle to price id');
       for (const key of opts.requiredPrices) {
         if (!Object.hasOwn(parsed, key)) problems.push(`PADDLE_PRICES is missing required price "${key}"`);
+        else {
+          const price = map[key];
+          if (price !== undefined && typeof price !== 'string') {
+            for (const cycle of opts.requiredCycles ?? []) {
+              if (!Object.hasOwn(price, cycle)) problems.push(`PADDLE_PRICES entry "${key}" is missing cycle "${cycle}"`);
+            }
+          }
+        }
       }
       prices = map;
     }
   }
 
+  // With an invalid PADDLE_ENV the expected prefix is unknown: report only the root cause, not a derived mismatch.
+  const envValid = !env.PADDLE_ENV || env.PADDLE_ENV === 'sandbox' || env.PADDLE_ENV === 'production';
   const clientToken = env.NEXT_PUBLIC_PADDLE_CLIENT_TOKEN ?? '';
-  if (!clientToken) problems.push('NEXT_PUBLIC_PADDLE_CLIENT_TOKEN is missing');
-  else if (!clientToken.startsWith(environment === 'production' ? 'live_' : 'test_'))
+  if (!clientToken.trim()) problems.push('NEXT_PUBLIC_PADDLE_CLIENT_TOKEN is missing');
+  else if (envValid && !clientToken.startsWith(environment === 'production' ? 'live_' : 'test_'))
     problems.push('NEXT_PUBLIC_PADDLE_CLIENT_TOKEN does not match PADDLE_ENV (test_ = sandbox, live_ = production)');
 
   let launchAt: number | null = null;
@@ -116,10 +131,10 @@ export function readBillingEnv(
   }
 
   const apiKey = env.PADDLE_API_KEY || undefined;
-  if (apiKey && !apiKey.startsWith(environment === 'production' ? 'pdl_live_' : 'pdl_sdbx_'))
+  if (apiKey && envValid && !apiKey.startsWith(environment === 'production' ? 'pdl_live_' : 'pdl_sdbx_'))
     problems.push('PADDLE_API_KEY does not match PADDLE_ENV (pdl_sdbx_ = sandbox, pdl_live_ = production)');
 
-  if (problems.length > 0 || !webhookSecret || !prices) return { config: null, problems };
+  if (problems.length > 0 || !nonEmpty(webhookSecret) || !prices) return { config: null, problems };
   const config: BillingEnv = {
     environment,
     webhookSecret,

@@ -15,16 +15,18 @@ export interface BillingConfig {
    * Runs at least once per verified `transaction.completed` event (not `transaction.paid`, which is record-only) (a retry after a store failure, or concurrent duplicate deliveries, can run it again).
    * Make side effects idempotent: key on `tx.transactionId`. Keep hooks fast, Paddle waits ~5 s. Throwing fails the event
    * (HTTP 500, reason `hook_error`) so Paddle retries.
-   * custom_data comes from the browser and is untrusted: verify orders against tx.items (priceId, quantity) and currency,
-   * and compare money against `subtotal` (pre-tax), not `total` (tax-inclusive grand total).
+   * custom_data comes from the browser and is untrusted: verify the order by `tx.items` (priceId, quantity) and `tx.currency`;
+   * the catalog price fixes the amount. `subtotal` is before discount and tax (net of tax for tax-inclusive prices) and `total`
+   * is the tax-inclusive grand total: don't equality-check either amount against a list price.
+   * `transaction.completed` also fires for subscription renewals: one-time handlers filter `tx.subscriptionId === null`.
    */
   onTransaction?: (tx: Transaction, ctx: HookContext) => Promise<void> | void;
   /**
    * Runs at least once per verified `adjustment.created` / `adjustment.updated` event (a retry after a store failure, or concurrent duplicate deliveries, can run it again).
    * Make side effects idempotent: key on `adj.adjustmentId` + `adj.status`. Keep hooks fast, Paddle waits ~5 s. Throwing fails the event
    * (HTTP 500, reason `hook_error`) so Paddle retries.
-   * custom_data comes from the browser and is untrusted: verify orders against the related transaction, currency,
-   * and compare money against `subtotal` (pre-tax), not `total` (tax-inclusive grand total).
+   * Act on refunds (`adj.action === 'refund'`) only when `adj.status === 'approved'` (pending_approval and rejected adjustments also arrive).
+   * Find your order by `adj.transactionId`; don't trust custom_data, it comes from the browser.
    */
   onAdjustment?: (adj: Adjustment, ctx: HookContext) => Promise<void> | void;
   log?: Logger;
