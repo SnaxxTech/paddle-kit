@@ -13,6 +13,8 @@ export default defineConfig({
     'reconcile/index': 'src/reconcile/index.ts',
     'plan/index': 'src/plan/index.ts',
     'config/index': 'src/config/index.ts',
+    'catalog/index': 'src/catalog/index.ts',
+    'catalog/cli': 'src/catalog/cli.ts',
   },
   format: ['esm'],
   dts: true,
