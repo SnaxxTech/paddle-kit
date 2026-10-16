@@ -30,7 +30,7 @@ Upgrade steps: [UPGRADING.md](UPGRADING.md). **Run migration `002_claims_transac
 - New real-Postgres suite `npm run test:pg` (N=50 parallel duplicates, shuffled parallel `subscription.updated`, flaky-hook redeliveries, 1,000-event load with p95 and a sample-count reconciliation). It skips with a loud SKIP line when no server is available, and fails in CI (`PADDLE_KIT_REQUIRE_PG=1`) instead of skipping.
 
 ### Tooling
-- `UPGRADING.md`; CI workflow (`.github/workflows/ci.yml`): typecheck, tests, build, edge check, the packed-tarball smoke check in a scratch app (now also checks that `paddle-kit/hono` and `paddle-kit/express` no longer resolve), and the Postgres suite against a `postgres:16` service. The real-Postgres suite prints the server version.
+- `UPGRADING.md`; CI workflow, shipped disabled at `docs/ci-workflow.yml` (move it to `.github/workflows/ci.yml` to enable): typecheck, tests, build, edge check, the packed-tarball smoke check in a scratch app (now also checks that `paddle-kit/hono` and `paddle-kit/express` no longer resolve), and the Postgres suite against a `postgres:16` service. The real-Postgres suite prints the server version.
 - `npm run smoke` now also runs a signed webhook through the installed tarball (`owns` filtering and a known/unknown refund).
 
 ## 0.3.1 (2026-10-16)

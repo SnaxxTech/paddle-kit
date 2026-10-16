@@ -1,0 +1,52 @@
+# Not active: GitHub Actions only runs files under .github/workflows/.
+# To enable: git mv docs/ci-workflow.yml .github/workflows/ci.yml (pushing it needs a token with the 'workflow' scope).
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx vitest run
+      - run: npm run build
+      - run: npm run check:edge
+
+  # The upgrade path consumers take: pack the tarball, install it into a scratch app, import every
+  # subpath, type-check it under NodeNext, run the bin, and push signed webhooks through it.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run build
+      - run: npm run smoke
+
+  # Concurrency on a real Postgres server. PADDLE_KIT_REQUIRE_PG=1 turns a skip into a failure.
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_PASSWORD: postgres }
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 15
+    env:
+      PADDLE_KIT_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
+      PADDLE_KIT_REQUIRE_PG: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run test:pg
