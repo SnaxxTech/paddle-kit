@@ -442,3 +442,13 @@ Kosovo seller payout eligibility is **UNVERIFIED**. Paddle's sanctions page does
 ## Scripts
 
 `npm test`, `npm run typecheck`, `npm run build`, `npm run check:edge` (static scan of the edge-safe bundles), `npm run smoke` (packs the tarball, installs it into a temp dir and imports every subpath).
+
+## Claude Code skill
+
+`skills/integrating-paddle-kit/SKILL.md` is the integration recipe for agents (decisions, build order, sandbox end-to-end, traps). Install it once per machine so every project can use it:
+
+```bash
+ln -sfn ~/Desktop/Projects/paddle-kit/skills/integrating-paddle-kit ~/.claude/skills/integrating-paddle-kit
+```
+
+Then ask Claude Code to "add Paddle billing with paddle-kit" in any app. The skill was tested before shipping: unguided planning agents scored 9–11 of 14 on the integration rubric; with the skill, 13 of 14 (16 of 17 on the extended rubric).
