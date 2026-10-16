@@ -9,8 +9,12 @@ writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'smoke', type: '
 execFileSync('npm', ['i', '--silent', resolve(tgz), '@paddle/paddle-node-sdk@3.10.0', '@paddle/paddle-js', 'hono', 'express', 'typescript@5.9.3', '@types/express', '@types/node'], { cwd: dir, stdio: 'inherit' });
 const subpaths = ['core', 'memory', 'postgres', 'sqlite', 'next', 'hono', 'express', 'client', 'reconcile', 'plan', 'config', 'catalog'];
 const code = subpaths.map((p) => `await import('paddle-kit/${p}');`).join('\n') + "\nconsole.log('all subpaths import');";
+// CommonJS-style resolvers (Playwright, tsx, Jest) resolve through the "default" condition.
+const resolveCheck = subpaths.map((p) => `require.resolve('paddle-kit/${p}');`).join('\n') + "\nconsole.log('all subpaths resolve via require');";
 writeFileSync(join(dir, 'check.mjs'), code);
 execFileSync('node', ['check.mjs'], { cwd: dir, stdio: 'inherit' });
+writeFileSync(join(dir, 'resolve.cjs'), resolveCheck);
+execFileSync('node', ['resolve.cjs'], { cwd: dir, stdio: 'inherit' });
 
 // Prove the published types resolve for NodeNext consumers.
 writeFileSync(join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { module: 'NodeNext', moduleResolution: 'NodeNext', strict: true, noEmit: true, skipLibCheck: false, types: [] }, files: ['check.mts'] }));

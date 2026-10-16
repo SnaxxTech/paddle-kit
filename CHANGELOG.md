@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1 (2026-10-16)
+
+- Every subpath export now has a `default` condition (same ESM files), so CommonJS-style resolvers (Playwright test runner, tsx, Jest) can resolve `paddle-kit/*`. Found by Offday's Playwright suite; `npm run smoke` now checks `require.resolve` for every subpath.
+
 ## 0.3.0 (2026-10-16)
 
 Additive; every v0.2 test passes unchanged except the one assertion about the event kind of `transaction.completed`.

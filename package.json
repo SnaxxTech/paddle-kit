@@ -1,6 +1,6 @@
 {
   "name": "paddle-kit",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "bin": {
@@ -16,51 +16,63 @@
   "exports": {
     "./core": {
       "types": "./dist/core/index.d.ts",
-      "import": "./dist/core/index.js"
+      "import": "./dist/core/index.js",
+      "default": "./dist/core/index.js"
     },
     "./memory": {
       "types": "./dist/memory/index.d.ts",
-      "import": "./dist/memory/index.js"
+      "import": "./dist/memory/index.js",
+      "default": "./dist/memory/index.js"
     },
     "./postgres": {
       "types": "./dist/postgres/index.d.ts",
-      "import": "./dist/postgres/index.js"
+      "import": "./dist/postgres/index.js",
+      "default": "./dist/postgres/index.js"
     },
     "./sqlite": {
       "types": "./dist/sqlite/index.d.ts",
-      "import": "./dist/sqlite/index.js"
+      "import": "./dist/sqlite/index.js",
+      "default": "./dist/sqlite/index.js"
     },
     "./next": {
       "types": "./dist/next/index.d.ts",
-      "import": "./dist/next/index.js"
+      "import": "./dist/next/index.js",
+      "default": "./dist/next/index.js"
     },
     "./hono": {
       "types": "./dist/hono/index.d.ts",
-      "import": "./dist/hono/index.js"
+      "import": "./dist/hono/index.js",
+      "default": "./dist/hono/index.js"
     },
     "./express": {
       "types": "./dist/express/index.d.ts",
-      "import": "./dist/express/index.js"
+      "import": "./dist/express/index.js",
+      "default": "./dist/express/index.js"
     },
     "./client": {
       "types": "./dist/client/index.d.ts",
-      "import": "./dist/client/index.js"
+      "import": "./dist/client/index.js",
+      "default": "./dist/client/index.js"
     },
     "./reconcile": {
       "types": "./dist/reconcile/index.d.ts",
-      "import": "./dist/reconcile/index.js"
+      "import": "./dist/reconcile/index.js",
+      "default": "./dist/reconcile/index.js"
     },
     "./plan": {
       "types": "./dist/plan/index.d.ts",
-      "import": "./dist/plan/index.js"
+      "import": "./dist/plan/index.js",
+      "default": "./dist/plan/index.js"
     },
     "./config": {
       "types": "./dist/config/index.d.ts",
-      "import": "./dist/config/index.js"
+      "import": "./dist/config/index.js",
+      "default": "./dist/config/index.js"
     },
     "./catalog": {
       "types": "./dist/catalog/index.d.ts",
-      "import": "./dist/catalog/index.js"
+      "import": "./dist/catalog/index.js",
+      "default": "./dist/catalog/index.js"
     }
   },
   "scripts": {
