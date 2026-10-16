@@ -98,7 +98,13 @@ export interface Health {
 }
 
 export interface Store {
-  recordEvent(e: { eventId: string; eventType: string; occurredAt: string; receivedAt: string }): Promise<{ alreadyDone: boolean }>;
+  /**
+   * Claims an event for processing. `alreadyDone`: a finished row exists (processed/ignored/stale). `inProgress`: another
+   * attempt holds a live claim (`received` at or after `leaseExpiredBefore`), so this delivery must not run the hooks.
+   * Otherwise the row is (re)claimed: inserted, or a `failed` / expired `received` row is set to `received` at `receivedAt`.
+   * Without `leaseExpiredBefore` a `received` row is always reclaimable (the v0.3 behaviour).
+   */
+  recordEvent(e: { eventId: string; eventType: string; occurredAt: string; receivedAt: string; leaseExpiredBefore?: string }): Promise<{ alreadyDone: boolean; inProgress?: boolean }>;
   markEvent(eventId: string, status: EventStatus, reason: ReasonCode | null): Promise<void>;
   recordFailure(reason: ReasonCode, at: Date): Promise<void>;
   upsertCustomer(c: Customer): Promise<{ applied: boolean }>;

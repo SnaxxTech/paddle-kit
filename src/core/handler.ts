@@ -9,6 +9,8 @@ export interface HandlerDeps {
   toleranceSeconds: number;
   log: Logger;
   now: () => Date;
+  /** How long a `received` claim blocks duplicate deliveries before it counts as a crashed attempt. Default 60. */
+  leaseSeconds?: number;
   onTransaction?: (tx: Transaction, ctx: HookContext) => Promise<void> | void;
   onAdjustment?: (adj: Adjustment, ctx: HookContext) => Promise<void> | void;
 }
@@ -112,9 +114,13 @@ export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<
     const tag = { eventId: ev.eventId, eventType: ev.eventType };
     let recorded = false;
     try {
-      const { alreadyDone } = await d.store.recordEvent({ ...tag, occurredAt: ev.occurredAt, receivedAt: d.now().toISOString() });
+      const at = d.now();
+      const leaseExpiredBefore = new Date(at.getTime() - (d.leaseSeconds ?? 60) * 1000).toISOString();
+      const claim = await d.store.recordEvent({ ...tag, occurredAt: ev.occurredAt, receivedAt: at.toISOString(), leaseExpiredBefore });
+      if (claim.alreadyDone) return json({ received: true, duplicate: true }, 200);
+      // Another delivery of this event is running its hooks. Not a 2xx: if that attempt fails, this retry must come back.
+      if (claim.inProgress) return json({ error: 'in_progress' }, 409);
       recorded = true;
-      if (alreadyDone) return json({ received: true, duplicate: true }, 200);
       const outcome = await apply(ev);
       await d.store.markEvent(ev.eventId, outcome.status, outcome.reason);
       if (outcome.reason && outcome.reason !== 'unknown_event') d.log({ level: 'warn', reason: outcome.reason, ...tag });

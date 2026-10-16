@@ -148,6 +148,27 @@ export function runStoreContract(name: string, makeStore: () => Promise<Store>):
       expect(before.lastEventAt).toBe('2026-10-15T10:00:00.000Z');
     });
 
+    it('a live claim blocks a second claimer until markEvent releases it', async () => {
+      const lease = '2026-10-15T09:59:00.000Z';
+      expect(await store.recordEvent({ ...ev('evt_c'), leaseExpiredBefore: lease })).toEqual({ alreadyDone: false });
+      expect(await store.recordEvent({ ...ev('evt_c'), leaseExpiredBefore: lease })).toEqual({ alreadyDone: false, inProgress: true });
+      await store.markEvent('evt_c', 'failed', 'hook_error');
+      // a failed attempt releases its claim: the retry runs at once, and the row still counts as failed meanwhile
+      expect(await store.recordEvent({ ...ev('evt_c'), leaseExpiredBefore: lease })).toEqual({ alreadyDone: false });
+      expect((await store.health(new Date('2026-10-15T12:00:00.000Z'))).failedLast24h).toBe(1);
+      expect(await store.recordEvent({ ...ev('evt_c'), leaseExpiredBefore: lease })).toEqual({ alreadyDone: false, inProgress: true });
+      await store.markEvent('evt_c', 'processed', null);
+      expect(await store.recordEvent({ ...ev('evt_c'), leaseExpiredBefore: lease })).toEqual({ alreadyDone: true });
+    });
+
+    it('a claim older than the lease is taken over', async () => {
+      expect(await store.recordEvent({ ...ev('evt_x', '2026-10-15T10:00:00.000Z'), leaseExpiredBefore: '2026-10-15T09:59:00.000Z' })).toEqual({ alreadyDone: false });
+      expect(await store.recordEvent({ ...ev('evt_x', '2026-10-15T10:00:30.000Z'), leaseExpiredBefore: '2026-10-15T09:59:30.000Z' })).toEqual({ alreadyDone: false, inProgress: true });
+      expect(await store.recordEvent({ ...ev('evt_x', '2026-10-15T10:01:01.000Z'), leaseExpiredBefore: '2026-10-15T10:00:01.000Z' })).toEqual({ alreadyDone: false });
+      // the takeover is itself a live claim
+      expect(await store.recordEvent({ ...ev('evt_x', '2026-10-15T10:01:02.000Z'), leaseExpiredBefore: '2026-10-15T10:00:02.000Z' })).toEqual({ alreadyDone: false, inProgress: true });
+    });
+
     it('does not count an unlinked event received two days ago', async () => {
       await store.recordEvent(ev('evt_old_unlinked', '2026-10-13T12:00:00.000Z'));
       await store.markEvent('evt_old_unlinked', 'processed', 'no_user_id');

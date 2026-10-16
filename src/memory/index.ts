@@ -12,17 +12,23 @@ export function memoryStore(): Store {
   const failures: FailureHit[] = [];
   const subs = new Map<string, Subscription>();
   const customers = new Map<string, Customer>();
+  const claims = new Map<string, string>(); // eventId -> claimedAt
 
   return {
     async recordEvent(e) {
       const existing = events.get(e.eventId);
-      if (existing) return { alreadyDone: DONE.has(existing.status) };
-      events.set(e.eventId, { eventId: e.eventId, receivedAt: e.receivedAt, status: 'received', reason: null });
+      if (existing && DONE.has(existing.status)) return { alreadyDone: true };
+      if (!existing) events.set(e.eventId, { eventId: e.eventId, receivedAt: e.receivedAt, status: 'received', reason: null });
+      if (e.leaseExpiredBefore === undefined) return { alreadyDone: false };
+      const held = claims.get(e.eventId);
+      if (held !== undefined && Date.parse(held) >= Date.parse(e.leaseExpiredBefore)) return { alreadyDone: false, inProgress: true };
+      claims.set(e.eventId, e.receivedAt);
       return { alreadyDone: false };
     },
     async markEvent(eventId, status, reason) {
       const row = events.get(eventId);
       if (row) Object.assign(row, { status, reason });
+      claims.delete(eventId);
     },
     async recordFailure(reason, at) {
       failures.push({ at: at.toISOString(), reason });

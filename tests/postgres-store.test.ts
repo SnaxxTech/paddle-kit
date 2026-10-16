@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
 import { expect, it } from 'vitest';
 import { MIGRATIONS, postgresStore } from '../src/postgres';
@@ -18,8 +18,9 @@ runStoreContract('postgres (PGlite)', async () => {
   return postgresStore({ query: (text, params) => db.query(text, params) as any });
 });
 
-it('migrations/001_init.sql is byte-identical to MIGRATIONS[0]', () => {
-  expect(readFileSync(new URL('../migrations/001_init.sql', import.meta.url), 'utf8')).toBe(MIGRATIONS[0]!.sql);
+it('every migrations/<name>.sql file is byte-identical to its MIGRATIONS entry', () => {
+  expect(readdirSync(new URL('../migrations/', import.meta.url)).sort()).toEqual(MIGRATIONS.map((m) => `${m.name}.sql`));
+  for (const m of MIGRATIONS) expect(readFileSync(new URL(`../migrations/${m.name}.sql`, import.meta.url), 'utf8')).toBe(m.sql);
 });
 
 it('migrations are additive: only CREATE statements on paddle_ tables', () => {

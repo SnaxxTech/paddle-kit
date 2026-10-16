@@ -11,6 +11,7 @@ const jsonParam = (v: unknown) =>
 // Timestamps are stored at millisecond precision so stored values compare equal to the JS-Date-derived ISO strings read back.
 const ms = (n: number) => `date_trunc('milliseconds', $${n}::timestamptz)`;
 const DAY_MS = 86_400_000;
+const isDone = (s: unknown) => s === 'processed' || s === 'ignored' || s === 'stale';
 
 function toSubscription(r: Record<string, unknown>): Subscription {
   return {
@@ -38,11 +39,29 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
          RETURNING status`,
         [e.eventId, e.eventType, e.occurredAt, e.receivedAt],
       );
-      const status = rows[0]?.status as EventStatus;
-      return { alreadyDone: status === 'processed' || status === 'ignored' || status === 'stale' };
+      if (isDone(rows[0]?.status)) return { alreadyDone: true };
+      if (e.leaseExpiredBefore === undefined) return { alreadyDone: false };
+      // The claim row is separate from the ledger row, so a retry never hides a failed event from health.
+      // A concurrent claimer blocks on the row lock, then re-checks the WHERE against the winner's committed claim.
+      const claim = await query(
+        `INSERT INTO paddle_event_claims (event_id, claimed_at) VALUES ($1, ${ms(2)})
+         ON CONFLICT (event_id) DO UPDATE SET claimed_at = EXCLUDED.claimed_at
+           WHERE paddle_event_claims.claimed_at < $3::timestamptz
+         RETURNING event_id`,
+        [e.eventId, e.receivedAt, e.leaseExpiredBefore],
+      );
+      if (claim.rows.length === 0) return { alreadyDone: false, inProgress: true };
+      // markEvent writes the status before it releases the claim: a claim won just after a release sees the status.
+      const { rows: [now] } = await query(`SELECT status FROM paddle_events WHERE event_id = $1`, [e.eventId]);
+      if (isDone(now?.status)) {
+        await query(`DELETE FROM paddle_event_claims WHERE event_id = $1`, [e.eventId]);
+        return { alreadyDone: true };
+      }
+      return { alreadyDone: false };
     },
     async markEvent(eventId, status, reason) {
       await query(`UPDATE paddle_events SET status = $2, reason = $3 WHERE event_id = $1`, [eventId, status, reason]);
+      await query(`DELETE FROM paddle_event_claims WHERE event_id = $1`, [eventId]);
     },
     async recordFailure(reason, at) {
       await query(

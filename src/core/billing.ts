@@ -12,6 +12,12 @@ export interface BillingConfig {
   healthToken?: string;
   allowProductionInDev?: boolean;
   /**
+   * While one delivery of an event runs its hooks, duplicate deliveries of the same event answer 409 `in_progress`
+   * (Paddle retries them later) instead of running the hooks again. A claim older than this many seconds counts as a
+   * crashed attempt and is taken over. Default 60; keep it well above your slowest hook.
+   */
+  eventLeaseSeconds?: number;
+  /**
    * Runs at least once per verified `transaction.completed` event (not `transaction.paid`, which is record-only) (a retry after a store failure, or concurrent duplicate deliveries, can run it again).
    * Make side effects idempotent: key on `tx.transactionId`. Keep hooks fast, Paddle waits ~5 s. Throwing fails the event
    * (HTTP 500, reason `hook_error`) so Paddle retries.
@@ -61,6 +67,7 @@ export function createBilling(config: BillingConfig): Billing {
     store: config.store,
     secret: config.webhookSecret,
     toleranceSeconds: config.signatureToleranceSeconds ?? 5,
+    leaseSeconds: config.eventLeaseSeconds,
     log,
     now,
     onTransaction: config.onTransaction,

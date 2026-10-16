@@ -54,6 +54,14 @@ CREATE TABLE IF NOT EXISTS paddle_subscriptions (
 CREATE INDEX IF NOT EXISTS paddle_subscriptions_user_id_idx ON paddle_subscriptions (user_id);
 `,
   },
+  {
+    name: '002_claims',
+    sql: `CREATE TABLE IF NOT EXISTS paddle_event_claims (
+  event_id TEXT PRIMARY KEY,
+  claimed_at INTEGER NOT NULL
+);
+`,
+  },
 ];
 
 const DAY_MS = 86_400_000;
@@ -95,10 +103,16 @@ export function sqliteStore({ db }: { db: SqliteDatabase }): Store {
         e.eventId, e.eventType, ms(e.occurredAt), ms(e.receivedAt),
       );
       const row = q(`SELECT status FROM paddle_events WHERE event_id = ?`).get(e.eventId) as { status: EventStatus };
-      return { alreadyDone: DONE.has(row.status) };
+      if (DONE.has(row.status)) return { alreadyDone: true };
+      if (e.leaseExpiredBefore === undefined) return { alreadyDone: false };
+      const claim = q(`INSERT INTO paddle_event_claims (event_id, claimed_at) VALUES (?, ?)
+         ON CONFLICT (event_id) DO UPDATE SET claimed_at = excluded.claimed_at
+         WHERE paddle_event_claims.claimed_at < ?`).run(e.eventId, ms(e.receivedAt), ms(e.leaseExpiredBefore));
+      return claim.changes > 0 ? { alreadyDone: false } : { alreadyDone: false, inProgress: true };
     },
     async markEvent(eventId, status, reason) {
       q(`UPDATE paddle_events SET status = ?, reason = ? WHERE event_id = ?`).run(status, reason, eventId);
+      q(`DELETE FROM paddle_event_claims WHERE event_id = ?`).run(eventId);
     },
     async recordFailure(reason, at) {
       const t = at.getTime();
