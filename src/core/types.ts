@@ -51,7 +51,7 @@ export interface Transaction {
   currency: string | null;
   /** Grand total (tax-inclusive) in the currency's lowest unit, as Paddle sends it (a string). */
   total: string | null;
-  /** Subtotal in the lowest unit (string): before discount and tax (net of tax for tax-inclusive prices). Don't equality-check it against a list price; verify by items and currency. */
+  /** Subtotal in the lowest unit (string): before discount and tax (net of tax for tax-inclusive prices). Don't equality-check it against a list price; verify by items (priceId, quantity) and record the currency rather than requiring it. */
   subtotal: string | null;
   occurredAt: string;
   raw: unknown;

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (unreleased; the release date is added at release)
+## 0.3.0 (2026-10-16)
 
 Additive; every v0.2 test passes unchanged except the one assertion about the event kind of `transaction.completed`.
 
@@ -10,7 +10,7 @@ Additive; every v0.2 test passes unchanged except the one assertion about the ev
   `onTransaction` fires only for `transaction.completed`; `transaction.paid` is recorded without a hook.
   `transaction.completed` also fires for subscription renewals: one-time handlers filter `tx.subscriptionId === null`.
   `Transaction` and `Adjustment` carry `total` (tax-inclusive) and `subtotal` as lowest-unit strings.
-  `subtotal` is before discount and tax (net of tax for tax-inclusive prices): verify an order by `tx.items` (priceId, quantity) and currency, since the catalog price fixes the amount, and don't equality-check either amount against a list price.
+  `subtotal` is before discount and tax (net of tax for tax-inclusive prices): verify an order by `tx.items` (priceId, quantity) and record the currency (Paddle may localise it; don't require it), since the catalog price fixes the amount; write order + grant in one DB transaction; and don't equality-check either amount against a list price.
   `onAdjustment`: key side effects on `adjustmentId` + `status`, act on refunds only when `status` is `approved`, and find your order by `transactionId`.
 - `itemsOf(subscription)` and `customDataOf(subscription)` read line items (price, product, quantity) and the full custom data from a stored subscription.
 - `createCheckout().open({ customData })`: extra custom data is sent with the checkout; `userId` always comes from `userId` and cannot be overridden.

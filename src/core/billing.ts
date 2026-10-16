@@ -15,8 +15,9 @@ export interface BillingConfig {
    * Runs at least once per verified `transaction.completed` event (not `transaction.paid`, which is record-only) (a retry after a store failure, or concurrent duplicate deliveries, can run it again).
    * Make side effects idempotent: key on `tx.transactionId`. Keep hooks fast, Paddle waits ~5 s. Throwing fails the event
    * (HTTP 500, reason `hook_error`) so Paddle retries.
-   * custom_data comes from the browser and is untrusted: verify the order by `tx.items` (priceId, quantity) and `tx.currency`;
-   * the catalog price fixes the amount. `subtotal` is before discount and tax (net of tax for tax-inclusive prices) and `total`
+   * custom_data comes from the browser and is untrusted: verify the order by `tx.items` (priceId, quantity) — grant per quantity —
+   * and record `tx.currency` (Paddle may localise it; don't require it to match your list currency). The catalog price fixes the amount.
+   * Write the order and the grant in ONE database transaction so a failed grant rolls back and the retry re-grants. `subtotal` is before discount and tax (net of tax for tax-inclusive prices) and `total`
    * is the tax-inclusive grand total: don't equality-check either amount against a list price.
    * `transaction.completed` also fires for subscription renewals: one-time handlers filter `tx.subscriptionId === null`.
    */

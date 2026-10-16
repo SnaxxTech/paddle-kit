@@ -360,7 +360,7 @@ export async function syncCatalog(opts: SyncOptions): Promise<SyncResult> {
   }
   const env = opts.envFile ? readEnvFile(opts.envFile) : {};
   if (environment === 'production' && !opts.teardown && env.NEXT_PUBLIC_PADDLE_CLIENT_TOKEN?.startsWith('test_')) {
-    throw new PaddleError('Refusing to use a test_ client token with --live: remove NEXT_PUBLIC_PADDLE_CLIENT_TOKEN and re-run');
+    throw new PaddleError('Refusing to use a test_ client token with --live: use a separate env file for live (--env-file .env.production.local --live)');
   }
 
   const fetchImpl: FetchLike = opts.fetch ?? ((url, init) => fetch(url, init));
