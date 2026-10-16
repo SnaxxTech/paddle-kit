@@ -4,7 +4,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createBilling } from '../src/core/billing';
 import { MIGRATIONS, postgresStore, type SqlQuery } from '../src/postgres';
 import { sign } from './helpers/sign';
@@ -44,11 +44,17 @@ const { Pool } = live ? ((await import('pg' as string)) as PgModule).default : (
 const SECRET = 'pdl_ntfset_test';
 const NOW = new Date('2026-10-15T12:00:00Z');
 const ts = Math.floor(NOW.getTime() / 1000);
-const pools: Pool[] = [];
-afterAll(async () => {
+// Every test closes its pools: Postgres allows 100 connections by default.
+let pools: Pool[] = [];
+afterEach(async () => {
   await Promise.all(pools.map((p) => p.end()));
+  pools = [];
+});
+afterAll(async () => {
   if (live) await live.stop();
 });
+// stderr, not console: vitest does not print console output of passing tests here, and these lines are the evidence.
+const report = (line: string) => process.stderr.write(`[pg] ${line}\n`);
 
 /** A fresh schema per test, migrated with the kit's own MIGRATIONS, behind a pool of real connections. */
 async function freshPool(max = 20): Promise<Pool> {
@@ -97,7 +103,7 @@ describe.skipIf(!live)('real Postgres: concurrency', () => {
     const bodies = await Promise.all(res.map((r) => r.json() as Promise<Record<string, unknown>>));
     const processed = res.filter((r, i) => r.status === 200 && !bodies[i]!.duplicate).length;
     const tally = { processed, duplicate: bodies.filter((b) => b.duplicate).length, inProgress: res.filter((r) => r.status === 409).length, other: res.filter((r) => r.status !== 200 && r.status !== 409).length };
-    console.log(`[pg] N=50 same event: ${JSON.stringify(tally)} sum=${tally.processed + tally.duplicate + tally.inProgress + tally.other} hookCalls=${txCalls}`);
+    report(`N=50 same event: ${JSON.stringify(tally)} sum=${tally.processed + tally.duplicate + tally.inProgress + tally.other} hookCalls=${txCalls}`);
     expect(tally.processed + tally.duplicate + tally.inProgress + tally.other).toBe(50);
     expect(txCalls).toBe(1);
     expect(processed).toBe(1);
@@ -127,7 +133,7 @@ describe.skipIf(!live)('real Postgres: concurrency', () => {
         }),
       );
       const res = await Promise.all(shuffle(events).map(send));
-      expect(res.every((r) => r.status === 200)).toBe(true);
+      expect(res.map((r) => r.status).filter((s) => s !== 200)).toEqual([]);
       const newest = events.at(-1)!;
       const { rows } = await p.query(`SELECT status, user_id, last_event_at FROM paddle_subscriptions`);
       expect(rows).toHaveLength(1);
@@ -138,6 +144,9 @@ describe.skipIf(!live)('real Postgres: concurrency', () => {
       const n = Object.fromEntries(ledger.rows.map((r) => [r.status, r.n]));
       expect((n.processed ?? 0) + (n.stale ?? 0)).toBe(40);
       expect(n.processed).toBeGreaterThanOrEqual(1);
+      report(`round ${round}: 40 shuffled subscription.updated -> ${JSON.stringify(n)}, final status ${rows[0]!.status} at ${new Date(rows[0]!.last_event_at as string).toISOString()}`);
+      await p.end();
+      pools = pools.filter((x) => x !== p);
     }
   });
 
@@ -150,13 +159,16 @@ describe.skipIf(!live)('real Postgres: concurrency', () => {
     // 10 distinct events (e.g. transaction.completed redelivered under fresh ids) for one transaction, each delivered 5×
     const events = Array.from({ length: 10 }, (_, i) => ({ ...base, event_id: `evt_txn_${i}` }));
     let pending = events;
+    let rounds = 0;
     for (let attempt = 0; attempt < 30 && pending.length > 0; attempt++) {
+      rounds++;
       const res = await Promise.all(shuffle(pending.flatMap((e) => [e, e, e, e, e])).map(async (e) => ({ e, r: await send(e) })));
       for (const { r } of res) expect([200, 409, 500]).toContain(r.status);
       const { rows } = await pool.query(`SELECT event_id FROM paddle_events WHERE status = 'processed'`);
       const done = new Set(rows.map((r) => r.event_id));
       pending = pending.filter((e) => !done.has(e.event_id));
     }
+    report(`flaky redeliveries: 10 events x5 per round, ${rounds} rounds, onTransaction calls=${calls}`);
     expect(pending).toEqual([]);
     expect(calls).toBeGreaterThanOrEqual(10);
     const ledger = await pool.query(`SELECT event_id, status FROM paddle_events ORDER BY event_id`);
@@ -203,7 +215,7 @@ describe.skipIf(!live)('real Postgres: concurrency', () => {
     const line = { sent: SENT, samples: latencies.length, reconciled: latencies.length === SENT, errors, inProgress, concurrency: CONCURRENCY, poolMax: 20,
       p50ms: +pct(sorted, 50).toFixed(1), p95ms: +pct(sorted, 95).toFixed(1), p99ms: +pct(sorted, 99).toFixed(1), maxms: +sorted.at(-1)!.toFixed(1), wallms: Math.round(wall),
       perSec: Math.round((SENT / wall) * 1000), txCalls, adjCalls };
-    console.log(`[pg] load: ${JSON.stringify(line)}`);
+    report(`load: ${JSON.stringify(line)}`);
     expect(latencies.length).toBe(SENT);
     expect(errors).toBe(0);
     // duplicates that raced their original answered 409 and are retried by Paddle; every unique event ran its hook once at most
