@@ -49,8 +49,10 @@ export interface Transaction {
   customData: Record<string, unknown> | null;
   items: LineItem[];
   currency: string | null;
-  /** Grand total in the currency's lowest unit, as Paddle sends it (a string). */
+  /** Grand total (tax-inclusive) in the currency's lowest unit, as Paddle sends it (a string). */
   total: string | null;
+  /** Pre-tax subtotal in the lowest unit (string). Compare money against this, not `total`. */
+  subtotal: string | null;
   occurredAt: string;
   raw: unknown;
 }
@@ -65,8 +67,10 @@ export interface Adjustment {
   subscriptionId: string | null;
   customerId: string | null;
   currency: string | null;
-  /** Adjusted amount in the currency's lowest unit, as Paddle sends it (a string). */
+  /** Adjusted amount (tax-inclusive) in the currency's lowest unit, as Paddle sends it (a string). */
   total: string | null;
+  /** Pre-tax adjusted amount in the lowest unit (string). */
+  subtotal: string | null;
   occurredAt: string;
   raw: unknown;
 }

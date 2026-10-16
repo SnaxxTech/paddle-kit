@@ -39,14 +39,20 @@ const hasControlChars = (v: string) => /[\u0000-\u001f\u007f-\u009f]/.test(v);
 const optUserId = (v: unknown): string | null => (isStr(v) && !hasControlChars(v) ? v : null);
 const optStr = (v: unknown): string | null => (isStr(v) ? v : null);
 
+function quantityOf(v: unknown): number {
+  const n = typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : v;
+  return typeof n === 'number' && Number.isSafeInteger(n) && n > 0 ? n : 1;
+}
+
 function lineItemsOf(items: unknown): LineItem[] {
   if (!Array.isArray(items)) return [];
   const out: LineItem[] = [];
   for (const item of items) {
-    const price = isObj(item) ? item.price : null;
-    if (!isObj(price) || !isStr(price.id)) continue;
-    const q = (item as Record<string, unknown>).quantity;
-    out.push({ priceId: price.id, productId: optStr(price.product_id), quantity: typeof q === 'number' && Number.isFinite(q) ? q : 1 });
+    if (!isObj(item)) continue;
+    const price = isObj(item.price) ? item.price : null;
+    const priceId = optStr(price?.id) ?? optStr(item.price_id);
+    if (!priceId) continue;
+    out.push({ priceId, productId: optStr(price?.product_id), quantity: quantityOf(item.quantity) });
   }
   return out;
 }
@@ -112,6 +118,7 @@ export function parseEvent(json: unknown): NormalisedEvent | null {
         items: lineItemsOf(data.items),
         currency: optStr(data.currency_code) ?? optStr(totals?.currency_code),
         total: optStr(totals?.grand_total) ?? optStr(totals?.total),
+        subtotal: optStr(totals?.subtotal),
         occurredAt: env.occurredAt,
         raw: data,
       },
@@ -131,6 +138,7 @@ export function parseEvent(json: unknown): NormalisedEvent | null {
         customerId: optStr(data.customer_id),
         currency: optStr(data.currency_code) ?? (isObj(data.totals) ? optStr(data.totals.currency_code) : null),
         total: isObj(data.totals) ? optStr(data.totals.total) : null,
+        subtotal: isObj(data.totals) ? optStr(data.totals.subtotal) : null,
         occurredAt: env.occurredAt,
         raw: data,
       },

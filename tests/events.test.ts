@@ -116,6 +116,7 @@ describe('parseEvent', () => {
         ],
         currency: 'USD',
         total: '65215',
+        subtotal: '59900',
         occurredAt: raw.occurred_at,
         raw: raw.data,
       });
@@ -149,7 +150,32 @@ describe('parseEvent', () => {
       const ev = parseEvent(raw);
       if (ev?.kind !== 'transaction') throw new Error('expected transaction');
       expect(ev.transaction.total).toBeNull();
+      expect(ev.transaction.subtotal).toBeNull();
       expect(ev.transaction.currency).toBeNull();
+    });
+
+    it('falls back to item.price_id and keeps only positive-integer quantities (else 1)', () => {
+      const raw = loadFixture('transaction.completed');
+      raw.data.items = [
+        { price_id: 'pri_fb', quantity: 2 },
+        { price: { id: 'pri_z' }, quantity: 0 },
+        { price: { id: 'pri_n' }, quantity: -2 },
+        { price: { id: 'pri_f' }, quantity: 1.5 },
+        { price: { id: 'pri_s' }, quantity: '4' },
+        { price: { id: 'pri_x' }, quantity: 'x' },
+        { price: { id: 'pri_both', product_id: 'pro_b' }, price_id: 'pri_ignored', quantity: 3 },
+      ];
+      const ev = parseEvent(raw);
+      if (ev?.kind !== 'transaction') throw new Error('expected transaction');
+      expect(ev.transaction.items).toEqual([
+        { priceId: 'pri_fb', productId: null, quantity: 2 },
+        { priceId: 'pri_z', productId: null, quantity: 1 },
+        { priceId: 'pri_n', productId: null, quantity: 1 },
+        { priceId: 'pri_f', productId: null, quantity: 1 },
+        { priceId: 'pri_s', productId: null, quantity: 4 },
+        { priceId: 'pri_x', productId: null, quantity: 1 },
+        { priceId: 'pri_both', productId: 'pro_b', quantity: 3 },
+      ]);
     });
 
     it('returns null for a transaction without data.id', () => {
@@ -172,6 +198,7 @@ describe('parseEvent', () => {
         customerId: 'ctm_01hv6y1jedq4p1n0yqn5ba3ky4',
         currency: 'USD',
         total: '100',
+        subtotal: '92',
         occurredAt: raw.occurred_at,
         raw: raw.data,
       });

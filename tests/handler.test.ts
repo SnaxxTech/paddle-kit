@@ -217,21 +217,32 @@ describe('webhook handler', () => {
     });
 
     it('without hooks a transaction.completed is processed (v0.2 behaviour: no state change)', async () => {
+      const raw = loadFixture('transaction.completed');
+      const spies = [vi.spyOn(store, 'upsertSubscription'), vi.spyOn(store, 'upsertCustomer')];
+      const markEvent = vi.spyOn(store, 'markEvent');
       const res = await handle(post(txBody()));
       expect(res.status).toBe(200);
-      const h = await store.health(NOW);
-      expect(h.failedLast24h).toBe(0);
+      expect(markEvent).toHaveBeenCalledWith(raw.event_id, 'processed', null);
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+      expect(await store.getSubscription(raw.data.subscription_id)).toBeNull();
+      expect((await store.health(NOW)).failedLast24h).toBe(0);
       expect(logs).toEqual([]);
+      // processed rows dedupe
+      expect(await (await handle(post(txBody()))).json()).toEqual({ received: true, duplicate: true });
     });
 
-    it('transaction.paid is processed and runs the hook', async () => {
+    it('transaction.paid is record-only: processed, hook not called; paid + completed for the same txn runs the hook once', async () => {
       const { h, onTransaction } = withHooks();
-      const raw = loadFixture('transaction.completed');
-      raw.event_id = 'evt_paid_1';
-      raw.event_type = 'transaction.paid';
-      expect((await h(post(JSON.stringify(raw)))).status).toBe(200);
+      const paid = loadFixture('transaction.completed');
+      paid.event_id = 'evt_paid_1';
+      paid.event_type = 'transaction.paid';
+      expect((await h(post(JSON.stringify(paid)))).status).toBe(200);
+      expect(onTransaction).not.toHaveBeenCalled();
+      expect((await store.health(NOW)).failedLast24h).toBe(0);
+      expect((await h(post(txBody()))).status).toBe(200);
       expect(onTransaction).toHaveBeenCalledTimes(1);
-      expect(onTransaction.mock.calls[0]![1].eventType).toBe('transaction.paid');
+      expect(onTransaction.mock.calls[0]![1].eventType).toBe('transaction.completed');
+      expect(onTransaction.mock.calls[0]![0].transactionId).toBe(paid.data.id);
     });
 
     it('calls onAdjustment with the refund data', async () => {

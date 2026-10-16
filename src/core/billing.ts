@@ -12,11 +12,20 @@ export interface BillingConfig {
   healthToken?: string;
   allowProductionInDev?: boolean;
   /**
-   * Runs once per verified transaction.completed / transaction.paid, after the event is recorded and before it is marked
-   * processed. Throwing fails the event (500, reason `hook_error`) so Paddle retries; make the work idempotent by transactionId.
+   * Runs at least once per verified `transaction.completed` event (not `transaction.paid`, which is record-only) (a retry after a store failure, or concurrent duplicate deliveries, can run it again).
+   * Make side effects idempotent: key on `tx.transactionId`. Keep hooks fast, Paddle waits ~5 s. Throwing fails the event
+   * (HTTP 500, reason `hook_error`) so Paddle retries.
+   * custom_data comes from the browser and is untrusted: verify orders against tx.items (priceId, quantity) and currency,
+   * and compare money against `subtotal` (pre-tax), not `total` (tax-inclusive grand total).
    */
   onTransaction?: (tx: Transaction, ctx: HookContext) => Promise<void> | void;
-  /** Same contract as onTransaction, for adjustment.created / adjustment.updated (refunds, credits, chargebacks). */
+  /**
+   * Runs at least once per verified `adjustment.created` / `adjustment.updated` event (a retry after a store failure, or concurrent duplicate deliveries, can run it again).
+   * Make side effects idempotent: key on `adj.adjustmentId` + `adj.status`. Keep hooks fast, Paddle waits ~5 s. Throwing fails the event
+   * (HTTP 500, reason `hook_error`) so Paddle retries.
+   * custom_data comes from the browser and is untrusted: verify orders against the related transaction, currency,
+   * and compare money against `subtotal` (pre-tax), not `total` (tax-inclusive grand total).
+   */
   onAdjustment?: (adj: Adjustment, ctx: HookContext) => Promise<void> | void;
   log?: Logger;
   now?: () => Date;

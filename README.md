@@ -188,7 +188,7 @@ Create a notification destination (type: webhook) pointing at your route and sub
 
 `subscription.created`, `subscription.updated`, `subscription.activated`, `subscription.trialing`, `subscription.past_due`, `subscription.paused`, `subscription.resumed`, `subscription.canceled`, `customer.created`, `customer.updated`, `transaction.completed`.
 
-`subscription.imported` is treated like `subscription.created`. `transaction.completed` and `transaction.paid` (and, since v0.3, `adjustment.created` / `adjustment.updated`) are recorded as `processed` with no state change unless you pass `onTransaction` / `onAdjustment` to `createBilling`; in v0.2 `transaction.paid` and `adjustment.*` were stored as `ignored`. A hook that throws fails the event (HTTP 500, reason `hook_error`, visible in health) so Paddle retries. Any other event type is stored as `ignored` and acknowledged with 200.
+`subscription.imported` is treated like `subscription.created`. `transaction.completed` and `transaction.paid` (and, since v0.3, `adjustment.created` / `adjustment.updated`) are recorded as `processed` with no state change unless you pass `onTransaction` (fires on `transaction.completed` only; `transaction.paid` is record-only) / `onAdjustment` to `createBilling`; in v0.2 `transaction.paid` and `adjustment.*` were stored as `ignored`. A hook that throws fails the event (HTTP 500, reason `hook_error`, visible in health) so Paddle retries. Any other event type is stored as `ignored` and acknowledged with 200.
 
 ## Monitoring
 
