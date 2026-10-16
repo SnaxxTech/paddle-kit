@@ -5,6 +5,8 @@ export type CheckoutOptions = {
   userId: string;
   email?: string;
   successUrl?: string;
+  /** Extra custom data (e.g. an order id) sent with the checkout. `userId` is always set from `userId` and cannot be overridden. */
+  customData?: Record<string, unknown>;
 } & ({ priceId: string; quantity?: number; items?: never } | { items: CheckoutItem[]; priceId?: never; quantity?: never });
 
 export async function createCheckout(cfg: {
@@ -32,7 +34,7 @@ export async function createCheckout(cfg: {
       paddle.Checkout.open({
         items,
         customer: o.email ? { email: o.email } : undefined,
-        customData: { userId: o.userId },
+        customData: { ...o.customData, userId: o.userId },
         settings: o.successUrl ? { successUrl: o.successUrl } : undefined,
       });
     },

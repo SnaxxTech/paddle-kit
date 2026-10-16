@@ -23,6 +23,18 @@ describe('createCheckout', () => {
     });
   });
 
+  it('passes extra customData through alongside userId', async () => {
+    const checkout = await createCheckout({ token: 'test_abc', environment: 'sandbox' });
+    checkout.open({ priceId: 'pri_1', userId: 'user_1', customData: { order_id: 'ord_7', pack: '5' } });
+    expect(open).toHaveBeenCalledWith(expect.objectContaining({ customData: { order_id: 'ord_7', pack: '5', userId: 'user_1' } }));
+  });
+
+  it('never lets customData override userId', async () => {
+    const checkout = await createCheckout({ token: 'test_abc', environment: 'sandbox' });
+    checkout.open({ priceId: 'pri_1', userId: 'user_1', customData: { userId: 'attacker', keep: true } });
+    expect(open).toHaveBeenCalledWith(expect.objectContaining({ customData: { keep: true, userId: 'user_1' } }));
+  });
+
   it('refuses to open without a userId', async () => {
     const checkout = await createCheckout({ token: 'test_abc', environment: 'sandbox' });
     expect(() => checkout.open({ priceId: 'pri_1', userId: '' })).toThrow(/userId/);

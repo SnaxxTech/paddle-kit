@@ -150,6 +150,8 @@ const checkout = await createCheckout({
 checkout.open({ priceId: 'pri_01abc', userId: 'org_1' });
 // Several line items (pass exactly one of priceId or items):
 checkout.open({ items: [{ priceId: 'pri_base', quantity: 1 }, { priceId: 'pri_extra', quantity: 12 }], userId: 'org_1' });
+// Extra custom data (e.g. an order id) comes back on the transaction; userId is always yours and cannot be overridden:
+checkout.open({ priceId: 'pri_01abc', userId: 'org_1', customData: { order_id: 'ord_7' } });
 ```
 
 ## Hono
