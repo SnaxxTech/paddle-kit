@@ -1,11 +1,12 @@
-import { describe, expect, test } from 'vitest';
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { afterEach, describe, expect, test, vi } from 'vitest';
+import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   CatalogError,
   EVENTS,
   readEnvFile,
+  redactSecrets,
   syncCatalog,
   toPriceMap,
   validateCatalog,
@@ -31,7 +32,7 @@ const CATALOG: Catalog = {
 };
 
 type Call = { method: string; path: string; body: any };
-type FakeOptions = { pageSize?: number; token?: string; omitSecret?: boolean };
+type FakeOptions = { pageSize?: number; token?: string; omitSecret?: boolean; secret?: string };
 
 // A tiny in-memory Paddle: products, prices, notification settings, client tokens.
 function fakePaddle(opts: FakeOptions = {}) {
@@ -80,7 +81,7 @@ function fakePaddle(opts: FakeOptions = {}) {
       const row = {
         id: id('ntfset'),
         active: true,
-        ...(opts.omitSecret ? {} : { endpoint_secret_key: WH_SECRET }),
+        ...(opts.omitSecret ? {} : { endpoint_secret_key: opts.secret ?? WH_SECRET }),
         ...body,
         // Paddle returns event objects, not bare names.
         subscribed_events: body.subscribed_events.map((name: string) => ({ name })),
@@ -465,5 +466,119 @@ describe('paddle-kit-catalog cli', () => {
     } finally {
       if (prev !== undefined) process.env.PADDLE_API_KEY = prev;
     }
+  });
+});
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe('fix round 1', () => {
+  const failWith = (status: number, body: unknown): FetchLike => async () => ({ ok: false, status, json: async () => body });
+
+  test('I1: a key planted in a 403 detail or a 500 body never reaches the thrown message or the console', async () => {
+    const detail403 = failWith(403, { error: { code: 'forbidden', detail: `bad key ${KEY} for you` } });
+    const msg = await syncCatalog({ apiKey: KEY, catalog: CATALOG, fetch: detail403, log: () => {} }).then(() => '', (e: Error) => e.message);
+    expect(msg).toContain('403 forbidden');
+    expect(msg).not.toContain(KEY);
+    expect(msg).not.toContain('SECRET_VALUE');
+    expect(msg).toContain('[redacted]');
+
+    // 500 whose code carries the key too, through the real CLI path (global fetch stubbed).
+    vi.stubGlobal('fetch', async () => ({ ok: false, status: 500, json: async () => ({ error: { code: KEY, detail: `Bearer ${KEY}` } }) }));
+    const dir = mkdtempSync(path.join(tmpdir(), 'paddle-catalog-cli-'));
+    const envFile = path.join(dir, '.env');
+    const catalog = path.join(dir, 'c.json');
+    writeFileSync(envFile, `PADDLE_API_KEY=${KEY}\n`);
+    writeFileSync(catalog, JSON.stringify(CATALOG));
+    const prev = process.env.PADDLE_API_KEY;
+    delete process.env.PADDLE_API_KEY;
+    try {
+      const { result, output } = await captured(() => main(['--catalog', catalog, '--env-file', envFile]));
+      expect(result).toBe(1);
+      expect(output).toContain('500');
+      expect(output).not.toContain(KEY);
+      expect(output).not.toContain('SECRET_VALUE');
+    } finally {
+      if (prev !== undefined) process.env.PADDLE_API_KEY = prev;
+    }
+  });
+
+  test('I1: the webhook secret and token-shaped strings are redacted even when they match no known prefix', async () => {
+    const SECRET = 'plain-secret-without-a-prefix-9d8f7a';
+    const paddle = fakePaddle({ secret: SECRET });
+    const wrapped: FetchLike = (url, init) =>
+      init.method === 'POST' && new URL(url).pathname === '/client-tokens'
+        ? Promise.resolve({ ok: false, status: 403, json: async () => ({ error: { code: 'forbidden', detail: `echo ${SECRET} and ${TOKEN} and live_abcdef123456` } }) })
+        : paddle.fetch(url, init);
+    const msg = await syncCatalog({ apiKey: KEY, catalog: CATALOG, webhookUrl: HOOK, fetch: wrapped, log: () => {} }).then(() => '', (e: Error) => e.message);
+    expect(msg).toContain('403 forbidden');
+    for (const leak of [SECRET, TOKEN, 'live_abcdef123456']) expect(msg).not.toContain(leak);
+
+    expect(redactSecrets('a pdl_live_xyz1 b pdl_sdbx_k_2 c pdl_ntfset_q_9 d test_abcdefgh e live_abcdefgh f')).toBe(
+      'a [redacted] b [redacted] c [redacted] d [redacted] e [redacted] f',
+    );
+    expect(redactSecrets('Sandbox API key required (pdl_sdbx_…) and test_ tokens')).toBe('Sandbox API key required (pdl_sdbx_…) and test_ tokens');
+  });
+
+  test('I2/M1: every environment mix is refused before any request, with the env file untouched', async () => {
+    const paddle = fakePaddle();
+    const cases: Array<{ name: string; apiKey: string; live: boolean; env: string; match: RegExp }> = [
+      { name: 'live key + live + existing test_ token', apiKey: 'pdl_live_abc', live: true, env: `${ENV0}NEXT_PUBLIC_PADDLE_CLIENT_TOKEN=test_old\n`, match: /Refusing to use a test_ client token/ },
+      { name: 'sandbox key + live flag', apiKey: KEY, live: true, env: ENV0, match: /--live .*sandbox key|sandbox key.*--live/i },
+      { name: 'live key without live flag', apiKey: 'pdl_live_abc', live: false, env: ENV0, match: /Sandbox API key required/ },
+    ];
+    for (const c of cases) {
+      const file = tmpEnv(c.env);
+      const before = readFileSync(file, 'utf8');
+      await expect(
+        syncCatalog({ apiKey: c.apiKey, catalog: CATALOG, envFile: file, webhookUrl: HOOK, live: c.live, fetch: paddle.fetch, log: () => {} }),
+        c.name,
+      ).rejects.toThrow(c.match);
+      expect(paddle.calls, c.name).toHaveLength(0);
+      expect(readFileSync(file, 'utf8'), c.name).toBe(before);
+    }
+    // Same refusal without --webhook-url (the mix is about the file, not the destination step).
+    const file = tmpEnv(`${ENV0}NEXT_PUBLIC_PADDLE_CLIENT_TOKEN=test_old\n`);
+    await expect(syncCatalog({ apiKey: 'pdl_live_abc', catalog: CATALOG, envFile: file, live: true, fetch: paddle.fetch, log: () => {} })).rejects.toThrow(/test_ client token/);
+    expect(paddle.calls).toHaveLength(0);
+  });
+
+  test('M8: a bad webhook URL is refused before any request', async () => {
+    const paddle = fakePaddle();
+    for (const webhookUrl of ['http://x.example/h', 'not a url', 'https://', 'ftp://x.example']) {
+      await expect(syncCatalog({ apiKey: KEY, catalog: CATALOG, webhookUrl, fetch: paddle.fetch, log: () => {} }), webhookUrl).rejects.toThrow(/https URL/);
+    }
+    expect(paddle.calls).toHaveLength(0);
+  });
+
+  test('M2: duplicate lines for one key are collapsed to the first position', () => {
+    const file = tmpEnv('A=1\nPADDLE_ENV=old1\nB=2\nPADDLE_ENV=old2\nC=3\n');
+    writeEnvFile(file, { PADDLE_ENV: 'sandbox' });
+    expect(readFileSync(file, 'utf8')).toBe('A=1\nPADDLE_ENV=sandbox\nB=2\nC=3\n');
+    // Converged: a second write is a no-op.
+    expect(writeEnvFile(file, { PADDLE_ENV: 'sandbox' })).toEqual([]);
+  });
+
+  test('M4: unknown keys are rejected by name at every level', () => {
+    const mut = (f: (c: any) => void) => {
+      const c = structuredClone(CATALOG) as any;
+      f(c);
+      return () => validateCatalog(c);
+    };
+    expect(mut((c) => (c.prices[0].quantiy = { min: 1, max: 5 }))).toThrow(/prices\[0\]\.quantiy: unknown key/);
+    expect(mut((c) => (c.product.taxcategory = 'saas'))).toThrow(/product\.taxcategory: unknown key/);
+    expect(mut((c) => (c.price = []))).toThrow(/catalog price: unknown key/);
+    expect(mut((c) => (c.prices[0].quantity.maxx = 3))).toThrow(/prices\[0\]\.quantity\.maxx: unknown key/);
+  });
+
+  test('M5: a no-op run still tightens the env file to 0600', async () => {
+    const paddle = fakePaddle();
+    const file = tmpEnv(ENV0);
+    await syncCatalog({ apiKey: KEY, catalog: CATALOG, envFile: file, fetch: paddle.fetch, log: () => {} });
+    chmodSync(file, 0o644);
+    await syncCatalog({ apiKey: KEY, catalog: CATALOG, envFile: file, fetch: paddle.fetch, log: () => {} });
+    expect(mode(file)).toBe(0o600);
+    chmodSync(file, 0o644);
+    await syncCatalog({ apiKey: KEY, catalog: CATALOG, envFile: file, teardown: true, fetch: paddle.fetch, log: () => {} });
+    expect(mode(file)).toBe(0o600);
   });
 });

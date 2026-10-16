@@ -71,6 +71,17 @@ export class PaddleError extends Error {
   override name = 'PaddleError';
 }
 
+// ---------- redaction ----------
+
+const TOKEN_SHAPE = /\b(?:pdl_(?:sdbx|live)_[A-Za-z0-9_]+|test_[A-Za-z0-9]{8,}|live_[A-Za-z0-9]{8,}|pdl_ntfset_[A-Za-z0-9_]+)\b/g;
+
+/** Removes known secret values and anything shaped like a Paddle key/token/secret from text. */
+export function redactSecrets(text: string, known: readonly string[] = []): string {
+  let out = text;
+  for (const secret of known) if (secret.length >= 6) out = out.split(secret).join('[redacted]');
+  return out.replace(TOKEN_SHAPE, '[redacted]');
+}
+
 // ---------- catalog validation ----------
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -80,13 +91,21 @@ function fail(field: string, why: string): never {
   throw new CatalogError(`catalog ${field}: ${why}`);
 }
 
+function onlyKeys(obj: Record<string, unknown>, allowed: readonly string[], where: string): void {
+  for (const k of Object.keys(obj)) {
+    if (!allowed.includes(k)) fail(where ? `${where}.${k}` : k, `unknown key (allowed: ${allowed.join(', ')})`);
+  }
+}
+
 export function validateCatalog(input: unknown): Catalog {
   if (!isObj(input)) fail('(root)', 'must be a JSON object');
+  onlyKeys(input, ['app', 'product', 'prices'], '');
   const { app, product, prices } = input;
   if (!nonEmpty(app) || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(app)) {
     fail('app', 'must be a non-empty identifier (letters, digits, . _ -)');
   }
   if (!isObj(product)) fail('product', 'must be an object');
+  onlyKeys(product, ['name', 'taxCategory', 'description'], 'product');
   if (!nonEmpty(product.name)) fail('product.name', 'must be a non-empty string');
   const taxCategory = product.taxCategory === undefined ? 'standard' : product.taxCategory;
   if (typeof taxCategory !== 'string' || !(TAX_CATEGORIES as readonly string[]).includes(taxCategory)) {
@@ -101,6 +120,7 @@ export function validateCatalog(input: unknown): Catalog {
   const out: CatalogPrice[] = prices.map((raw: unknown, i: number) => {
     const at = (f: string) => `prices[${i}].${f}`;
     if (!isObj(raw)) fail(`prices[${i}]`, 'must be an object');
+    onlyKeys(raw, ['key', 'cycle', 'name', 'amount', 'currency', 'description', 'quantity'], `prices[${i}]`);
     if (!nonEmpty(raw.key) || !/^[A-Za-z][A-Za-z0-9_]*$/.test(raw.key)) {
       fail(at('key'), 'must start with a letter and use only letters, digits and _');
     }
@@ -123,6 +143,7 @@ export function validateCatalog(input: unknown): Catalog {
     if (raw.quantity !== undefined) {
       const q = raw.quantity;
       if (!isObj(q)) fail(at('quantity'), 'must be an object { min, max }');
+      onlyKeys(q, ['min', 'max'], at('quantity'));
       const { min, max } = q;
       if (typeof min !== 'number' || !Number.isSafeInteger(min) || min < 1) fail(at('quantity.min'), 'must be an integer >= 1');
       if (typeof max !== 'number' || !Number.isSafeInteger(max) || max < min) {
@@ -207,15 +228,20 @@ export function writeEnvFile(file: string, updates: Record<string, string | unde
   const lines = existsSync(file) ? readFileSync(file, 'utf8').split('\n') : [];
   if (lines.length && lines[lines.length - 1] === '') lines.pop();
   const pending = new Map(clean);
-  const next = lines.map((line) => {
+  const replaced = new Set<string>();
+  const next: string[] = [];
+  for (const line of lines) {
     const m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line);
-    if (m && pending.has(m[1]!)) {
-      const value = pending.get(m[1]!)!;
-      pending.delete(m[1]!);
-      return `${m[1]}=${value}`;
+    const key = m?.[1];
+    if (key && clean.has(key)) {
+      // First occurrence is rewritten in place; later duplicates are dropped (readers are last-wins).
+      if (!replaced.has(key)) next.push(`${key}=${clean.get(key)!}`);
+      replaced.add(key);
+      pending.delete(key);
+      continue;
     }
-    return line;
-  });
+    next.push(line);
+  }
   for (const [k, v] of pending) next.push(`${k}=${v}`);
   writeFileSync(file, next.join('\n') + '\n', { mode: 0o600 });
   chmodSync(file, 0o600);
@@ -226,7 +252,7 @@ export function writeEnvFile(file: string, updates: Record<string, string | unde
 
 type Json = Record<string, any>;
 
-function paddleClient(base: string, apiKey: string, fetchImpl: FetchLike) {
+function paddleClient(base: string, apiKey: string, fetchImpl: FetchLike, known: string[]) {
   async function call(method: string, apiPath: string, body?: unknown): Promise<Json> {
     const res = await fetchImpl(base + apiPath, {
       method,
@@ -241,7 +267,9 @@ function paddleClient(base: string, apiKey: string, fetchImpl: FetchLike) {
     }
     if (!res.ok) {
       const err = parsed?.error ?? {};
-      throw new PaddleError(`${method} ${apiPath} failed: ${res.status} ${err.code ?? 'unknown_error'}: ${err.detail ?? 'no detail'}`);
+      throw new PaddleError(
+        redactSecrets(`${method} ${apiPath} failed: ${res.status} ${String(err.code ?? 'unknown_error')}: ${String(err.detail ?? 'no detail')}`, known),
+      );
     }
     return parsed;
   }
@@ -256,7 +284,7 @@ function paddleClient(base: string, apiKey: string, fetchImpl: FetchLike) {
       next = null;
       if (pagination?.has_more && pagination.next) {
         const u = new URL(String(pagination.next), base);
-        if (u.origin !== new URL(base).origin) throw new PaddleError('pagination link points to another host');
+        if (u.origin !== new URL(base).origin || u.protocol !== 'https:') throw new PaddleError('pagination link points to another host');
         next = u.pathname + u.search;
       }
     }
@@ -302,21 +330,41 @@ const sameSet = (a: unknown, b: readonly string[]) => {
 };
 
 export function describeKey(apiKey: string, live: boolean): 'sandbox' | 'production' {
-  if (apiKey.startsWith('pdl_sdbx_')) return 'sandbox';
+  if (apiKey.startsWith('pdl_sdbx_')) {
+    if (live) throw new PaddleError('--live was given with a sandbox key (pdl_sdbx_…): drop --live, or use a live key');
+    return 'sandbox';
+  }
   if (!live) throw new PaddleError('Sandbox API key required (pdl_sdbx_…). Pass --live to use a live key on purpose.');
   if (!apiKey.startsWith('pdl_live_')) throw new PaddleError('Unrecognised API key: expected pdl_sdbx_… or (with --live) pdl_live_…');
   return 'production';
 }
 
 export async function syncCatalog(opts: SyncOptions): Promise<SyncResult> {
-  const log = opts.log ?? ((line: string) => console.log(line));
+  const known: string[] = [opts.apiKey];
+  const sink = opts.log ?? ((line: string) => console.log(line));
+  const log = (line: string) => sink(redactSecrets(line, known));
   const live = opts.live === true;
+
+  // Every environment check happens here, before the first request and before the env file is touched.
   const catalog = validateCatalog(opts.catalog);
-  const environment = describeKey(opts.apiKey ?? '', live);
-  const fetchImpl: FetchLike = opts.fetch ?? ((url, init) => fetch(url, init));
-  const paddle = paddleClient(environment === 'sandbox' ? SANDBOX_BASE : LIVE_BASE, opts.apiKey, fetchImpl);
-  const destinationName = `${catalog.app} (paddle-kit)`;
+  const environment = describeKey(opts.apiKey ?? '', live); // liveness comes from the key prefix, not only the flag
+  if (opts.webhookUrl !== undefined) {
+    let parsed: URL | null = null;
+    try {
+      parsed = new URL(opts.webhookUrl);
+    } catch {
+      parsed = null;
+    }
+    if (!parsed || parsed.protocol !== 'https:' || !parsed.hostname) throw new PaddleError('webhookUrl needs an https URL');
+  }
   const env = opts.envFile ? readEnvFile(opts.envFile) : {};
+  if (environment === 'production' && !opts.teardown && env.NEXT_PUBLIC_PADDLE_CLIENT_TOKEN?.startsWith('test_')) {
+    throw new PaddleError('Refusing to use a test_ client token with --live: remove NEXT_PUBLIC_PADDLE_CLIENT_TOKEN and re-run');
+  }
+
+  const fetchImpl: FetchLike = opts.fetch ?? ((url, init) => fetch(url, init));
+  const paddle = paddleClient(environment === 'sandbox' ? SANDBOX_BASE : LIVE_BASE, opts.apiKey, fetchImpl, known);
+  const destinationName = `${catalog.app} (paddle-kit)`;
   const rows: string[][] = [];
   const written: string[] = [];
   const pendingEnv: Record<string, string> = {};
@@ -329,6 +377,8 @@ export async function syncCatalog(opts: SyncOptions): Promise<SyncResult> {
   const done = (productId: string | null, priceIds: Record<string, string>): SyncResult => {
     printTable(log, rows);
     if (written.length) log(`Wrote to ${path.basename(opts.envFile ?? '')}: ${written.join(', ')}`);
+    // The file holds secrets: tighten it even when this run changed nothing.
+    if (opts.envFile && existsSync(opts.envFile)) chmodSync(opts.envFile, 0o600);
     const result: SyncResult = { environment, productId, priceIds, prices: toPriceMap(catalog, priceIds), rows, written };
     if (!opts.envFile) result.env = { ...pendingEnv };
     return result;
@@ -426,7 +476,6 @@ export async function syncCatalog(opts: SyncOptions): Promise<SyncResult> {
   put({ PADDLE_ENV: environment, PADDLE_PRICES: JSON.stringify(toPriceMap(catalog, ids)) });
 
   if (opts.webhookUrl) {
-    if (!/^https:\/\/[^\s]+$/.test(opts.webhookUrl)) throw new PaddleError('webhookUrl needs an https URL');
     const url = opts.webhookUrl;
     const settings = await paddle.list('/notification-settings');
     const found = settings.find((d) => d.description === destinationName);
@@ -456,18 +505,16 @@ export async function syncCatalog(opts: SyncOptions): Promise<SyncResult> {
       secret = found.endpoint_secret_key;
     }
     if (typeof secret === 'string' && secret !== '') {
+      known.push(secret);
       put({ PADDLE_NOTIFICATION_WEBHOOK_SECRET: secret });
     } else {
       log('Destination returned no secret: copy it from the Paddle dashboard into PADDLE_NOTIFICATION_WEBHOOK_SECRET');
     }
 
-    const existingToken = env.NEXT_PUBLIC_PADDLE_CLIENT_TOKEN;
-    if (live && existingToken?.startsWith('test_')) {
-      throw new PaddleError('Refusing to use a test_ client token with --live: remove NEXT_PUBLIC_PADDLE_CLIENT_TOKEN and re-run');
-    }
-    if (!existingToken) {
+    if (!env.NEXT_PUBLIC_PADDLE_CLIENT_TOKEN) {
       const token = (await paddle.call('POST', '/client-tokens', { name: `${catalog.app} (paddle-kit)`, description: 'created by paddle-kit-catalog' })).data;
-      if (live && String(token?.token ?? '').startsWith('test_')) {
+      if (typeof token?.token === 'string') known.push(token.token);
+      if (environment === 'production' && String(token?.token ?? '').startsWith('test_')) {
         throw new PaddleError('Refusing a test_ client token with --live');
       }
       if (typeof token?.token === 'string' && token.token !== '') put({ NEXT_PUBLIC_PADDLE_CLIENT_TOKEN: token.token });

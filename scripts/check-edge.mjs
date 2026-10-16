@@ -16,23 +16,29 @@ const nodeImport = new RegExp(`(?:from\\s*|import\\s*\\(?\\s*)["'](?:node:[^"']+
 // Shared chunks only count when an edge entry (transitively) imports them, so a Node-only
 // entry's private chunk is not mistaken for edge code and an edge file can never hide in one.
 const reachable = new Set();
-const visit = (f) => {
+const reachedFrom = new Map(); // chunk -> the file that first imported it
+const visit = (f, from) => {
   if (reachable.has(f)) return;
   reachable.add(f);
+  if (from) reachedFrom.set(f, from);
   const src = readFileSync(join('dist', f), 'utf8');
   for (const m of src.matchAll(/(?:from\s*|import\s*\(?\s*)["'](\.{1,2}\/[^"']+\.js)["']/g)) {
-    visit(normalize(join(dirname(f), m[1])));
+    visit(normalize(join(dirname(f), m[1])), f);
   }
 };
-entries.forEach(visit);
+entries.forEach((f) => visit(f));
 const files = [...reachable];
 
 let bad = 0;
 for (const f of files) {
   const src = readFileSync(join('dist', f), 'utf8');
   for (const pattern of [nodeImport, /require\(/, /\bBuffer\b/, /\bprocess\.(?!env)/]) {
-    if (pattern.test(src)) {
-      console.error(`EDGE VIOLATION ${f}: ${pattern.source.slice(0, 60)}`);
+    const hit = pattern.exec(src);
+    if (hit) {
+      // Name the file, the offending text, and (for a shared chunk) the file that pulls it into the edge graph.
+      const chain = [];
+      for (let x = reachedFrom.get(f); x; x = reachedFrom.get(x)) chain.push(x);
+      console.error(`EDGE VIOLATION ${f}: ${hit[0].trim()}${chain.length ? ` (reached from ${chain.join(' <- ')})` : ''}`);
       bad++;
     }
   }

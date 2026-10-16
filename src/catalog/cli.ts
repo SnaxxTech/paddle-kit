@@ -4,7 +4,7 @@
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CatalogError, PaddleError, readCatalogFile, readEnvFile, syncCatalog } from './index';
+import { CatalogError, PaddleError, readCatalogFile, readEnvFile, redactSecrets, syncCatalog } from './index';
 
 export interface CliArgs {
   catalog: string;
@@ -49,6 +49,7 @@ export function parseArgs(argv: string[]): CliArgs {
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
+  let apiKey: string | undefined;
   try {
     const args = parseArgs(argv);
     if (args.help) {
@@ -57,14 +58,15 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     }
     const cwd = process.cwd();
     const envFile = path.resolve(cwd, args.envFile);
-    const apiKey = process.env.PADDLE_API_KEY || readEnvFile(envFile).PADDLE_API_KEY;
+    apiKey = process.env.PADDLE_API_KEY || readEnvFile(envFile).PADDLE_API_KEY;
     if (!apiKey) throw new PaddleError(`PADDLE_API_KEY not found in the environment or ${args.envFile}`);
     const catalog = readCatalogFile(path.resolve(cwd, args.catalog));
     await syncCatalog({ apiKey, catalog, webhookUrl: args.webhookUrl, envFile, teardown: args.teardown, live: args.live });
     return 0;
   } catch (error) {
     // Only our own error classes carry messages that are safe to print.
-    console.error(error instanceof CatalogError || error instanceof PaddleError ? error.message : 'paddle-kit-catalog failed');
+    const safe = error instanceof CatalogError || error instanceof PaddleError;
+    console.error(safe ? redactSecrets(error.message, apiKey ? [apiKey] : []) : 'paddle-kit-catalog failed');
     return 1;
   }
 }
