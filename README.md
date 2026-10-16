@@ -282,7 +282,9 @@ PADDLE_API_KEY=pdl_sdbx_... npx paddle-kit-catalog --catalog paddle.catalog.json
 - **Written to the env file:** `PADDLE_ENV`, `PADDLE_PRICES` (a price map: `once`-only keys are flat ids, recurring keys are `{ monthly, yearly }`), and with `--webhook-url` also `PADDLE_NOTIFICATION_WEBHOOK_SECRET` (read from the destination, nothing to copy by hand) and `NEXT_PUBLIC_PADDLE_CLIENT_TOKEN`.
 - **Markers:** the product carries `custom_data.paddle_kit = "<app>"`, each price `custom_data.paddle_kit_price = "<key>-<cycle>"`, and the destination is described `"<app> (paddle-kit)"`. Re-runs and `--teardown` find their own resources only through these markers and never touch anything else (a product that has prices the tool did not create is kept on teardown). A changed `amount` patches only that price.
 - **Refuses live/test mixes before sending any request:** a live key without `--live`, `--live` with a sandbox key, or a `test_` client token in the env file with a live key.
+- Live runs (except `--teardown`) are refused while the env file holds a `test_` client token; `--live` with a sandbox key is an error.
 - The key is never printed; output and errors are redacted.
+- A top-level `"$schema"` string in the catalog JSON is allowed and ignored.
 
 ## Migrating an app that already has a catalog
 

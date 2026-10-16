@@ -99,7 +99,8 @@ function onlyKeys(obj: Record<string, unknown>, allowed: readonly string[], wher
 
 export function validateCatalog(input: unknown): Catalog {
   if (!isObj(input)) fail('(root)', 'must be a JSON object');
-  onlyKeys(input, ['app', 'product', 'prices'], '');
+  onlyKeys(input, ['$schema', 'app', 'product', 'prices'], '');
+  if (input.$schema !== undefined && typeof input.$schema !== 'string') fail('$schema', 'must be a string');
   const { app, product, prices } = input;
   if (!nonEmpty(app) || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(app)) {
     fail('app', 'must be a non-empty identifier (letters, digits, . _ -)');

@@ -136,6 +136,13 @@ describe('validateCatalog', () => {
     delete c.product.taxCategory;
     expect(validateCatalog(c).product.taxCategory).toBe('standard');
   });
+  test('allows a string $schema (ignored) and rejects a non-string one', () => {
+    const c = { ...structuredClone(CATALOG), $schema: './node_modules/paddle-kit/catalog.schema.json' } as any;
+    const out = validateCatalog(c);
+    expect(out).not.toHaveProperty('$schema');
+    expect(out.app).toBe(CATALOG.app);
+    for (const v of [1, null, {}, ['x']]) expect(bad((x) => (x.$schema = v))).toThrow(/catalog \$schema:/);
+  });
   test('errors name the offending field', () => {
     expect(bad((c) => (c.app = ''))).toThrow(/catalog app:/);
     expect(bad((c) => delete c.product.name)).toThrow(/catalog product\.name:/);
