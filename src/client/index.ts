@@ -2,12 +2,12 @@ import { initializePaddle } from '@paddle/paddle-js';
 
 export type CheckoutItem = { priceId: string; quantity: number };
 export type CheckoutOptions = {
+  items: CheckoutItem[];
   userId: string;
   email?: string;
-  successUrl?: string;
   /** Extra custom data (e.g. an order id) sent with the checkout. `userId` is always set from `userId` and cannot be overridden. */
   customData?: Record<string, unknown>;
-} & ({ priceId: string; quantity?: number; items?: never } | { items: CheckoutItem[]; priceId?: never; quantity?: never });
+};
 
 export async function createCheckout(cfg: {
   token: string;
@@ -27,15 +27,11 @@ export async function createCheckout(cfg: {
   return {
     open(o: CheckoutOptions): void {
       if (!o.userId) throw new Error('paddle-kit: userId is required so the subscription can be linked to the user');
-      const hasPrice = typeof o.priceId === 'string' && o.priceId.length > 0;
-      const hasItems = Array.isArray(o.items) && o.items.length > 0;
-      if (hasPrice === hasItems) throw new Error('paddle-kit: pass exactly one of priceId or items');
-      const items = hasItems ? o.items! : [{ priceId: o.priceId!, quantity: o.quantity ?? 1 }];
+      if (!Array.isArray(o.items) || o.items.length === 0) throw new Error('paddle-kit: items needs at least one { priceId, quantity }');
       paddle.Checkout.open({
-        items,
+        items: o.items,
         customer: o.email ? { email: o.email } : undefined,
         customData: { ...o.customData, userId: o.userId },
-        settings: o.successUrl ? { successUrl: o.successUrl } : undefined,
       });
     },
   };

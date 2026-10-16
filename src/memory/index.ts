@@ -5,7 +5,6 @@ interface FailureHit { at: string; reason: ReasonCode }
 
 const DAY_MS = 86_400_000;
 const DONE: ReadonlySet<EventStatus> = new Set(['processed', 'ignored', 'stale']);
-const clone = <T>(v: T): T => structuredClone(v);
 
 export function memoryStore(): Store {
   const events = new Map<string, EventRow>();
@@ -37,13 +36,13 @@ export function memoryStore(): Store {
     async upsertCustomer(c) {
       const prev = customers.get(c.customerId);
       if (prev && Date.parse(prev.lastEventAt) > Date.parse(c.lastEventAt)) return { applied: false };
-      customers.set(c.customerId, clone(c));
+      customers.set(c.customerId, structuredClone(c));
       return { applied: true };
     },
     async upsertSubscription(s) {
       const prev = subs.get(s.subscriptionId);
       if (prev && Date.parse(prev.lastEventAt) > Date.parse(s.lastEventAt)) return { applied: false };
-      subs.set(s.subscriptionId, clone({ ...s, userId: s.userId ?? prev?.userId ?? null }));
+      subs.set(s.subscriptionId, structuredClone({ ...s, userId: s.userId ?? prev?.userId ?? null }));
       return { applied: true };
     },
     async recordTransaction(t) {
@@ -55,13 +54,13 @@ export function memoryStore(): Store {
     },
     async getSubscription(id) {
       const s = subs.get(id);
-      return s ? clone(s) : null;
+      return s ? structuredClone(s) : null;
     },
     async getSubscriptionsByUser(userId) {
       return [...subs.values()]
         .filter((s) => s.userId === userId)
         .sort((a, b) => Date.parse(b.lastEventAt) - Date.parse(a.lastEventAt))
-        .map(clone);
+        .map((x) => structuredClone(x));
     },
     async health(now): Promise<Health> {
       const since = now.getTime() - DAY_MS;

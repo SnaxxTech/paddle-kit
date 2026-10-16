@@ -246,6 +246,13 @@ describe('readBillingEnv', () => {
     }
   });
 
+  it('PADDLE_HEALTH_TOKEN with leading or trailing whitespace is a problem, never echoed', () => {
+    const r = readBillingEnv({ ...valid, PADDLE_HEALTH_TOKEN: ' ht_DISTINCT_42\n' }, OPTS);
+    expect(r.config).toBeNull();
+    expect(r.problems).toEqual(['PADDLE_HEALTH_TOKEN has leading or trailing whitespace']);
+    expect(r.problems.join(' ')).not.toContain('ht_DISTINCT_42');
+  });
+
   it('an invalid PADDLE_ENV does not also produce a client-token or api-key mismatch', () => {
     const { problems } = readBillingEnv({ ...valid, PADDLE_ENV: 'prod', NEXT_PUBLIC_PADDLE_CLIENT_TOKEN: 'live_t', PADDLE_API_KEY: 'pdl_live_k' }, OPTS);
     expect(problems).toEqual(['PADDLE_ENV must be "sandbox" or "production"']);

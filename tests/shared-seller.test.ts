@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createBilling, type BillingConfig } from '../src/core/billing';
 import { memoryStore } from '../src/memory';
 import { MIGRATIONS, postgresStore } from '../src/postgres';
-import { reconcile, type SdkSubscriptionLike } from '../src/reconcile';
+import { reconcile } from '../src/reconcile';
 import type { Adjustment, AdjustmentContext, LogEntry, Store, Transaction } from '../src/core/types';
 import { sign } from './helpers/sign';
 import { loadFixture, subscriptionEvent } from './helpers/fixtures';
@@ -57,7 +57,7 @@ describe('shared seller account: owns', () => {
     expect(res.status).toBe(200);
     expect(t.txs).toHaveLength(0);
     expect(t.reasonOf(loadFixture('transaction.completed').event_id)).toEqual(['ignored', 'not_ours']);
-    const health = await t.billing.health();
+    const health = await t.billing.store.health(NOW);
     expect(health.failedLast24h).toBe(0);
     expect(health.lastEventAt).toBe(NOW.toISOString()); // still proves the webhook is alive
     expect(t.logs).toEqual([]); // normal traffic on a shared account: no warn line
@@ -95,7 +95,7 @@ describe('shared seller account: owns', () => {
     expect((await t.send(ev)).status).toBe(200);
     expect(await t.store.getSubscription(ev.data.id)).toBeNull();
     expect(t.reasonOf('evt_sub')).toEqual(['ignored', 'not_ours']);
-    expect((await t.billing.health()).unlinkedLast24h).toBe(0);
+    expect((await t.billing.store.health(NOW)).unlinkedLast24h).toBe(0);
   });
 
   it('our subscription is mirrored', async () => {
@@ -205,13 +205,12 @@ describe('shared seller account: adjustments', () => {
 describe('shared seller account: reconcile', () => {
   it('skips subscriptions that are not ours', async () => {
     const t = setup({ owns: { priceIds: [SEAT_PRICE] } });
-    const sub = (id: string, priceId: string): SdkSubscriptionLike => ({
-      id, status: 'active', customerId: 'ctm_1', items: [{ price: { id: priceId, productId: 'pro_x' } as any }],
-      customData: { userId: 'u1' }, updatedAt: '2026-10-15T09:00:00Z',
+    const sub = (id: string, priceId: string) => ({
+      ...loadFixture('subscription.created').data, id, items: [{ price: { id: priceId, product_id: 'pro_x' }, quantity: 1 }],
     });
-    const client = { subscriptions: { async *list() { yield sub('sub_ours', SEAT_PRICE); yield sub('sub_theirs', 'pri_other'); } } };
-    const result = await reconcile(t.billing, { apiKey: 'pdl_sdbx_x', client });
-    expect(result).toEqual({ scanned: 2, applied: 1, notOurs: 1 });
+    const fetch = async () => ({ ok: true, status: 200, json: async () => ({ data: [sub('sub_ours', SEAT_PRICE), sub('sub_theirs', 'pri_other')], meta: { pagination: { has_more: false } } }) });
+    const result = await reconcile(t.billing, { apiKey: 'pdl_sdbx_x', fetch });
+    expect(result).toEqual({ scanned: 2, applied: 1, notOurs: 1, invalid: 0 });
     expect(await t.store.getSubscription('sub_theirs')).toBeNull();
     expect(await t.store.getSubscription('sub_ours')).not.toBeNull();
   });

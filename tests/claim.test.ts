@@ -18,15 +18,17 @@ describe('event claim (concurrent duplicate deliveries)', () => {
     let calls = 0;
     const handle = createWebhookHandler({
       store, secret: SECRET, toleranceSeconds: 5, log: () => {}, now: () => NOW,
-      onTransaction: async () => { calls++; await tick(); },
+      onTransaction: async () => { calls++; await new Promise((r) => setTimeout(r, 50)); },
     });
     const body = JSON.stringify(loadFixture('transaction.completed'));
     const res = await Promise.all(Array.from({ length: 50 }, () => handle(post(body))));
-    const statuses = res.map((r) => r.status);
+    const bodies = await Promise.all(res.map((r) => r.json() as Promise<Record<string, unknown>>));
     expect(calls).toBe(1);
-    expect(statuses.filter((s) => s === 200)).toHaveLength(1);
-    expect(statuses.filter((s) => s === 409)).toHaveLength(49);
-    expect(await res.find((r) => r.status === 409)!.json()).toEqual({ error: 'in_progress' });
+    // exactly one delivery processes; the rest raced it (409) or arrived after it finished (200 duplicate)
+    expect(res.filter((r, i) => r.status === 200 && !bodies[i]!.duplicate)).toHaveLength(1);
+    expect(res.filter((r, i) => r.status === 409 || bodies[i]!.duplicate)).toHaveLength(49);
+    expect(res.filter((r) => r.status === 409).length).toBeGreaterThan(0);
+    expect(bodies.find((_, i) => res[i]!.status === 409)).toEqual({ error: 'in_progress' });
     // in_progress is not a failure: health stays clean
     expect((await store.health(NOW)).failedLast24h).toBe(0);
     // a redelivery after the winner finished is a plain duplicate

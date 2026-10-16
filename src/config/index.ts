@@ -138,6 +138,9 @@ export function readBillingEnv(
     problems.push('BILLING_LAUNCH_AT is missing');
   }
 
+  const healthToken = env.PADDLE_HEALTH_TOKEN;
+  if (healthToken && healthToken !== healthToken.trim()) problems.push('PADDLE_HEALTH_TOKEN has leading or trailing whitespace');
+
   const apiKey = env.PADDLE_API_KEY || undefined;
   if (apiKey && envValid && !apiKey.startsWith(environment === 'production' ? 'pdl_live_' : 'pdl_sdbx_'))
     problems.push('PADDLE_API_KEY does not match PADDLE_ENV (pdl_sdbx_ = sandbox, pdl_live_ = production)');
@@ -151,7 +154,7 @@ export function readBillingEnv(
     launchAt,
     enforce: env.BILLING_ENFORCE === '1',
   };
-  if (env.PADDLE_HEALTH_TOKEN) config.healthToken = env.PADDLE_HEALTH_TOKEN;
+  if (env.PADDLE_HEALTH_TOKEN) config.healthToken = env.PADDLE_HEALTH_TOKEN; // whitespace rejected above
   if (apiKey) config.apiKey = apiKey;
   const priceIds = [...new Set(Object.values(prices).flatMap((p) => (typeof p === 'string' ? [p] : Object.values(p))))];
   if (priceIds.length > 0) config.owns = { priceIds };

@@ -1,6 +1,5 @@
 export type ReasonCode =
   | 'missing_body'
-  | 'missing_raw_body'
   | 'bad_signature_header'
   | 'signature_mismatch'
   | 'stale_timestamp'

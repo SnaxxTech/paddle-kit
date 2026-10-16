@@ -4,13 +4,13 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createBilling } from '../src/core/billing';
 import { MIGRATIONS, postgresStore, type SqlQuery } from '../src/postgres';
 import { sign } from './helpers/sign';
 import { loadFixture, subscriptionEvent } from './helpers/fixtures';
 
-type Pool = { query: SqlQuery; end(): Promise<void> };
+type Pool = { query: SqlQuery; end(): Promise<void>; on(event: 'error', fn: (e: Error) => void): void };
 type PgModule = { default: { Pool: new (o: Record<string, unknown>) => Pool } };
 
 async function connect(): Promise<{ url: string; stop: () => Promise<void> } | { skip: string }> {
@@ -44,13 +44,25 @@ const { Pool } = live ? ((await import('pg' as string)) as PgModule).default : (
 const SECRET = 'pdl_ntfset_test';
 const NOW = new Date('2026-10-15T12:00:00Z');
 const ts = Math.floor(NOW.getTime() / 1000);
-// Every test closes its pools: Postgres allows 100 connections by default.
+// Every test closes its pools: Postgres allows 100 connections by default. A pool error during a test fails it;
+// an idle connection the server terminates while it stops (57P01) is reported, not thrown as an unhandled error.
 let pools: Pool[] = [];
+let stopping = false;
+const poolErrors: string[] = [];
+function watched(p: Pool, label: string): Pool {
+  p.on('error', (e) => {
+    if (stopping) report(`after stop: ${label}: ${e.message}`);
+    else poolErrors.push(`${label}: ${e.message}`);
+  });
+  return p;
+}
 afterEach(async () => {
   await Promise.all(pools.map((p) => p.end()));
   pools = [];
+  expect(poolErrors.splice(0)).toEqual([]);
 });
 afterAll(async () => {
+  stopping = true;
   if (live) await live.stop();
 });
 // stderr, not console: vitest does not print console output of passing tests here, and these lines are the evidence.
@@ -59,10 +71,10 @@ const report = (line: string) => process.stderr.write(`[pg] ${line}\n`);
 /** A fresh schema per test, migrated with the kit's own MIGRATIONS, behind a pool of real connections. */
 async function freshPool(max = 20): Promise<Pool> {
   const schema = `pk_${Math.random().toString(36).slice(2, 10)}`;
-  const admin = new Pool({ connectionString: live!.url, max: 1 });
+  const admin = watched(new Pool({ connectionString: live!.url, max: 1 }), 'admin');
   await admin.query(`CREATE SCHEMA ${schema}`);
   await admin.end();
-  const pool = new Pool({ connectionString: live!.url, max, options: `-c search_path=${schema}` });
+  const pool = watched(new Pool({ connectionString: live!.url, max, options: `-c search_path=${schema}` }), schema);
   pools.push(pool);
   for (const m of MIGRATIONS) await pool.query(m.sql);
   return pool;
@@ -92,6 +104,12 @@ const shuffle = <T>(xs: T[]): T[] => {
 const pct = (sorted: number[], p: number) => sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)]!;
 
 describe.skipIf(!live)('real Postgres: concurrency', () => {
+  beforeAll(async () => {
+    const p = watched(new Pool({ connectionString: live!.url, max: 1 }), 'version');
+    const { rows } = await p.query('SELECT version() AS v, current_setting(\'max_connections\') AS max_connections');
+    report(`server: ${rows[0]!.v} (max_connections ${rows[0]!.max_connections}) via ${process.env.PADDLE_KIT_PG_URL ? 'PADDLE_KIT_PG_URL' : 'embedded-postgres'}`);
+    await p.end();
+  });
   let pool: Pool;
   beforeEach(async () => { pool = await freshPool(); });
 
@@ -223,6 +241,6 @@ describe.skipIf(!live)('real Postgres: concurrency', () => {
     expect(adjCalls).toBe(100);
     const { rows } = await pool.query(`SELECT count(*)::int AS n FROM paddle_events WHERE status IN ('processed','stale')`);
     expect(rows[0]!.n).toBe(800);
-    expect((await billing.health()).failedLast24h).toBe(0);
+    expect((await billing.store.health(NOW)).failedLast24h).toBe(0);
   }, 120_000);
 });

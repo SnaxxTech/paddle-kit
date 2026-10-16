@@ -1,7 +1,7 @@
 import { decideAccess } from './access';
 import { createWebhookHandler } from './handler';
 import { ownershipPredicate } from './owns';
-import type { Adjustment, AdjustmentContext, Health, HookContext, Logger, Owns, ReasonCode, Store, Subscription, Transaction } from './types';
+import type { Adjustment, AdjustmentContext, HookContext, Logger, Owns, Store, Transaction } from './types';
 
 export interface BillingConfig {
   environment: 'sandbox' | 'production';
@@ -9,7 +9,6 @@ export interface BillingConfig {
   store: Store;
   entitlements: Record<string, readonly string[]>;
   pastDueGraceDays?: number;
-  signatureToleranceSeconds?: number;
   healthToken?: string;
   allowProductionInDev?: boolean;
   /**
@@ -54,14 +53,11 @@ export interface BillingConfig {
 
 export interface Billing {
   config: Readonly<Omit<BillingConfig, 'webhookSecret'>>;
+  /** The store itself: `billing.store.health(now)`, `billing.store.getSubscriptionsByUser(userId)`. */
   store: Store;
-  log: Logger;
   handleWebhook(req: Request): Promise<Response>;
   handleHealth(req: Request): Promise<Response>;
   hasAccess(userId: string, feature: string): Promise<boolean>;
-  getSubscriptions(userId: string): Promise<Subscription[]>;
-  health(): Promise<Health>;
-  recordFailure(reason: ReasonCode): Promise<void>;
 }
 
 const defaultLog: Logger = (entry) => console[entry.level](JSON.stringify({ source: 'paddle-kit', ...entry }));
@@ -80,7 +76,7 @@ export function createBilling(config: BillingConfig): Billing {
     owns,
     store: config.store,
     secret: config.webhookSecret,
-    toleranceSeconds: config.signatureToleranceSeconds ?? 5,
+    toleranceSeconds: 5,
     leaseSeconds: config.eventLeaseSeconds,
     log,
     now,
@@ -92,7 +88,6 @@ export function createBilling(config: BillingConfig): Billing {
   return {
     config: publicConfig,
     store: config.store,
-    log,
     handleWebhook,
     async handleHealth(req) {
       if (!config.healthToken) return new Response(null, { status: 404 });
@@ -107,16 +102,6 @@ export function createBilling(config: BillingConfig): Billing {
     async hasAccess(userId, feature) {
       if (!userId) return false;
       return decideAccess(await config.store.getSubscriptionsByUser(userId), feature, policy, now());
-    },
-    getSubscriptions: (userId) => config.store.getSubscriptionsByUser(userId),
-    health: () => config.store.health(now()),
-    async recordFailure(reason) {
-      log({ level: 'warn', reason });
-      try {
-        await config.store.recordFailure(reason, now());
-      } catch {
-        log({ level: 'error', reason: 'store_error' });
-      }
     },
   };
 }

@@ -3,7 +3,7 @@ import { builtinModules } from 'node:module';
 import { dirname, join, normalize } from 'node:path';
 
 // Entry directories that must run on edge runtimes. catalog/ and sqlite/ are Node-only and deliberately absent.
-const EDGE_SAFE = ['core', 'memory', 'postgres', 'next', 'hono', 'plan', 'config'];
+const EDGE_SAFE = ['core', 'memory', 'postgres', 'next', 'reconcile', 'plan', 'config'];
 const all = readdirSync('dist', { recursive: true })
   .map(String)
   .filter((f) => f.endsWith('.js'));

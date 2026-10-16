@@ -7,8 +7,6 @@ export default defineConfig({
     'postgres/index': 'src/postgres/index.ts',
     'sqlite/index': 'src/sqlite/index.ts',
     'next/index': 'src/next/index.ts',
-    'hono/index': 'src/hono/index.ts',
-    'express/index': 'src/express/index.ts',
     'client/index': 'src/client/index.ts',
     'reconcile/index': 'src/reconcile/index.ts',
     'plan/index': 'src/plan/index.ts',
@@ -20,5 +18,4 @@ export default defineConfig({
   dts: true,
   clean: true,
   splitting: true,
-  external: ['@paddle/paddle-node-sdk', '@paddle/paddle-js', 'hono', 'express'],
 });

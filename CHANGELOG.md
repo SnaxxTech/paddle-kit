@@ -4,6 +4,21 @@
 
 Upgrade steps: [UPGRADING.md](UPGRADING.md). **Run migration `002_claims_transactions` before deploying.**
 
+### BREAKING: removed (no SnaxxTech app used them; each has a replacement in UPGRADING.md)
+- `paddle-kit/express` and `paddle-kit/hono`, with `Billing.recordFailure`, `Billing.log` and the reason code `missing_raw_body` (only the Express adapter used them). Peer dependencies `express`, `hono` and `@paddle/paddle-node-sdk` are gone; `@paddle/paddle-js` (client) is the only peer left.
+- `reconcile` no longer uses the Paddle Node SDK: it reads `GET /subscriptions` with `fetch` and maps through the webhook's own `subscriptionFrom()`. Options `{ apiKey, fetch? }` (the `client` option, `SdkSubscriptionLike` and `fromSdkSubscription` are gone); returns `{ scanned, applied, notOurs, invalid }`. **Fixes** reconciled rows: `raw` was the SDK's camelCase object (so line items and custom data read wrong), `status` skipped the status check, and `userId` skipped the control-character filter. A reconciled row now deep-equals the webhook row apart from `lastEventAt`. reconcile is now edge-safe.
+- `itemsOf`, `customDataOf`, `verifySignature`, `VerifyResult`, `decideAccess`, `AccessPolicy` are no longer exported from `paddle-kit/core` (only `createBilling` and the types are).
+- `Billing.getSubscriptions()` and `Billing.health()`: use `billing.store.getSubscriptionsByUser(userId)` and `billing.store.health(new Date())`.
+- `createBilling({ signatureToleranceSeconds })`: tolerance is fixed at 5 s.
+- Client `open({ priceId, quantity })` shorthand and `successUrl`: pass `items` (`[{ priceId, quantity }]`); navigate on Paddle.js `checkout.completed`.
+- The `migrations/*.sql` files: `MIGRATIONS` from `paddle-kit/postgres` is the only copy. The `"import"` export condition is gone (`"default"` resolves the same ESM files).
+- Not removed: `PlanInput.exempt` (Offday passes `exempt: demo`, and its demo-is-free test depends on it).
+
+### Fixes and small changes
+- `PADDLE_HEALTH_TOKEN` with leading or trailing whitespace is a `readBillingEnv` problem (never echoed), like the other secrets.
+- The catalog CLI's summary prints amounts in the currency's own minor unit (¥1500 was shown as "15.00 JPY").
+- Internal: catalog `EVENTS` is derived from one `EVENT_TYPES` record (same 15 events; the name stays); one `PriceMap` declaration; the CLI's duplicate https check is gone (syncCatalog checks before any request); `clone` wrapper and tsup `external` removed; the Paddle REST client is shared by catalog and reconcile.
+
 ### Shared seller accounts
 - New `createBilling({ owns })`: `{ priceIds?, productIds? }` or a predicate `({ kind, items, customData }) => boolean`. Subscription and transaction events with none of them are acknowledged and recorded as `ignored` with the new reason `not_ours`: never mirrored, no hook, not a failure in health, no warn line. A subscription already in the mirror stays ours; so does a transaction on a mirrored subscription. An `owns` object without ids throws; a throwing predicate fails the event as `hook_error`.
 - Every transaction seen is remembered with its ownership (new table `paddle_transactions`; optional `Store.recordTransaction` / `getTransaction`, implemented by all three kit stores). An adjustment of a transaction seen as someone else's is `not_ours`. An adjustment of a transaction never seen is **not dropped**: `onAdjustment` gets it with the new `ctx.known === false` (a refund can arrive before its payment).
@@ -15,7 +30,7 @@ Upgrade steps: [UPGRADING.md](UPGRADING.md). **Run migration `002_claims_transac
 - New real-Postgres suite `npm run test:pg` (N=50 parallel duplicates, shuffled parallel `subscription.updated`, flaky-hook redeliveries, 1,000-event load with p95 and a sample-count reconciliation). It skips with a loud SKIP line when no server is available, and fails in CI (`PADDLE_KIT_REQUIRE_PG=1`) instead of skipping.
 
 ### Tooling
-- `UPGRADING.md`; CI workflow (`.github/workflows/ci.yml`): typecheck, tests, build, edge check, the packed-tarball smoke check in a scratch app, and the Postgres suite against a `postgres:16` service.
+- `UPGRADING.md`; CI workflow (`.github/workflows/ci.yml`): typecheck, tests, build, edge check, the packed-tarball smoke check in a scratch app (now also checks that `paddle-kit/hono` and `paddle-kit/express` no longer resolve), and the Postgres suite against a `postgres:16` service. The real-Postgres suite prints the server version.
 - `npm run smoke` now also runs a signed webhook through the installed tarball (`owns` filtering and a known/unknown refund).
 
 ## 0.3.1 (2026-10-16)

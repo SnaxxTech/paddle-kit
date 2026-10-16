@@ -180,6 +180,17 @@ describe('syncCatalog', () => {
     expect(paddle.calls).toHaveLength(0);
   });
 
+  test('the summary shows amounts in the currency\'s own minor unit (JPY has none, USD has cents)', async () => {
+    const paddle = fakePaddle();
+    const catalog: Catalog = { ...CATALOG, prices: [
+      { key: 'pack', cycle: 'once', name: 'Pack (yen)', amount: '1500', currency: 'JPY' },
+      { key: 'packusd', cycle: 'once', name: 'Pack', amount: '1499', currency: 'USD' },
+    ] };
+    const out = await syncCatalog({ apiKey: KEY, catalog, fetch: paddle.fetch, log: () => {} });
+    const shown = out.rows.filter((r) => r[0]!.startsWith('price')).map((r) => r[2]);
+    expect(shown).toEqual(['1500 JPY (created)', '14.99 USD (created)']);
+  });
+
   test('creates the product and prices (one-time without billing_cycle) on an empty account', async () => {
     const paddle = fakePaddle();
     const file = tmpEnv(ENV0);
@@ -447,7 +458,8 @@ describe('paddle-kit-catalog cli', () => {
       live: true,
       help: false,
     });
-    expect(() => parseArgs(['--webhook-url', 'http://x'])).toThrow('--webhook-url needs an https URL');
+    // the https rule lives once, in syncCatalog (tested below with every non-https shape), before any request
+    expect(parseArgs(['--webhook-url', 'http://x']).webhookUrl).toBe('http://x');
     expect(() => parseArgs(['--catalog'])).toThrow('--catalog needs a value');
     expect(() => parseArgs(['--nope'])).toThrow('unknown option: --nope');
   });

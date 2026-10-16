@@ -6,14 +6,18 @@ import { join, resolve } from 'node:path';
 const tgz = execFileSync('npm', ['pack', '--silent'], { encoding: 'utf8' }).trim().split('\n').at(-1);
 const dir = mkdtempSync(join(tmpdir(), 'paddle-kit-smoke-'));
 writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'smoke', type: 'module', private: true }));
-execFileSync('npm', ['i', '--silent', resolve(tgz), '@paddle/paddle-node-sdk@3.10.0', '@paddle/paddle-js', 'hono', 'express', 'typescript@5.9.3', '@types/express', '@types/node'], { cwd: dir, stdio: 'inherit' });
-const subpaths = ['core', 'memory', 'postgres', 'sqlite', 'next', 'hono', 'express', 'client', 'reconcile', 'plan', 'config', 'catalog'];
+execFileSync('npm', ['i', '--silent', resolve(tgz), '@paddle/paddle-js', 'typescript@5.9.3', '@types/node'], { cwd: dir, stdio: 'inherit' });
+const subpaths = ['core', 'memory', 'postgres', 'sqlite', 'next', 'client', 'reconcile', 'plan', 'config', 'catalog'];
 const code = subpaths.map((p) => `await import('paddle-kit/${p}');`).join('\n') + "\nconsole.log('all subpaths import');";
 // CommonJS-style resolvers (Playwright, tsx, Jest) resolve through the "default" condition.
 const resolveCheck = subpaths.map((p) => `require.resolve('paddle-kit/${p}');`).join('\n') + "\nconsole.log('all subpaths resolve via require');";
 writeFileSync(join(dir, 'check.mjs'), code);
 execFileSync('node', ['check.mjs'], { cwd: dir, stdio: 'inherit' });
-writeFileSync(join(dir, 'resolve.cjs'), resolveCheck);
+writeFileSync(join(dir, 'resolve.cjs'), resolveCheck + `
+for (const gone of ['paddle-kit/hono', 'paddle-kit/express']) {
+  try { require.resolve(gone); throw new Error(gone + ' still resolves'); } catch (e) { if (e.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw e; }
+}
+console.log('removed subpaths (hono, express) are gone');`);
 execFileSync('node', ['resolve.cjs'], { cwd: dir, stdio: 'inherit' });
 
 // Prove the published types resolve for NodeNext consumers.
@@ -23,14 +27,12 @@ import { memoryStore } from 'paddle-kit/memory';
 import { postgresStore } from 'paddle-kit/postgres';
 import { sqliteStore } from 'paddle-kit/sqlite';
 import { createNextRoute } from 'paddle-kit/next';
-import { paddleWebhook } from 'paddle-kit/hono';
-import { paddleWebhook as ex } from 'paddle-kit/express';
 import { createCheckout } from 'paddle-kit/client';
 import { reconcile } from 'paddle-kit/reconcile';
 import { planOf, type Plan } from 'paddle-kit/plan';
 import { readBillingEnv, type BillingEnv, type PriceMap } from 'paddle-kit/config';
 import { syncCatalog, validateCatalog, type Catalog } from 'paddle-kit/catalog';
-export type T = [Billing, typeof memoryStore, typeof postgresStore, typeof sqliteStore, typeof createNextRoute, typeof paddleWebhook, typeof ex, typeof createCheckout, typeof reconcile, typeof planOf, Plan, typeof readBillingEnv, BillingEnv, PriceMap, typeof syncCatalog, typeof validateCatalog, Catalog];
+export type T = [Billing, typeof memoryStore, typeof postgresStore, typeof sqliteStore, typeof createNextRoute, typeof createCheckout, typeof reconcile, typeof planOf, Plan, typeof readBillingEnv, BillingEnv, PriceMap, typeof syncCatalog, typeof validateCatalog, Catalog];
 `);
 execFileSync('npx', ['tsc', '-p', '.'], { cwd: dir, stdio: 'inherit' });
 console.log('types resolve under NodeNext');

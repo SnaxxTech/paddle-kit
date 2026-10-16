@@ -39,11 +39,8 @@ export function parseArgs(argv: string[]): CliArgs {
     else if (a === '--help' || a === '-h') args.help = true;
     else if (a === '--catalog') args.catalog = value(i++, a);
     else if (a === '--env-file') args.envFile = value(i++, a);
-    else if (a === '--webhook-url') {
-      const url = value(i++, a);
-      if (!/^https:\/\/[^\s]+$/.test(url)) throw new CatalogError('--webhook-url needs an https URL');
-      args.webhookUrl = url;
-    } else throw new CatalogError(`unknown option: ${a}`);
+    else if (a === '--webhook-url') args.webhookUrl = value(i++, a); // syncCatalog requires https, before any request
+    else throw new CatalogError(`unknown option: ${a}`);
   }
   return args;
 }

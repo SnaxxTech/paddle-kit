@@ -1,7 +1,7 @@
 # paddle-kit
 
 Drop-in billing layer for web projects that sell through **Paddle Billing** (v2, not Classic): verified webhooks, subscription state mirrored into your own Postgres, and one `hasAccess(userId, feature)` check.
-Framework-agnostic core (Web-standard APIs only, no runtime dependencies), with adapters for Next.js, Hono and Express.
+Framework-agnostic core (Web-standard APIs only, no runtime dependencies), with a Next.js route helper; any framework that hands you a Web `Request` needs no adapter (see Other frameworks).
 
 Not for in-app purchases in store-distributed mobile apps. Google Play and the App Store require their own billing for digital goods; Paddle covers web checkout only.
 
@@ -13,7 +13,7 @@ npm i github:SnaxxTech/paddle-kit#v0.4.0
 
 `memoryStore` (`paddle-kit/memory`) is for tests and local development only: its failure log is unbounded and it is not shared across instances. Use `postgresStore` in production.
 
-Optional peer dependencies, install only what you use: `@paddle/paddle-node-sdk` (reconcile), `@paddle/paddle-js` (client checkout), `hono`, `express`. Using `paddle-kit/express` also needs `@types/express` for its types.
+One optional peer dependency: `@paddle/paddle-js`, only for `paddle-kit/client` (browser checkout). `reconcile` and the catalog CLI call the Paddle REST API with `fetch`; the Paddle Node SDK is not needed (since v0.4.0).
 
 Upgrading from an earlier tag: see [UPGRADING.md](UPGRADING.md) (bump the tag, run the new migrations, read the CHANGELOG).
 
@@ -36,8 +36,10 @@ Production guard: `environment: 'production'` throws when `NODE_ENV` is set and 
 
 The package never runs DDL itself. Run it once per project, either way:
 
-- apply every file in `node_modules/paddle-kit/migrations/` in order (`001_init.sql`, `002_claims_transactions.sql`, …) with your migration tool, or
-- import `MIGRATIONS` from `paddle-kit/postgres` (`{ name, sql }[]`) and execute each `sql` (SQLite: `SQLITE_MIGRATIONS`).
+- import `MIGRATIONS` from `paddle-kit/postgres` (`{ name, sql }[]`, in order) and execute each `sql` (SQLite: `SQLITE_MIGRATIONS`), or
+- copy each entry's `sql` verbatim into your migration tool (one tool migration per kit migration, as AppCare does with drizzle), and add a test that the copies still equal `MIGRATIONS`.
+
+`MIGRATIONS` is the only copy (the `migrations/*.sql` files were removed in v0.4.0).
 
 The migrations are additive. `001_init` creates `paddle_events`, `paddle_subscriptions`, `paddle_customers` and `paddle_failures`; `002_claims_transactions` (v0.4.0) creates `paddle_event_claims` (one row per event while a delivery runs its hooks) and `paddle_transactions` (every transaction seen, with whether it was this app's). **Run a new migration before deploying the code that needs it**: v0.4 code on a database without `002` answers 500 `store_error` to every event (Paddle retries, nothing is lost, health shows it). It uses `CREATE TABLE IF NOT EXISTS`, which does nothing if your project already has a table with one of those names but a different shape. Check for existing tables of those names before migrating. Shipped migration files are never edited; later changes arrive as new numbered files.
 
@@ -90,7 +92,7 @@ export function UpgradeButton({ userId, email }: { userId: string; email: string
           token: process.env.NEXT_PUBLIC_PADDLE_CLIENT_TOKEN!,
           environment: process.env.NEXT_PUBLIC_PADDLE_ENV as 'sandbox' | 'production',
         });
-        checkout.open({ priceId: 'pri_01abc', userId, email });
+        checkout.open({ items: [{ priceId: 'pri_01abc', quantity: 1 }], userId, email });
       }}
     >
       Upgrade
@@ -152,12 +154,11 @@ const checkout = await createCheckout({
   environment: 'sandbox',
   onEvent: (e) => console.log(e), // optional: every Paddle.js event (e.g. checkout.completed)
 });
-// One price:
-checkout.open({ priceId: 'pri_01abc', userId: 'org_1' });
-// Several line items (pass exactly one of priceId or items):
+// One or several line items (items is required; the priceId/quantity shorthand was removed in v0.4.0):
 checkout.open({ items: [{ priceId: 'pri_base', quantity: 1 }, { priceId: 'pri_extra', quantity: 12 }], userId: 'org_1' });
 // Extra custom data (e.g. an order id) comes back on the transaction; userId is always yours and cannot be overridden:
-checkout.open({ priceId: 'pri_01abc', userId: 'org_1', customData: { order_id: 'ord_7' } });
+checkout.open({ items: [{ priceId: 'pri_01abc', quantity: 1 }], userId: 'org_1', customData: { order_id: 'ord_7' } });
+// After payment, Paddle.js emits checkout.completed (onEvent above): navigate there yourself; successUrl was removed in v0.4.0.
 ```
 
 ## One-time purchases and refunds (hooks)
@@ -340,33 +341,25 @@ Example (Offday): its script used markers `offday` / `offday_price` and the dest
 
 Then run the CLI and replace the app's `PADDLE_PRICES` and `PADDLE_NOTIFICATION_WEBHOOK_SECRET` with the new values. Existing subscriptions on archived prices should keep renewing and only new checkouts need the new price ids (**UNVERIFIED** by us: confirm in sandbox before archiving a live catalog). Check afterwards that exactly one active destination points at your URL.
 
-## Hono
+## Other frameworks
+
+`billing.handleWebhook(req)` and `billing.handleHealth(req)` take a Web `Request` and return a `Response`, so Hono, Bun, Deno, Workers and Remix need no adapter (the Hono and Express adapters were removed in v0.4.0):
 
 ```ts
-import { Hono } from 'hono';
-import { paddleWebhook, paddleHealth } from 'paddle-kit/hono';
-import { billing } from './billing';
-
-const app = new Hono();
-app.post('/paddle', paddleWebhook(billing));
-app.get('/paddle', paddleHealth(billing));
+app.post('/paddle', (c) => billing.handleWebhook(c.req.raw)); // Hono: the untouched raw request
+app.get('/paddle', (c) => billing.handleHealth(c.req.raw));
 ```
 
-## Express
+Express hands you a parsed body, which can never match the signature. Read the **raw** body on that route and build a `Request` from it:
 
 ```ts
-import express from 'express';
-import { paddleWebhook, paddleHealth } from 'paddle-kit/express';
-import { billing } from './billing';
-
-const app = express();
-// Mount express.raw on the webhook route. Do NOT run express.json() before it.
-app.post('/paddle', express.raw({ type: '*/*' }), paddleWebhook(billing));
-app.get('/paddle', paddleHealth(billing)); // 404 unless healthToken is set
-app.use(express.json()); // fine, but only AFTER the webhook route
+app.post('/paddle', express.raw({ type: '*/*' }), async (req, res) => {
+  const r = await billing.handleWebhook(new Request('https://local/paddle', { method: 'POST', headers: req.headers as HeadersInit, body: req.body }));
+  res.status(r.status).type('application/json').send(await r.text());
+}); // mount express.json() only AFTER this route
 ```
 
-If the body was already parsed, the adapter returns **500 `missing_raw_body`** by design (a re-serialised body can never match the signature) and records the failure. If a handler throws, both Express handlers log `store_error` and answer **500 `{ "error": "store_error" }`** (Express 4 does not catch async rejections).
+Both recipes are **UNVERIFIED** by us (not run since the adapters were removed). Express 4 does not catch async rejections: wrap the handler in `try { … } catch { res.status(500).json({ error: 'store_error' }) }`.
 
 ## Shared seller accounts (`owns`)
 
@@ -382,7 +375,7 @@ export const billing = config
 - `owns` is `{ priceIds?, productIds? }` or a predicate `({ kind, items, customData }) => boolean`. `readBillingEnv` returns `config.owns = { priceIds: [every id in PADDLE_PRICES] }`; spread your own ids in if the app also sells prices that are not in `PADDLE_PRICES` (`owns: { priceIds: [...config.owns!.priceIds, 'pri_legacy'] }`). An event is ours when **any** line item matches. An `owns` object with no ids throws in `createBilling` (it would ignore every event); a throwing predicate fails the event as `hook_error`.
 - **Subscriptions and transactions that are not ours** are acknowledged (200) and recorded as `ignored` with reason `not_ours`: never mirrored, no hook, not a failure in health, no warn log line. They still update `lastEventAt`, so other products' traffic also proves the webhook is alive. A subscription **already in the mirror stays ours** even if a later event carries none of our prices, and a transaction on a mirrored subscription is ours.
 - **Adjustments** carry no price ids. Every transaction the kit sees is remembered with its ownership (`paddle_transactions`), so an adjustment of a transaction we saw as someone else's is `ignored` / `not_ours`. An adjustment of a transaction **never seen is not dropped**: it reaches `onAdjustment` with `ctx.known === false`, because a refund can arrive before its payment. The app decides (AppCare stores it as a resolved `refund_unmatched` row that its payment path checks).
-- `reconcile` lists every subscription on the account: it mirrors only ours (or ones already mirrored) and returns `{ scanned, applied, notOurs }`.
+- `reconcile` lists every subscription on the account: it mirrors only ours (or ones already mirrored) and returns `{ scanned, applied, notOurs, invalid }`.
 - Without `owns`, every event is ours (a seller account of its own), and `ctx.known` still says whether the transaction was seen.
 
 ## Paddle events to subscribe
@@ -407,7 +400,7 @@ A stale `lastEventAt` is the primary "alive" signal: if no verified event has ar
 | `failedLast24h` | Rejected requests plus failed events in the last 24 h. |
 | `unlinkedLast24h` | Subscription events with no `userId` (stored with `user_id = NULL`, event reason `no_user_id`). Fix by creating checkouts through `createCheckout`, which sets `customData.userId`. |
 
-Reason codes: `missing_body`, `missing_raw_body`, `bad_signature_header`, `signature_mismatch`, `stale_timestamp`, `bad_json`, `bad_payload`, `unknown_event`, `no_user_id`, `out_of_order`, `store_error`, `hook_error`, `not_ours` (v0.4.0; `ignored`, never a failure). A 409 `in_progress` answer is not a failure either: it is not logged or counted, and Paddle's retry of it becomes a 200 duplicate. Logs carry only `reason`, `eventId` and `eventType`, never the body, signature header or secrets.
+Reason codes: `missing_body`, `bad_signature_header`, `signature_mismatch`, `stale_timestamp`, `bad_json`, `bad_payload`, `unknown_event`, `no_user_id`, `out_of_order`, `store_error`, `hook_error`, `not_ours` (v0.4.0; `ignored`, never a failure). A 409 `in_progress` answer is not a failure either: it is not logged or counted, and Paddle's retry of it becomes a 200 duplicate. Logs carry only `reason`, `eventId` and `eventType`, never the body, signature header or secrets.
 
 **`failedLast24h` is an approximation.** Rejected requests are counted per minute and reason; a whole minute bucket counts if its latest hit is inside the 24 h window, so it can over-count by up to one minute of hits at the window edge.
 
@@ -417,10 +410,12 @@ Reason codes: `missing_body`, `missing_raw_body`, `bad_signature_header`, `signa
 
 ```ts
 import { reconcile } from 'paddle-kit/reconcile';
-await reconcile(billing, { apiKey: process.env.PADDLE_API_KEY! }); // { scanned, applied, notOurs }
+await reconcile(billing, { apiKey: process.env.PADDLE_API_KEY! }); // { scanned, applied, notOurs, invalid }
 ```
 
-The webhook path itself only writes to your store; it never calls the Paddle API (Paddle's 5-second delivery deadline). Signature tolerance defaults to 5 seconds.
+`reconcile` reads `GET /subscriptions` with `fetch` (200 per page, following Paddle's pagination and never another host) and maps each one through the same `subscriptionFrom()` as the webhook path, so a reconciled row equals the webhook row (snake_case `raw`, the same status and `userId` checks). Rows carry the API's `updated_at`, so a later webhook still wins. `invalid` counts entities the webhook path would also reject. It is edge-safe; pass `fetch` to inject one.
+
+The webhook path itself only writes to your store; it never calls the Paddle API (Paddle's 5-second delivery deadline). Signature tolerance is 5 seconds (the `signatureToleranceSeconds` option was removed in v0.4.0).
 
 ## Integration checklist
 

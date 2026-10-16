@@ -13,31 +13,30 @@ describe('createCheckout', () => {
 
   it('passes userId as customData so the webhook can link the subscription', async () => {
     const checkout = await createCheckout({ token: 'test_abc', environment: 'sandbox' });
-    checkout.open({ priceId: 'pri_1', userId: 'user_1', email: 'a@x.com', successUrl: 'https://app/ok' });
+    checkout.open({ items: [{ priceId: 'pri_1', quantity: 1 }], userId: 'user_1', email: 'a@x.com' });
     expect(initializePaddle).toHaveBeenCalledWith({ token: 'test_abc', environment: 'sandbox' });
     expect(open).toHaveBeenCalledWith({
       items: [{ priceId: 'pri_1', quantity: 1 }],
       customer: { email: 'a@x.com' },
       customData: { userId: 'user_1' },
-      settings: { successUrl: 'https://app/ok' },
     });
   });
 
   it('passes extra customData through alongside userId', async () => {
     const checkout = await createCheckout({ token: 'test_abc', environment: 'sandbox' });
-    checkout.open({ priceId: 'pri_1', userId: 'user_1', customData: { order_id: 'ord_7', pack: '5' } });
+    checkout.open({ items: [{ priceId: 'pri_1', quantity: 1 }], userId: 'user_1', customData: { order_id: 'ord_7', pack: '5' } });
     expect(open).toHaveBeenCalledWith(expect.objectContaining({ customData: { order_id: 'ord_7', pack: '5', userId: 'user_1' } }));
   });
 
   it('never lets customData override userId', async () => {
     const checkout = await createCheckout({ token: 'test_abc', environment: 'sandbox' });
-    checkout.open({ priceId: 'pri_1', userId: 'user_1', customData: { userId: 'attacker', keep: true } });
+    checkout.open({ items: [{ priceId: 'pri_1', quantity: 1 }], userId: 'user_1', customData: { userId: 'attacker', keep: true } });
     expect(open).toHaveBeenCalledWith(expect.objectContaining({ customData: { keep: true, userId: 'user_1' } }));
   });
 
   it('refuses to open without a userId', async () => {
     const checkout = await createCheckout({ token: 'test_abc', environment: 'sandbox' });
-    expect(() => checkout.open({ priceId: 'pri_1', userId: '' })).toThrow(/userId/);
+    expect(() => checkout.open({ items: [{ priceId: 'pri_1', quantity: 1 }], userId: '' })).toThrow(/userId/);
   });
 
   it('opens with several line items', async () => {
@@ -49,11 +48,10 @@ describe('createCheckout', () => {
     }));
   });
 
-  it('refuses neither or both of priceId and items', async () => {
+  it('refuses missing or empty items', async () => {
     const checkout = await createCheckout({ token: 'test_abc', environment: 'sandbox' });
-    expect(() => checkout.open({ userId: 'u' } as any)).toThrow(/priceId or items/);
-    expect(() => checkout.open({ userId: 'u', priceId: 'p', items: [{ priceId: 'p', quantity: 1 }] } as any)).toThrow(/priceId or items/);
-    expect(() => checkout.open({ userId: 'u', items: [] })).toThrow(/priceId or items/);
+    expect(() => checkout.open({ userId: 'u' } as any)).toThrow(/items/);
+    expect(() => checkout.open({ userId: 'u', items: [] })).toThrow(/items/);
   });
 
   it('forwards Paddle.js events to onEvent', async () => {
