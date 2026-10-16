@@ -444,6 +444,10 @@ Kosovo seller payout eligibility is **UNVERIFIED**. Paddle's sanctions page does
 
 `npm test`, `npm run typecheck`, `npm run build`, `npm run check:edge` (static scan of the edge-safe bundles), `npm run smoke` (packs the tarball, installs it into a temp dir and imports every subpath).
 
+### Shared seller accounts
+
+If several apps share one Paddle account, each app's destination should subscribe only to what it needs, and every `onTransaction` must ignore transactions that carry neither its own `customData` marker nor one of its own price ids — otherwise one product's sales show up as another product's "unknown order" reviews and alerts.
+
 ## Claude Code skill
 
 `skills/integrating-paddle-kit/SKILL.md` is the integration recipe for agents (decisions, build order, sandbox end-to-end, traps). Install it once per machine so every project can use it:
