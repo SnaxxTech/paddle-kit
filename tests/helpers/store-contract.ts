@@ -161,6 +161,18 @@ export function runStoreContract(name: string, makeStore: () => Promise<Store>):
       expect(await store.recordEvent({ ...ev('evt_c'), leaseExpiredBefore: lease })).toEqual({ alreadyDone: true });
     });
 
+    it('records seen transactions with their ownership; owned wins over not-owned', async () => {
+      const t = { transactionId: 'txn_1', subscriptionId: null, customerId: 'ctm_1', occurredAt: '2026-10-15T09:00:00.000Z', receivedAt: '2026-10-15T09:00:01.000Z' };
+      expect(await store.getTransaction!('txn_1')).toBeNull();
+      await store.recordTransaction!({ ...t, owned: false });
+      expect(await store.getTransaction!('txn_1')).toEqual({ transactionId: 'txn_1', owned: false });
+      await store.recordTransaction!({ ...t, owned: true });
+      await store.recordTransaction!({ ...t, owned: false }); // a later not-owned reading never un-owns it
+      expect(await store.getTransaction!('txn_1')).toEqual({ transactionId: 'txn_1', owned: true });
+      await store.recordTransaction!({ ...t, transactionId: 'txn_2', subscriptionId: 'sub_1', owned: true });
+      expect(await store.getTransaction!('txn_2')).toEqual({ transactionId: 'txn_2', owned: true });
+    });
+
     it('a claim older than the lease is taken over', async () => {
       expect(await store.recordEvent({ ...ev('evt_x', '2026-10-15T10:00:00.000Z'), leaseExpiredBefore: '2026-10-15T09:59:00.000Z' })).toEqual({ alreadyDone: false });
       expect(await store.recordEvent({ ...ev('evt_x', '2026-10-15T10:00:30.000Z'), leaseExpiredBefore: '2026-10-15T09:59:30.000Z' })).toEqual({ alreadyDone: false, inProgress: true });

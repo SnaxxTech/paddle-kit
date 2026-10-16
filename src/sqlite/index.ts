@@ -55,10 +55,18 @@ CREATE INDEX IF NOT EXISTS paddle_subscriptions_user_id_idx ON paddle_subscripti
 `,
   },
   {
-    name: '002_claims',
+    name: '002_claims_transactions',
     sql: `CREATE TABLE IF NOT EXISTS paddle_event_claims (
   event_id TEXT PRIMARY KEY,
   claimed_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS paddle_transactions (
+  transaction_id TEXT PRIMARY KEY,
+  owned INTEGER NOT NULL,
+  subscription_id TEXT,
+  customer_id TEXT,
+  occurred_at INTEGER NOT NULL,
+  received_at INTEGER NOT NULL
 );
 `,
   },
@@ -153,6 +161,17 @@ export function sqliteStore({ db }: { db: SqliteDatabase }): Store {
         Date.now(),
       );
       return { applied: r.changes > 0 };
+    },
+    async recordTransaction(t) {
+      q(`INSERT INTO paddle_transactions (transaction_id, owned, subscription_id, customer_id, occurred_at, received_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (transaction_id) DO UPDATE SET owned = MAX(paddle_transactions.owned, excluded.owned)`).run(
+        t.transactionId, t.owned ? 1 : 0, t.subscriptionId, t.customerId, ms(t.occurredAt), ms(t.receivedAt),
+      );
+    },
+    async getTransaction(id) {
+      const r = q(`SELECT transaction_id, owned FROM paddle_transactions WHERE transaction_id = ?`).get(id) as Row | undefined;
+      return r ? { transactionId: r.transaction_id as string, owned: Number(r.owned) === 1 } : null;
     },
     async getSubscription(id) {
       const r = q(`SELECT * FROM paddle_subscriptions WHERE subscription_id = ?`).get(id) as Row | undefined;

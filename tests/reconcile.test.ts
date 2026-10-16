@@ -14,7 +14,7 @@ const billing = () => createBilling({ environment: 'sandbox', webhookSecret: 's'
 describe('reconcile', () => {
   it('fills a missing subscription so access is correct after missed webhooks', async () => {
     const b = billing();
-    expect(await reconcile(b, { apiKey: 'pdl_sdbx_apikey_x', client: client([sdkSub()]) })).toEqual({ scanned: 1, applied: 1 });
+    expect(await reconcile(b, { apiKey: 'pdl_sdbx_apikey_x', client: client([sdkSub()]) })).toEqual({ scanned: 1, applied: 1, notOurs: 0 });
     expect(await b.hasAccess('user_1', 'pro')).toBe(true);
   });
 
@@ -25,7 +25,7 @@ describe('reconcile', () => {
       currentPeriodEnd: null, scheduledChange: null, canceledAt: '2026-10-15T00:00:00.000Z', pastDueSince: null,
       lastEventAt: '2026-10-15T00:00:00.000Z', raw: {},
     });
-    expect(await reconcile(b, { apiKey: 'pdl_sdbx_apikey_x', client: client([sdkSub()]) })).toEqual({ scanned: 1, applied: 0 });
+    expect(await reconcile(b, { apiKey: 'pdl_sdbx_apikey_x', client: client([sdkSub()]) })).toEqual({ scanned: 1, applied: 0, notOurs: 0 });
     expect(await b.hasAccess('user_1', 'pro')).toBe(false);
   });
 

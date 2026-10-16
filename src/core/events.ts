@@ -60,12 +60,12 @@ function lineItemsOf(items: unknown): LineItem[] {
 const customDataFrom = (v: unknown): Record<string, unknown> | null => (isObj(v) ? v : null);
 
 /** Line items (price, product, quantity) of a stored subscription, read from its raw Paddle payload. */
-export function itemsOf(sub: Subscription): LineItem[] {
+export function itemsOf(sub: Pick<Subscription, 'raw'>): LineItem[] {
   return isObj(sub.raw) ? lineItemsOf(sub.raw.items) : [];
 }
 
 /** The full custom_data object of a stored subscription (not just userId), or null. */
-export function customDataOf(sub: Subscription): Record<string, unknown> | null {
+export function customDataOf(sub: Pick<Subscription, 'raw'>): Record<string, unknown> | null {
   return isObj(sub.raw) ? customDataFrom(sub.raw.custom_data) : null;
 }
 

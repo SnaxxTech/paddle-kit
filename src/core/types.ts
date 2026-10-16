@@ -10,7 +10,9 @@ export type ReasonCode =
   | 'no_user_id'
   | 'out_of_order'
   | 'store_error'
-  | 'hook_error';
+  | 'hook_error'
+  /** Shared seller account: the event belongs to another product (see `owns`). Recorded as `ignored`; not a failure. */
+  | 'not_ours';
 
 export type SubscriptionStatus = 'active' | 'trialing' | 'past_due' | 'paused' | 'canceled';
 export type EventStatus = 'received' | 'processed' | 'ignored' | 'stale' | 'failed';
@@ -83,6 +85,30 @@ export interface HookContext {
   store: Store;
 }
 
+export interface AdjustmentContext extends HookContext {
+  /**
+   * true when this app has seen the adjusted transaction as its own (or the adjustment is on a subscription in its
+   * mirror). false when it has not: the payment may not have arrived yet (a refund can arrive before its payment), it
+   * predates paddle-kit v0.4.0, or the store cannot record transactions. Record a `known: false` refund so the payment
+   * path can refuse it later; never drop it.
+   */
+  known: boolean;
+}
+
+/** The ids this app owns on a shared Paddle seller account. An event is ours when any line item matches. */
+export interface OwnedIds {
+  priceIds?: readonly string[];
+  productIds?: readonly string[];
+}
+export type OwnsPredicate = (x: { kind: 'subscription' | 'transaction'; items: LineItem[]; customData: Record<string, unknown> | null }) => boolean;
+export type Owns = OwnedIds | OwnsPredicate;
+
+/** A transaction this app has seen, and whether it was this app's. */
+export interface SeenTransaction {
+  transactionId: string;
+  owned: boolean;
+}
+
 export interface Customer {
   customerId: string;
   email: string | null;
@@ -112,6 +138,12 @@ export interface Store {
   getSubscription(subscriptionId: string): Promise<Subscription | null>;
   getSubscriptionsByUser(userId: string): Promise<Subscription[]>;
   health(now: Date): Promise<Health>;
+  /**
+   * Remembers a seen transaction (needs migration 002). Once owned, always owned. Optional so custom stores keep
+   * compiling; without it every adjustment reaches `onAdjustment` with `known: false`.
+   */
+  recordTransaction?(t: SeenTransaction & { subscriptionId: string | null; customerId: string | null; occurredAt: string; receivedAt: string }): Promise<void>;
+  getTransaction?(transactionId: string): Promise<SeenTransaction | null>;
 }
 
 export interface LogEntry {

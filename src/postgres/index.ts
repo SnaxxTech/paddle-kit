@@ -110,6 +110,18 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
       );
       return { applied: rows.length > 0 };
     },
+    async recordTransaction(t) {
+      await query(
+        `INSERT INTO paddle_transactions (transaction_id, owned, subscription_id, customer_id, occurred_at, received_at)
+         VALUES ($1, $2, $3, $4, ${ms(5)}, ${ms(6)})
+         ON CONFLICT (transaction_id) DO UPDATE SET owned = paddle_transactions.owned OR EXCLUDED.owned`,
+        [t.transactionId, t.owned, t.subscriptionId, t.customerId, t.occurredAt, t.receivedAt],
+      );
+    },
+    async getTransaction(id) {
+      const { rows } = await query(`SELECT transaction_id, owned FROM paddle_transactions WHERE transaction_id = $1`, [id]);
+      return rows[0] ? { transactionId: rows[0].transaction_id as string, owned: rows[0].owned === true } : null;
+    },
     async getSubscription(id) {
       const { rows } = await query(`SELECT * FROM paddle_subscriptions WHERE subscription_id = $1`, [id]);
       return rows[0] ? toSubscription(rows[0]) : null;

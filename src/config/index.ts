@@ -14,6 +14,11 @@ export interface BillingEnv {
   enforce: boolean;
   healthToken?: string;
   apiKey?: string;
+  /**
+   * Every price id in PADDLE_PRICES, for `createBilling({ owns })` on a shared seller account. Absent when the map is
+   * empty. Add `productIds` yourself if the app also sells prices that are not in PADDLE_PRICES.
+   */
+  owns?: { priceIds: string[] };
 }
 
 export interface ReadBillingEnvOptions {
@@ -148,5 +153,7 @@ export function readBillingEnv(
   };
   if (env.PADDLE_HEALTH_TOKEN) config.healthToken = env.PADDLE_HEALTH_TOKEN;
   if (apiKey) config.apiKey = apiKey;
+  const priceIds = [...new Set(Object.values(prices).flatMap((p) => (typeof p === 'string' ? [p] : Object.values(p))))];
+  if (priceIds.length > 0) config.owns = { priceIds };
   return { config, problems };
 }

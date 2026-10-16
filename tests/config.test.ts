@@ -31,7 +31,17 @@ describe('readBillingEnv', () => {
       launchAt: Date.UTC(2026, 9, 20),
       enforce: true,
       healthToken: 'ht',
+      owns: { priceIds: ['pri_PRICE_team_m_77', 'pri_PRICE_team_y_78', 'pri_PRICE_pack_79'] },
     });
+  });
+
+  it('owns lists every price id in PADDLE_PRICES (flat and nested), once each, ready for createBilling', () => {
+    const prices = { team: { monthly: 'pri_a', yearly: 'pri_b' }, pack: 'pri_c', legacy: 'pri_a' };
+    expect(readBillingEnv({ ...valid, PADDLE_PRICES: JSON.stringify(prices) }, OPTS).config?.owns).toEqual({ priceIds: ['pri_a', 'pri_b', 'pri_c'] });
+  });
+
+  it('an empty price map gives no owns (an empty list would ignore every event)', () => {
+    expect(readBillingEnv({ ...valid, PADDLE_PRICES: '{}' }, { requiredPrices: [] }).config).not.toHaveProperty('owns');
   });
 
   it('defaults to sandbox, launchAt null and enforce false when optional variables are unset', () => {

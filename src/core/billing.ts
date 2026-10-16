@@ -1,6 +1,7 @@
 import { decideAccess } from './access';
 import { createWebhookHandler } from './handler';
-import type { Adjustment, Health, HookContext, Logger, ReasonCode, Store, Subscription, Transaction } from './types';
+import { ownershipPredicate } from './owns';
+import type { Adjustment, AdjustmentContext, Health, HookContext, Logger, Owns, ReasonCode, Store, Subscription, Transaction } from './types';
 
 export interface BillingConfig {
   environment: 'sandbox' | 'production';
@@ -34,8 +35,19 @@ export interface BillingConfig {
    * (HTTP 500, reason `hook_error`) so Paddle retries.
    * Act on refunds (`adj.action === 'refund'`) only when `adj.status === 'approved'` (pending_approval and rejected adjustments also arrive).
    * Find your order by `adj.transactionId`; don't trust custom_data, it comes from the browser.
+   * `ctx.known` is false when this app never saw the transaction as its own (the refund may have arrived before its
+   * payment): record it so the payment path can refuse a taken-back payment; never drop it.
    */
-  onAdjustment?: (adj: Adjustment, ctx: HookContext) => Promise<void> | void;
+  onAdjustment?: (adj: Adjustment, ctx: AdjustmentContext) => Promise<void> | void;
+  /**
+   * Shared seller account: the price and/or product ids this app sells (`readBillingEnv` returns them from
+   * PADDLE_PRICES as `owns`), or a predicate over an event's line items and custom data. A subscription or transaction
+   * with none of them is acknowledged and recorded as `ignored` / `not_ours`: never mirrored, no hook, not a failure.
+   * A subscription already in the mirror stays ours. Adjustments of a transaction we saw as someone else's are
+   * `not_ours` too; adjustments of a transaction never seen still reach `onAdjustment` with `ctx.known === false`.
+   * Unset: every event is ours (a seller account of its own).
+   */
+  owns?: Owns;
   log?: Logger;
   now?: () => Date;
 }
@@ -63,7 +75,9 @@ export function createBilling(config: BillingConfig): Billing {
   const now = config.now ?? (() => new Date());
   const log = config.log ?? defaultLog;
   const policy = { entitlements: config.entitlements, pastDueGraceDays: config.pastDueGraceDays ?? 7 };
+  const owns = ownershipPredicate(config.owns);
   const handleWebhook = createWebhookHandler({
+    owns,
     store: config.store,
     secret: config.webhookSecret,
     toleranceSeconds: config.signatureToleranceSeconds ?? 5,

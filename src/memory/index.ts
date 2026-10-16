@@ -13,6 +13,7 @@ export function memoryStore(): Store {
   const subs = new Map<string, Subscription>();
   const customers = new Map<string, Customer>();
   const claims = new Map<string, string>(); // eventId -> claimedAt
+  const transactions = new Map<string, boolean>(); // transactionId -> owned
 
   return {
     async recordEvent(e) {
@@ -44,6 +45,13 @@ export function memoryStore(): Store {
       if (prev && Date.parse(prev.lastEventAt) > Date.parse(s.lastEventAt)) return { applied: false };
       subs.set(s.subscriptionId, clone({ ...s, userId: s.userId ?? prev?.userId ?? null }));
       return { applied: true };
+    },
+    async recordTransaction(t) {
+      transactions.set(t.transactionId, (transactions.get(t.transactionId) ?? false) || t.owned);
+    },
+    async getTransaction(id) {
+      const owned = transactions.get(id);
+      return owned === undefined ? null : { transactionId: id, owned };
     },
     async getSubscription(id) {
       const s = subs.get(id);
