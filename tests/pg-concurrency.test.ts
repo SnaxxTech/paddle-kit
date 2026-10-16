@@ -31,6 +31,9 @@ async function connect(): Promise<{ url: string; stop: () => Promise<void> } | {
 }
 
 const db = await connect();
+if ('skip' in db && process.env.PADDLE_KIT_REQUIRE_PG === '1') {
+  throw new Error(`PADDLE_KIT_REQUIRE_PG=1 but the real-Postgres suite cannot run: ${db.skip}`);
+}
 if ('skip' in db) {
   // process.stderr, not console: vitest drops console output of a file whose tests are all skipped.
   process.stderr.write(`\n######## SKIP: real-Postgres concurrency suite NOT RUN (${db.skip}). Concurrency is UNVERIFIED. ########\n\n`);

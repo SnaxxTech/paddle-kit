@@ -8,12 +8,14 @@ Not for in-app purchases in store-distributed mobile apps. Google Play and the A
 ## Install
 
 ```bash
-npm i github:SnaxxTech/paddle-kit#v0.3.0
+npm i github:SnaxxTech/paddle-kit#v0.4.0
 ```
 
 `memoryStore` (`paddle-kit/memory`) is for tests and local development only: its failure log is unbounded and it is not shared across instances. Use `postgresStore` in production.
 
 Optional peer dependencies, install only what you use: `@paddle/paddle-node-sdk` (reconcile), `@paddle/paddle-js` (client checkout), `hono`, `express`. Using `paddle-kit/express` also needs `@types/express` for its types.
+
+Upgrading from an earlier tag: see [UPGRADING.md](UPGRADING.md) (bump the tag, run the new migrations, read the CHANGELOG).
 
 ## Environment variables
 
@@ -34,10 +36,10 @@ Production guard: `environment: 'production'` throws when `NODE_ENV` is set and 
 
 The package never runs DDL itself. Run it once per project, either way:
 
-- apply `node_modules/paddle-kit/migrations/001_init.sql` with your migration tool, or
-- import `MIGRATIONS` from `paddle-kit/postgres` (`{ name, sql }[]`) and execute each `sql`.
+- apply every file in `node_modules/paddle-kit/migrations/` in order (`001_init.sql`, `002_claims_transactions.sql`, …) with your migration tool, or
+- import `MIGRATIONS` from `paddle-kit/postgres` (`{ name, sql }[]`) and execute each `sql` (SQLite: `SQLITE_MIGRATIONS`).
 
-The migration is additive and creates four tables: `paddle_events`, `paddle_subscriptions`, `paddle_customers`, `paddle_failures`. It uses `CREATE TABLE IF NOT EXISTS`, which does nothing if your project already has a table with one of those names but a different shape. Check for existing tables of those names before migrating. Shipped migration files are never edited; later changes arrive as new numbered files.
+The migrations are additive. `001_init` creates `paddle_events`, `paddle_subscriptions`, `paddle_customers` and `paddle_failures`; `002_claims_transactions` (v0.4.0) creates `paddle_event_claims` (one row per event while a delivery runs its hooks) and `paddle_transactions` (every transaction seen, with whether it was this app's). **Run a new migration before deploying the code that needs it**: v0.4 code on a database without `002` answers 500 `store_error` to every event (Paddle retries, nothing is lost, health shows it). It uses `CREATE TABLE IF NOT EXISTS`, which does nothing if your project already has a table with one of those names but a different shape. Check for existing tables of those names before migrating. Shipped migration files are never edited; later changes arrive as new numbered files.
 
 Timestamps are stored at millisecond precision (Paddle sends microseconds). Two events for one subscription in the same millisecond resolve as "later delivery wins".
 
@@ -160,11 +162,12 @@ checkout.open({ priceId: 'pri_01abc', userId: 'org_1', customData: { order_id: '
 
 ## One-time purchases and refunds (hooks)
 
-`createBilling` takes two optional hooks. They run after the event is recorded and before it is marked processed, **at least once** (a retry after a store failure, or concurrent duplicate deliveries, can run them again). Throwing fails the event (HTTP 500, reason `hook_error`) so Paddle retries; keep hooks fast, Paddle waits about 5 s.
+`createBilling` takes two optional hooks. They run after the event is recorded and before it is marked processed, **at least once**: a retry after a failure runs them again, and so does a delivery that takes over a claim older than `eventLeaseSeconds` (default 60, a crashed attempt). Concurrent duplicate deliveries do **not** run them twice (since v0.4.0): while one delivery holds the event's claim, the others answer **409 `{ "error": "in_progress" }`** and Paddle retries them later, when they are plain duplicates (200). Throwing fails the event (HTTP 500, reason `hook_error`) so Paddle retries; keep hooks fast, Paddle waits about 5 s.
 
 - `onTransaction(tx, ctx)` fires on `transaction.completed` only (`transaction.paid` is recorded without a hook).
   **`transaction.completed` also fires for every subscription renewal**, so a one-time-purchase handler must filter `tx.subscriptionId === null`.
 - `onAdjustment(adj, ctx)` fires on `adjustment.created` and `adjustment.updated`. A refund can arrive as `pending_approval`, then `approved` or `rejected`: act on a refund (`adj.action === 'refund'`) **only when `adj.status === 'approved'`**, and key your side effect on `adj.adjustmentId` + `adj.status`. Find your order by `adj.transactionId`.
+  `ctx.known` (v0.4.0) is `true` when this app saw the adjusted transaction as its own, or the adjustment is on a subscription in its mirror, and `false` otherwise: **a refund can arrive before its payment**, the payment may predate v0.4.0, or the store cannot record transactions. Record a `known: false` refund (for example as a resolved review row) so the payment path can refuse a payment that was already taken back; never drop it.
 
 `custom_data` comes from the browser and is untrusted. Verify the order by `tx.items` (`priceId`, `quantity`); the catalog price fixes the amount. **Do not require `tx.currency` to equal your list currency**: Paddle can localise prices (a EUR payment for a USD list price), so record the currency instead. `tx.subtotal` is before discount and tax (net of tax for tax-inclusive prices) and `tx.total` is the tax-inclusive grand total, so **do not equality-check either amount against a list price** (discounts, tax and conversion all change them). Amounts are lowest-unit strings.
 
@@ -365,6 +368,23 @@ app.use(express.json()); // fine, but only AFTER the webhook route
 
 If the body was already parsed, the adapter returns **500 `missing_raw_body`** by design (a re-serialised body can never match the signature) and records the failure. If a handler throws, both Express handlers log `store_error` and answer **500 `{ "error": "store_error" }`** (Express 4 does not catch async rejections).
 
+## Shared seller accounts (`owns`)
+
+When several apps share one Paddle seller account, every app's destination receives every product's events: a destination filters by event type, not by product. Declare what this app sells and the kit filters the rest:
+
+```ts
+const { config } = readBillingEnv(process.env, { requiredPrices: ['team'] });
+export const billing = config
+  ? createBilling({ environment: config.environment, webhookSecret: config.webhookSecret, store, entitlements, owns: config.owns })
+  : null;
+```
+
+- `owns` is `{ priceIds?, productIds? }` or a predicate `({ kind, items, customData }) => boolean`. `readBillingEnv` returns `config.owns = { priceIds: [every id in PADDLE_PRICES] }`; spread your own ids in if the app also sells prices that are not in `PADDLE_PRICES` (`owns: { priceIds: [...config.owns!.priceIds, 'pri_legacy'] }`). An event is ours when **any** line item matches. An `owns` object with no ids throws in `createBilling` (it would ignore every event); a throwing predicate fails the event as `hook_error`.
+- **Subscriptions and transactions that are not ours** are acknowledged (200) and recorded as `ignored` with reason `not_ours`: never mirrored, no hook, not a failure in health, no warn log line. They still update `lastEventAt`, so other products' traffic also proves the webhook is alive. A subscription **already in the mirror stays ours** even if a later event carries none of our prices, and a transaction on a mirrored subscription is ours.
+- **Adjustments** carry no price ids. Every transaction the kit sees is remembered with its ownership (`paddle_transactions`), so an adjustment of a transaction we saw as someone else's is `ignored` / `not_ours`. An adjustment of a transaction **never seen is not dropped**: it reaches `onAdjustment` with `ctx.known === false`, because a refund can arrive before its payment. The app decides (AppCare stores it as a resolved `refund_unmatched` row that its payment path checks).
+- `reconcile` lists every subscription on the account: it mirrors only ours (or ones already mirrored) and returns `{ scanned, applied, notOurs }`.
+- Without `owns`, every event is ours (a seller account of its own), and `ctx.known` still says whether the transaction was seen.
+
 ## Paddle events to subscribe
 
 Create a notification destination (type: webhook) pointing at your route and subscribe it to:
@@ -387,7 +407,7 @@ A stale `lastEventAt` is the primary "alive" signal: if no verified event has ar
 | `failedLast24h` | Rejected requests plus failed events in the last 24 h. |
 | `unlinkedLast24h` | Subscription events with no `userId` (stored with `user_id = NULL`, event reason `no_user_id`). Fix by creating checkouts through `createCheckout`, which sets `customData.userId`. |
 
-Reason codes: `missing_body`, `missing_raw_body`, `bad_signature_header`, `signature_mismatch`, `stale_timestamp`, `bad_json`, `bad_payload`, `unknown_event`, `no_user_id`, `out_of_order`, `store_error`, `hook_error`. Logs carry only `reason`, `eventId` and `eventType`, never the body, signature header or secrets.
+Reason codes: `missing_body`, `missing_raw_body`, `bad_signature_header`, `signature_mismatch`, `stale_timestamp`, `bad_json`, `bad_payload`, `unknown_event`, `no_user_id`, `out_of_order`, `store_error`, `hook_error`, `not_ours` (v0.4.0; `ignored`, never a failure). A 409 `in_progress` answer is not a failure either: it is not logged or counted, and Paddle's retry of it becomes a 200 duplicate. Logs carry only `reason`, `eventId` and `eventType`, never the body, signature header or secrets.
 
 **`failedLast24h` is an approximation.** Rejected requests are counted per minute and reason; a whole minute bucket counts if its latest hit is inside the 24 h window, so it can over-count by up to one minute of hits at the window edge.
 
@@ -397,7 +417,7 @@ Reason codes: `missing_body`, `missing_raw_body`, `bad_signature_header`, `signa
 
 ```ts
 import { reconcile } from 'paddle-kit/reconcile';
-await reconcile(billing, { apiKey: process.env.PADDLE_API_KEY! }); // { scanned, applied }
+await reconcile(billing, { apiKey: process.env.PADDLE_API_KEY! }); // { scanned, applied, notOurs }
 ```
 
 The webhook path itself only writes to your store; it never calls the Paddle API (Paddle's 5-second delivery deadline). Signature tolerance defaults to 5 seconds.
@@ -442,11 +462,8 @@ Kosovo seller payout eligibility is **UNVERIFIED**. Paddle's sanctions page does
 
 ## Scripts
 
-`npm test`, `npm run typecheck`, `npm run build`, `npm run check:edge` (static scan of the edge-safe bundles), `npm run smoke` (packs the tarball, installs it into a temp dir and imports every subpath).
+`npm test`, `npm run test:pg` (the real-Postgres concurrency and load suite alone; it prints a loud SKIP and passes vacuously without `pg` plus `PADDLE_KIT_PG_URL` or `embedded-postgres`), `npm run typecheck`, `npm run build`, `npm run check:edge` (static scan of the edge-safe bundles), `npm run smoke` (packs the tarball, installs it into a temp dir and imports every subpath).
 
-### Shared seller accounts
-
-If several apps share one Paddle account, each app's destination should subscribe only to what it needs, and every `onTransaction` must ignore transactions that carry neither its own `customData` marker nor one of its own price ids — otherwise one product's sales show up as another product's "unknown order" reviews and alerts.
 
 ## Claude Code skill
 

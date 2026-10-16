@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.0 (unreleased)
+
+Upgrade steps: [UPGRADING.md](UPGRADING.md). **Run migration `002_claims_transactions` before deploying.**
+
+### Shared seller accounts
+- New `createBilling({ owns })`: `{ priceIds?, productIds? }` or a predicate `({ kind, items, customData }) => boolean`. Subscription and transaction events with none of them are acknowledged and recorded as `ignored` with the new reason `not_ours`: never mirrored, no hook, not a failure in health, no warn line. A subscription already in the mirror stays ours; so does a transaction on a mirrored subscription. An `owns` object without ids throws; a throwing predicate fails the event as `hook_error`.
+- Every transaction seen is remembered with its ownership (new table `paddle_transactions`; optional `Store.recordTransaction` / `getTransaction`, implemented by all three kit stores). An adjustment of a transaction seen as someone else's is `not_ours`. An adjustment of a transaction never seen is **not dropped**: `onAdjustment` gets it with the new `ctx.known === false` (a refund can arrive before its payment).
+- `readBillingEnv` returns `config.owns = { priceIds }` with every id in `PADDLE_PRICES` (absent for an empty map).
+- `reconcile` mirrors only our subscriptions (or ones already mirrored) and returns `{ scanned, applied, notOurs }`.
+
+### Idempotency under concurrency
+- Behaviour change: duplicate deliveries of an event that arrive while another delivery is running its hooks answer **409 `{ "error": "in_progress" }`** instead of running the hooks again (50 parallel deliveries ran `onTransaction` 50 times in 0.3.1). Claims live in the new table `paddle_event_claims`, so the ledger row keeps its `failed` status and `received_at` during a retry. A failed attempt releases its claim at once; a claim older than the new `eventLeaseSeconds` (default 60) is taken over as a crashed attempt. `Store.recordEvent` takes an optional `leaseExpiredBefore` and may return `inProgress`; a custom store that ignores both keeps the 0.3 at-least-once behaviour.
+- New real-Postgres suite `npm run test:pg` (N=50 parallel duplicates, shuffled parallel `subscription.updated`, flaky-hook redeliveries, 1,000-event load with p95 and a sample-count reconciliation). It skips with a loud SKIP line when no server is available, and fails in CI (`PADDLE_KIT_REQUIRE_PG=1`) instead of skipping.
+
+### Tooling
+- `UPGRADING.md`; CI workflow (`.github/workflows/ci.yml`): typecheck, tests, build, edge check, the packed-tarball smoke check in a scratch app, and the Postgres suite against a `postgres:16` service.
+- `npm run smoke` now also runs a signed webhook through the installed tarball (`owns` filtering and a known/unknown refund).
+
 ## 0.3.1 (2026-10-16)
 
 - Every subpath export now has a `default` condition (same ESM files), so CommonJS-style resolvers (Playwright test runner, tsx, Jest) can resolve `paddle-kit/*`. Found by Offday's Playwright suite; `npm run smoke` now checks `require.resolve` for every subpath.

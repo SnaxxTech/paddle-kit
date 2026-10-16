@@ -42,3 +42,37 @@ if ((statSync(resolve(dir, 'node_modules/paddle-kit/dist/catalog/cli.js')).mode 
 const help = execFileSync(bin, ['--help'], { cwd: dir, encoding: 'utf8' });
 if (!help.includes('--webhook-url')) throw new Error('paddle-kit-catalog --help printed no usage');
 console.log('paddle-kit-catalog bin runs');
+
+// Behaviour through the installed package: signed webhooks with shared-seller filtering and the known flag.
+writeFileSync(join(dir, 'webhook.mjs'), `
+import { createHmac } from 'node:crypto';
+import { createBilling } from 'paddle-kit/core';
+import { memoryStore } from 'paddle-kit/memory';
+const secret = 'pdl_ntfset_smoke';
+const at = new Date().toISOString();
+const txs = [];
+const adjs = [];
+const billing = createBilling({
+  environment: 'sandbox', webhookSecret: secret, store: memoryStore(), entitlements: {}, log: () => {},
+  owns: { priceIds: ['pri_ours'] },
+  onTransaction: (tx) => { txs.push(tx.transactionId); },
+  onAdjustment: (a, ctx) => { adjs.push([a.transactionId, ctx.known]); },
+});
+const send = (event) => {
+  const body = JSON.stringify(event);
+  const ts = Math.floor(Date.now() / 1000);
+  const h1 = createHmac('sha256', secret).update(ts + ':' + body).digest('hex');
+  return billing.handleWebhook(new Request('https://smoke.test/', { method: 'POST', headers: { 'paddle-signature': 'ts=' + ts + ';h1=' + h1 }, body }));
+};
+const txn = (id, price, ev) => ({ event_id: ev, event_type: 'transaction.completed', occurred_at: at, data: { id, status: 'completed', items: [{ price: { id: price, product_id: 'pro_x' }, quantity: 1 }] } });
+const adj = (txId, ev) => ({ event_id: ev, event_type: 'adjustment.created', occurred_at: at, data: { id: 'adj_' + ev, transaction_id: txId, action: 'refund', status: 'approved', type: 'full' } });
+const statuses = [];
+for (const e of [txn('txn_ours', 'pri_ours', 'e1'), txn('txn_theirs', 'pri_theirs', 'e2'), adj('txn_theirs', 'e3'), adj('txn_unseen', 'e4'), adj('txn_ours', 'e5')]) {
+  statuses.push((await send(e)).status);
+}
+const got = JSON.stringify({ statuses, txs, adjs });
+const want = JSON.stringify({ statuses: [200, 200, 200, 200, 200], txs: ['txn_ours'], adjs: [['txn_unseen', false], ['txn_ours', true]] });
+if (got !== want) { console.error('webhook smoke failed: got ' + got + ', want ' + want); process.exit(1); }
+console.log('signed webhooks through the tarball: other products filtered, unseen refund passed with known: false');
+`);
+execFileSync('node', ['webhook.mjs'], { cwd: dir, stdio: 'inherit' });

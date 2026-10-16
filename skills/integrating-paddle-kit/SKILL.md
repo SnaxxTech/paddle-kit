@@ -21,8 +21,8 @@ Read the target app before deciding: confirm its roles, auth, DB driver, existin
 
 ## Build order
 1. **Pricing source of truth** → `paddle.catalog.json` generated from (or checked against) the app's pricing constants; add a test that catalog totals equal the published prices.
-2. **Store**: Postgres/Neon → `postgresStore({ query })` + kit `MIGRATIONS`; SQLite → `sqliteStore({ db })` + `SQLITE_MIGRATIONS`. Additive `paddle_*` tables only; run them the way the app runs its own migrations.
-3. **Env**: `readBillingEnv(process.env, { requiredPrices, requiredCycles?, requireLaunchAt? })` from `paddle-kit/config`. Construct `createBilling` **only when `config` is non-null**; log `problems` (names only). Never construct at import with a possibly-missing secret — CI `next build` and preview deploys run without secrets.
+2. **Store**: Postgres/Neon → `postgresStore({ query })` + kit `MIGRATIONS`; SQLite → `sqliteStore({ db })` + `SQLITE_MIGRATIONS`. Additive `paddle_*` tables only; run **every** entry (001, 002, …) the way the app runs its own migrations, and before deploying the code that needs them.
+3. **Env**: `readBillingEnv(process.env, { requiredPrices, requiredCycles?, requireLaunchAt? })` from `paddle-kit/config`. Construct `createBilling` **only when `config` is non-null**; log `problems` (names only). Pass `owns: config.owns` (every price id in `PADDLE_PRICES`): the SnaxxTech seller account is **shared by several apps**, and every app's webhook receives every product's events. Never construct at import with a possibly-missing secret — CI `next build` and preview deploys run without secrets.
 4. **Webhook route**, null-safe:
    ```ts
    // app/api/paddle/route.ts
@@ -30,7 +30,7 @@ Read the target app before deciding: confirm its roles, auth, DB driver, existin
    export const POST = (r: Request) => (billing ? billing.handleWebhook(r) : off());
    export const GET  = (r: Request) => (billing ? billing.handleHealth(r)  : off()); // PADDLE_HEALTH_TOKEN
    ```
-5. **Hooks (one-time/refunds)**: `onTransaction` runs on `transaction.completed` (also renewals → filter `subscriptionId === null`), **at least once**: write order + grant in ONE DB transaction keyed on `transactionId`. `customData` is untrusted — match `tx.items` priceId and grant by quantity; never equality-check amounts (discounts, tax, local currency). Unknown price → persist a review row, don't drop silently — **but** the SnaxxTech Paddle seller account is shared by several apps, and every app's webhook receives every product's transactions: ignore (no review, no alert) transactions that carry neither your order marker in `customData` nor one of your price ids. `onAdjustment`: act on `status === 'approved'` and `type === 'full'`; partial → review.
+5. **Hooks (one-time/refunds)**: `onTransaction` runs on `transaction.completed` (also renewals → filter `subscriptionId === null`), **at least once**: write order + grant in ONE DB transaction keyed on `transactionId`. `customData` is untrusted — match `tx.items` priceId and grant by quantity; never equality-check amounts (discounts, tax, local currency). Unknown price → persist a review row, don't drop silently. Other products' transactions never reach the hook when `owns` is set (they are ledger rows `ignored` / `not_ours`); don't hand-write that filter in the app. `onAdjustment`: act on `status === 'approved'` and `type === 'full'`; partial → review. **`ctx.known === false`** means the kit never saw the transaction as yours (a refund can arrive before its payment, or the payment predates v0.4.0): record it (e.g. a resolved `refund_unmatched` row the payment path checks) — never return early on it.
 6. **UI**: checkout via `paddle-kit/client` (`items`, `userId`, extra `customData`); poll the app's own state after `checkout.completed` — the webhook, not the browser, grants access.
 7. **CI and the deploy host** both install the private dependency. Actions recipe below; the host (e.g. Vercel) also needs access — its mechanism is host-specific and UNVERIFIED here: confirm it in the host's docs and say so in the PR. For CI: secret `PADDLE_KIT_READ_TOKEN` (fine-grained, read-only Contents on `SnaxxTech/paddle-kit`) + `git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf` for **`ssh://git@github.com/`, `git@github.com:` and `https://github.com/`** (npm locks `git+ssh`). Verify the secret exists: `gh api repos/<owner>/<repo>/actions/secrets` must list it.
 
@@ -57,6 +57,9 @@ Read the target app before deciding: confirm its roles, auth, DB driver, existin
 | Insert order, then grant in a separate step | A retry after a failed grant never grants |
 | Blocking password recovery when expired | Users locked out of a read-only account |
 | Hand-typed dashboard prices | Prices drift from the landing page |
+| Hand-written "not our product" filter instead of `owns` | Dropped real refunds once (AppCare): a refund of an unseen payment looked foreign |
+| Returning early on `onAdjustment` with `ctx.known === false` | A refund that beat its payment is lost; the payment is then granted |
+| Treating 409 `in_progress` as an outage | It is a concurrent duplicate; Paddle's retry of it is a 200 duplicate |
 
 ## Monitoring
 Health route with `PADDLE_HEALTH_TOKEN`; the owner signal is a stale `lastEventAt` (no webhook for longer than normal traffic allows) — wire it into an existing alert/cron if the app has one, else list it as an owner item with the worst-case delay.
