@@ -1,0 +1,153 @@
+type ReasonCode = 'missing_body' | 'bad_signature_header' | 'signature_mismatch' | 'stale_timestamp' | 'bad_json' | 'bad_payload' | 'unknown_event' | 'no_user_id' | 'out_of_order' | 'store_error' | 'hook_error'
+/** Shared seller account: the event belongs to another product (see `owns`). Recorded as `ignored`; not a failure. */
+ | 'not_ours';
+type SubscriptionStatus = 'active' | 'trialing' | 'past_due' | 'paused' | 'canceled';
+type EventStatus = 'received' | 'processed' | 'ignored' | 'stale' | 'failed';
+interface ScheduledChange {
+    action: string;
+    effectiveAt: string;
+}
+interface Subscription {
+    subscriptionId: string;
+    customerId: string;
+    userId: string | null;
+    status: SubscriptionStatus;
+    priceIds: string[];
+    currentPeriodEnd: string | null;
+    scheduledChange: ScheduledChange | null;
+    canceledAt: string | null;
+    pastDueSince: string | null;
+    /** occurred_at of the event (or updated_at from reconcile) that produced this row. */
+    lastEventAt: string;
+    raw: unknown;
+}
+interface LineItem {
+    priceId: string;
+    productId: string | null;
+    quantity: number;
+}
+interface Transaction {
+    transactionId: string;
+    status: string;
+    customerId: string | null;
+    subscriptionId: string | null;
+    customData: Record<string, unknown> | null;
+    items: LineItem[];
+    currency: string | null;
+    /** Grand total (tax-inclusive) in the currency's lowest unit, as Paddle sends it (a string). */
+    total: string | null;
+    /** Subtotal in the lowest unit (string): before discount and tax (net of tax for tax-inclusive prices). Don't equality-check it against a list price; verify by items (priceId, quantity) and record the currency rather than requiring it. */
+    subtotal: string | null;
+    occurredAt: string;
+    raw: unknown;
+}
+interface Adjustment {
+    adjustmentId: string;
+    /** refund | credit | chargeback | chargeback_warning | … */
+    action: string;
+    /** `full` or `partial` (from Paddle's `type`); `null` when absent or not recognised. Only act on a `full` refund automatically. */
+    type: 'full' | 'partial' | null;
+    /** pending_approval | approved | rejected | reversed */
+    status: string;
+    transactionId: string;
+    subscriptionId: string | null;
+    customerId: string | null;
+    currency: string | null;
+    /** Adjusted amount (tax-inclusive) in the currency's lowest unit, as Paddle sends it (a string). */
+    total: string | null;
+    /** Adjusted amount before tax in the lowest unit (string). */
+    subtotal: string | null;
+    occurredAt: string;
+    raw: unknown;
+}
+interface HookContext {
+    eventId: string;
+    eventType: string;
+    store: Store;
+}
+interface AdjustmentContext extends HookContext {
+    /**
+     * true when this app has seen the adjusted transaction as its own (or the adjustment is on a subscription in its
+     * mirror). false when it has not: the payment may not have arrived yet (a refund can arrive before its payment), it
+     * predates paddle-kit v0.4.0, or the store cannot record transactions. Record a `known: false` refund so the payment
+     * path can refuse it later; never drop it.
+     */
+    known: boolean;
+}
+/** The ids this app owns on a shared Paddle seller account. An event is ours when any line item matches. */
+interface OwnedIds {
+    priceIds?: readonly string[];
+    productIds?: readonly string[];
+}
+type OwnsPredicate = (x: {
+    kind: 'subscription' | 'transaction';
+    items: LineItem[];
+    customData: Record<string, unknown> | null;
+}) => boolean;
+type Owns = OwnedIds | OwnsPredicate;
+/** A transaction this app has seen, and whether it was this app's. */
+interface SeenTransaction {
+    transactionId: string;
+    owned: boolean;
+}
+interface Customer {
+    customerId: string;
+    email: string | null;
+    lastEventAt: string;
+}
+interface Health {
+    lastEventAt: string | null;
+    lastFailureAt: string | null;
+    lastFailureReason: ReasonCode | null;
+    failedLast24h: number;
+    unlinkedLast24h: number;
+}
+interface Store {
+    /**
+     * Claims an event for processing. `alreadyDone`: a finished row exists (processed/ignored/stale). `inProgress`: another
+     * attempt holds a live claim (`received` at or after `leaseExpiredBefore`), so this delivery must not run the hooks.
+     * Otherwise the row is (re)claimed: inserted, or a `failed` / expired `received` row is set to `received` at `receivedAt`.
+     * Without `leaseExpiredBefore` a `received` row is always reclaimable (the v0.3 behaviour).
+     */
+    recordEvent(e: {
+        eventId: string;
+        eventType: string;
+        occurredAt: string;
+        receivedAt: string;
+        leaseExpiredBefore?: string;
+    }): Promise<{
+        alreadyDone: boolean;
+        inProgress?: boolean;
+    }>;
+    markEvent(eventId: string, status: EventStatus, reason: ReasonCode | null): Promise<void>;
+    recordFailure(reason: ReasonCode, at: Date): Promise<void>;
+    upsertCustomer(c: Customer): Promise<{
+        applied: boolean;
+    }>;
+    upsertSubscription(s: Subscription): Promise<{
+        applied: boolean;
+    }>;
+    getSubscription(subscriptionId: string): Promise<Subscription | null>;
+    getSubscriptionsByUser(userId: string): Promise<Subscription[]>;
+    health(now: Date): Promise<Health>;
+    /**
+     * Remembers a seen transaction (needs migration 002). Once owned, always owned. Optional so custom stores keep
+     * compiling; without it every adjustment reaches `onAdjustment` with `known: false`.
+     */
+    recordTransaction?(t: SeenTransaction & {
+        subscriptionId: string | null;
+        customerId: string | null;
+        occurredAt: string;
+        receivedAt: string;
+    }): Promise<void>;
+    getTransaction?(transactionId: string): Promise<SeenTransaction | null>;
+}
+interface LogEntry {
+    level: 'warn' | 'error';
+    reason: ReasonCode;
+    eventId?: string;
+    eventType?: string;
+}
+type Logger = (entry: LogEntry) => void;
+
+export type { Adjustment as A, Customer as C, EventStatus as E, HookContext as H, Logger as L, Owns as O, ReasonCode as R, Store as S, Transaction as T, AdjustmentContext as a, Health as b, LineItem as c, LogEntry as d, OwnedIds as e, OwnsPredicate as f, ScheduledChange as g, SeenTransaction as h, Subscription as i, SubscriptionStatus as j };
