@@ -186,7 +186,7 @@ Create a notification destination (type: webhook) pointing at your route and sub
 
 `subscription.created`, `subscription.updated`, `subscription.activated`, `subscription.trialing`, `subscription.past_due`, `subscription.paused`, `subscription.resumed`, `subscription.canceled`, `customer.created`, `customer.updated`, `transaction.completed`.
 
-`subscription.imported` is treated like `subscription.created`. `transaction.completed` is recorded with no state change in v0.1 (one-time purchases are deferred). Any other event type is stored as `ignored` and acknowledged with 200.
+`subscription.imported` is treated like `subscription.created`. `transaction.completed` and `transaction.paid` (and, since v0.3, `adjustment.created` / `adjustment.updated`) are recorded as `processed` with no state change unless you pass `onTransaction` / `onAdjustment` to `createBilling`; in v0.2 `transaction.paid` and `adjustment.*` were stored as `ignored`. A hook that throws fails the event (HTTP 500, reason `hook_error`, visible in health) so Paddle retries. Any other event type is stored as `ignored` and acknowledged with 200.
 
 ## Monitoring
 
@@ -202,7 +202,7 @@ A stale `lastEventAt` is the primary "alive" signal: if no verified event has ar
 | `failedLast24h` | Rejected requests plus failed events in the last 24 h. |
 | `unlinkedLast24h` | Subscription events with no `userId` (stored with `user_id = NULL`, event reason `no_user_id`). Fix by creating checkouts through `createCheckout`, which sets `customData.userId`. |
 
-Reason codes: `missing_body`, `missing_raw_body`, `bad_signature_header`, `signature_mismatch`, `stale_timestamp`, `bad_json`, `bad_payload`, `unknown_event`, `no_user_id`, `out_of_order`, `store_error`. Logs carry only `reason`, `eventId` and `eventType`, never the body, signature header or secrets.
+Reason codes: `missing_body`, `missing_raw_body`, `bad_signature_header`, `signature_mismatch`, `stale_timestamp`, `bad_json`, `bad_payload`, `unknown_event`, `no_user_id`, `out_of_order`, `store_error`, `hook_error`. Logs carry only `reason`, `eventId` and `eventType`, never the body, signature header or secrets.
 
 **`failedLast24h` is an approximation.** Rejected requests are counted per minute and reason; a whole minute bucket counts if its latest hit is inside the 24 h window, so it can over-count by up to one minute of hits at the window edge.
 

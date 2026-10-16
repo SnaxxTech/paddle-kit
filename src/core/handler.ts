@@ -1,7 +1,7 @@
 import { nextPastDueSince } from './access';
 import { parseEvent, type NormalisedEvent } from './events';
 import { verifySignature } from './signature';
-import type { EventStatus, Logger, ReasonCode, Store } from './types';
+import type { Adjustment, EventStatus, HookContext, Logger, ReasonCode, Store, Transaction } from './types';
 
 export interface HandlerDeps {
   store: Store;
@@ -9,7 +9,12 @@ export interface HandlerDeps {
   toleranceSeconds: number;
   log: Logger;
   now: () => Date;
+  onTransaction?: (tx: Transaction, ctx: HookContext) => Promise<void> | void;
+  onAdjustment?: (adj: Adjustment, ctx: HookContext) => Promise<void> | void;
 }
+
+/** Marks an error thrown by a user hook, so it is not mistaken for a store failure. */
+class HookFailure extends Error {}
 
 const json = (body: unknown, status: number) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -23,6 +28,15 @@ export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<
       d.log({ level: 'error', reason: 'store_error' });
     }
     return json({ error: reason }, status);
+  }
+
+  async function runHook(hook: (() => Promise<void> | void) | undefined): Promise<void> {
+    if (!hook) return;
+    try {
+      await hook();
+    } catch {
+      throw new HookFailure('hook threw'); // the original error may carry secrets: it is never logged or stored
+    }
   }
 
   async function apply(ev: NormalisedEvent): Promise<{ status: EventStatus; reason: ReasonCode | null }> {
@@ -49,8 +63,16 @@ export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<
         const { applied } = await d.store.upsertCustomer(ev.customer);
         return applied ? { status: 'processed', reason: null } : { status: 'stale', reason: 'out_of_order' };
       }
-      case 'record-only':
+      case 'transaction': {
+        const ctx: HookContext = { eventId: ev.eventId, eventType: ev.eventType, store: d.store };
+        await runHook(d.onTransaction && (() => d.onTransaction!(ev.transaction, ctx)));
         return { status: 'processed', reason: null };
+      }
+      case 'adjustment': {
+        const ctx: HookContext = { eventId: ev.eventId, eventType: ev.eventType, store: d.store };
+        await runHook(d.onAdjustment && (() => d.onAdjustment!(ev.adjustment, ctx)));
+        return { status: 'processed', reason: null };
+      }
       case 'ignored':
         return { status: 'ignored', reason: 'unknown_event' };
     }
@@ -94,19 +116,21 @@ export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<
       await d.store.markEvent(ev.eventId, outcome.status, outcome.reason);
       if (outcome.reason && outcome.reason !== 'unknown_event') d.log({ level: 'warn', reason: outcome.reason, ...tag });
       return json({ received: true }, 200);
-    } catch {
-      d.log({ level: 'error', reason: 'store_error', ...tag });
+    } catch (err) {
+      const reason: ReasonCode = err instanceof HookFailure ? 'hook_error' : 'store_error';
+      d.log({ level: 'error', reason, ...tag });
       try {
         if (!recorded) throw new Error('event row never written');
-        await d.store.markEvent(ev.eventId, 'failed', 'store_error');
+        await d.store.markEvent(ev.eventId, 'failed', reason);
       } catch {
+        if (reason === 'hook_error') d.log({ level: 'error', reason: 'store_error', ...tag });
         try {
-          await d.store.recordFailure('store_error', d.now());
+          await d.store.recordFailure(reason === 'hook_error' ? 'hook_error' : 'store_error', d.now());
         } catch {
           /* store fully down: the log line above is the only record */
         }
       }
-      return json({ error: 'store_error' }, 500);
+      return json({ error: reason }, 500);
     }
   };
 }

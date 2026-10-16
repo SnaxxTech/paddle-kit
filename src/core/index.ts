@@ -5,3 +5,4 @@ export { verifySignature } from './signature';
 export type { VerifyResult } from './signature';
 export { decideAccess } from './access';
 export type { AccessPolicy } from './access';
+export { itemsOf, customDataOf } from './events';

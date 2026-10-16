@@ -13,6 +13,7 @@ period is fixed at 2024-04-12 → 2024-05-12), so timestamps inside `data` are f
 | transaction.completed.json | scenario `subscription_creation` |
 | subscription.updated.json | scenario `subscription_renewal`, payment outcome `failed` (first event: status still `active`) |
 | subscription.past_due.json | scenario `subscription_renewal`, payment outcome `failed` |
+| adjustment.created.json | **Not a simulator capture**: the "Example" payload from Paddle's `adjustment.created` webhook reference (https://developer.paddle.com/webhooks/adjustments/adjustment-created.md, fetched 2026-10-16), a partial `refund` in `pending_approval`. Re-serialised with 2-space indentation, no values changed. Replace with a real sandbox capture once a sandbox refund has been made. |
 | subscription.canceled.json | scenario `subscription_renewal`, payment outcome `failed`, dunning exhausted → `subscription_canceled` |
 
 ## Edits

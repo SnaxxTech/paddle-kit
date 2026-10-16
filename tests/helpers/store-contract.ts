@@ -83,6 +83,14 @@ export function runStoreContract(name: string, makeStore: () => Promise<Store>):
       });
     });
 
+    it('surfaces a hook_error failed event in health and reprocesses it', async () => {
+      const now = new Date('2026-10-15T12:00:00.000Z');
+      await store.recordEvent(ev('evt_hook', '2026-10-15T11:00:00.000Z'));
+      await store.markEvent('evt_hook', 'failed', 'hook_error');
+      expect(await store.health(now)).toMatchObject({ lastFailureAt: '2026-10-15T11:00:00.000Z', lastFailureReason: 'hook_error', failedLast24h: 1 });
+      expect(await store.recordEvent(ev('evt_hook', '2026-10-15T11:00:00.000Z'))).toEqual({ alreadyDone: false });
+    });
+
     it('counts a failure hit only inside the (now-24h, now] window', async () => {
       const now = new Date('2026-10-15T12:00:00.000Z');
       const cases: [string, string, number][] = [

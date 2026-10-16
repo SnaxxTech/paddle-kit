@@ -74,3 +74,25 @@ describe('config exposure', () => {
     expect(JSON.stringify(billing.config)).not.toContain('super-secret-value');
   });
 });
+
+describe('transaction and adjustment hooks through createBilling', () => {
+  it('wires onTransaction and onAdjustment into the webhook, with the billing store in the context', async () => {
+    const now = new Date();
+    const seen: string[] = [];
+    const cfg = base();
+    const billing = createBilling({
+      ...cfg,
+      webhookSecret: 'sec',
+      now: () => now,
+      onTransaction: (tx, ctx) => { seen.push(`tx:${tx.transactionId}:${ctx.store === cfg.store}`); },
+      onAdjustment: (adj) => { seen.push(`adj:${adj.action}`); },
+    });
+    const post = (name: string) => {
+      const body = JSON.stringify(loadFixture(name));
+      return billing.handleWebhook(new Request('https://x/', { method: 'POST', headers: { 'paddle-signature': sign(body, 'sec', Math.floor(now.getTime() / 1000)) }, body }));
+    };
+    expect((await post('transaction.completed')).status).toBe(200);
+    expect((await post('adjustment.created')).status).toBe(200);
+    expect(seen).toEqual(['tx:txn_01hv8wptq8987qeep44cyrewp9:true', 'adj:refund']);
+  });
+});

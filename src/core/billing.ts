@@ -1,6 +1,6 @@
 import { decideAccess } from './access';
 import { createWebhookHandler } from './handler';
-import type { Health, Logger, ReasonCode, Store, Subscription } from './types';
+import type { Adjustment, Health, HookContext, Logger, ReasonCode, Store, Subscription, Transaction } from './types';
 
 export interface BillingConfig {
   environment: 'sandbox' | 'production';
@@ -11,6 +11,13 @@ export interface BillingConfig {
   signatureToleranceSeconds?: number;
   healthToken?: string;
   allowProductionInDev?: boolean;
+  /**
+   * Runs once per verified transaction.completed / transaction.paid, after the event is recorded and before it is marked
+   * processed. Throwing fails the event (500, reason `hook_error`) so Paddle retries; make the work idempotent by transactionId.
+   */
+  onTransaction?: (tx: Transaction, ctx: HookContext) => Promise<void> | void;
+  /** Same contract as onTransaction, for adjustment.created / adjustment.updated (refunds, credits, chargebacks). */
+  onAdjustment?: (adj: Adjustment, ctx: HookContext) => Promise<void> | void;
   log?: Logger;
   now?: () => Date;
 }
@@ -44,6 +51,8 @@ export function createBilling(config: BillingConfig): Billing {
     toleranceSeconds: config.signatureToleranceSeconds ?? 5,
     log,
     now,
+    onTransaction: config.onTransaction,
+    onAdjustment: config.onAdjustment,
   });
 
   const { webhookSecret: _omitted, ...publicConfig } = config;

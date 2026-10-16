@@ -9,7 +9,8 @@ export type ReasonCode =
   | 'unknown_event'
   | 'no_user_id'
   | 'out_of_order'
-  | 'store_error';
+  | 'store_error'
+  | 'hook_error';
 
 export type SubscriptionStatus = 'active' | 'trialing' | 'past_due' | 'paused' | 'canceled';
 export type EventStatus = 'received' | 'processed' | 'ignored' | 'stale' | 'failed';
@@ -32,6 +33,48 @@ export interface Subscription {
   /** occurred_at of the event (or updated_at from reconcile) that produced this row. */
   lastEventAt: string;
   raw: unknown;
+}
+
+export interface LineItem {
+  priceId: string;
+  productId: string | null;
+  quantity: number;
+}
+
+export interface Transaction {
+  transactionId: string;
+  status: string;
+  customerId: string | null;
+  subscriptionId: string | null;
+  customData: Record<string, unknown> | null;
+  items: LineItem[];
+  currency: string | null;
+  /** Grand total in the currency's lowest unit, as Paddle sends it (a string). */
+  total: string | null;
+  occurredAt: string;
+  raw: unknown;
+}
+
+export interface Adjustment {
+  adjustmentId: string;
+  /** refund | credit | chargeback | chargeback_warning | … */
+  action: string;
+  /** pending_approval | approved | rejected | reversed */
+  status: string;
+  transactionId: string;
+  subscriptionId: string | null;
+  customerId: string | null;
+  currency: string | null;
+  /** Adjusted amount in the currency's lowest unit, as Paddle sends it (a string). */
+  total: string | null;
+  occurredAt: string;
+  raw: unknown;
+}
+
+export interface HookContext {
+  eventId: string;
+  eventType: string;
+  store: Store;
 }
 
 export interface Customer {
