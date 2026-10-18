@@ -244,6 +244,7 @@ How `owns` works:
 - **Subscriptions you already have.** A subscription that is already in the mirror stays ours, also when a later event has none of our prices. A transaction on a mirrored subscription is also ours.
 - **Refunds (adjustments).** Adjustments have no price ids. The kit keeps each transaction it sees, with its owner, in `paddle_transactions`. So the kit records an adjustment of another app's transaction as `not_ours`.
 - **Refunds for a transaction that the kit never saw.** The kit does **not** drop them. It gives them to `onAdjustment` with `ctx.known === false`, because a refund can arrive before its payment. Your app decides what to do. AppCare keeps it as a resolved `refund_unmatched` row, and its payment code checks for that row.
+- **Other apps' refunds reach your `onAdjustment` too.** On a shared seller account, a refund of another app's transaction that this app never saw arrives with `ctx.known === false`. Record it; do not act on it (no access change, no email).
 - **`reconcile`.** It lists every subscription on the account, but mirrors only ours (and the ones already mirrored). It returns `{ scanned, applied, notOurs, invalid }`.
 - **No `owns`.** Every event is ours. Use this only when the app has its own seller account. `ctx.known` still tells you if the transaction was seen.
 
