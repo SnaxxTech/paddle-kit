@@ -1,5 +1,7 @@
 export type ReasonCode =
   | 'missing_body'
+  /** The body is over the cap (`maxBodyBytes`, default 4 MB): answered 413 before the signature is checked. */
+  | 'body_too_large'
   | 'bad_signature_header'
   | 'signature_mismatch'
   | 'stale_timestamp'
