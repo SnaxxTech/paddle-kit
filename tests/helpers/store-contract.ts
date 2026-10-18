@@ -85,10 +85,10 @@ export function runStoreContract(name: string, makeStore: () => Promise<Store>):
       });
     });
 
-    it('reports lastOwnedAt (processed or stale) and notOursLast24h over the 24h window', async () => {
+    it('reports lastOwnedAt (subscription, transaction, matched adjustment) and notOursLast24h over the 24h window', async () => {
       const now = new Date('2026-10-15T12:00:00.000Z');
-      const mark = async (id: string, at: string, status: 'processed' | 'ignored' | 'stale', reason: 'not_ours' | 'unknown_event' | 'out_of_order' | 'unmatched' | null) => {
-        await store.recordEvent(ev(id, at));
+      const mark = async (id: string, at: string, status: 'processed' | 'ignored' | 'stale', reason: 'not_ours' | 'unknown_event' | 'out_of_order' | 'unmatched' | null, eventType = 'subscription.updated') => {
+        await store.recordEvent({ ...ev(id, at), eventType });
         await store.markEvent(id, status, reason);
       };
       await mark('evt_owned', '2026-10-14T08:00:00.000Z', 'processed', null);
@@ -98,10 +98,15 @@ export function runStoreContract(name: string, makeStore: () => Promise<Store>):
       await mark('evt_other_app_old', '2026-10-13T11:00:00.000Z', 'ignored', 'not_ours');
       await mark('evt_payout', '2026-10-15T11:30:00.000Z', 'ignored', 'unknown_event');
       await store.recordEvent(ev('evt_running', '2026-10-15T11:45:00.000Z')); // received, not finished
-      await mark('evt_refund_unseen_tx', '2026-10-15T11:50:00.000Z', 'processed', 'unmatched'); // maybe another app's
+      await mark('evt_paid', '2026-10-14T09:20:00.000Z', 'processed', null, 'transaction.paid');
+      await mark('evt_refund_ours', '2026-10-14T09:30:00.000Z', 'processed', null, 'adjustment.updated');
+      await mark('evt_refund_unseen_tx', '2026-10-15T11:50:00.000Z', 'processed', 'unmatched', 'adjustment.created'); // maybe another app's
+      // customer.* never goes through owns: any app's new customer would look like ours
+      await mark('evt_customer_new', '2026-10-15T11:55:00.000Z', 'processed', null, 'customer.created');
+      await mark('evt_customer_old', '2026-10-15T11:56:00.000Z', 'stale', 'out_of_order', 'customer.updated');
       expect(await store.health(now)).toMatchObject({
-        lastEventAt: '2026-10-15T11:50:00.000Z',
-        lastOwnedAt: '2026-10-14T09:00:00.000Z',
+        lastEventAt: '2026-10-15T11:56:00.000Z',
+        lastOwnedAt: '2026-10-14T09:30:00.000Z',
         notOursLast24h: 2,
       });
     });

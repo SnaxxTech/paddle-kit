@@ -126,7 +126,9 @@ export interface Health {
   failedLast24h: number;
   unlinkedLast24h: number;
   /**
-   * When the last event this app treated as its own arrived (processed or stale). `null` if none yet. With
+   * When the last event that went through `owns` and was taken as this app's arrived: a processed or stale
+   * subscription.* or transaction.* event, or an adjustment.* that is not `unmatched` (customer.* never counts: it has
+   * no line items for `owns` to check). `null` if none yet. With
    * `notOursLast24h`, it shows a wrong `owns`: other products' events keep `lastEventAt` fresh while this one goes old.
    * Optional so custom stores keep compiling; the kit's stores always return it.
    */

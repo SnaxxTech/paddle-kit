@@ -77,6 +77,11 @@ describe('shared seller account: owns', () => {
       expect(t.adjs.map((a) => a.ctx.known)).toEqual([false]);
       expect(await store.health(NOW)).toMatchObject({ lastOwnedAt: null, notOursLast24h: 0 });
       expect(t.reasonOf('evt_foreign_refund')).toEqual(['processed', 'unmatched']);
+      // customer.* has no line items, so owns never sees it: neither another app's customer nor our own counts
+      const customer = loadFixture('customer.created');
+      expect((await t.send({ ...customer, event_id: 'evt_foreign_customer', data: { ...customer.data, id: 'ctm_other_app' } })).status).toBe(200);
+      expect((await t.send({ ...customer, event_id: 'evt_our_customer' })).status).toBe(200);
+      expect(await store.health(NOW)).toMatchObject({ lastOwnedAt: null, notOursLast24h: 0 });
       expect((await t.send(txn())).status).toBe(200);
       expect(t.txs).toHaveLength(0);
       expect(await store.health(NOW)).toMatchObject({ lastEventAt: NOW.toISOString(), failedLast24h: 0, notOursLast24h: 1, lastOwnedAt: null });

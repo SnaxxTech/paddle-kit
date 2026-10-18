@@ -529,10 +529,15 @@ What the kit does with each event:
 | `lastFailureReason` | Our own reason code for it. Never secret text, never driver text. |
 | `failedLast24h` | Refused requests plus failed events in the last 24 hours. |
 | `unlinkedLast24h` | Subscription events with no `userId` (stored with `user_id = NULL`, reason `no_user_id`). To fix, open each checkout with `createCheckout`, which sets `customData.userId`. |
-| `lastOwnedAt` | When the last event that the app took as its own arrived (processed or stale, but not `unmatched`). `null` if there is none yet. Since v0.5.0. |
+| `lastOwnedAt` | When the last event that went through `owns` and was taken as this app's arrived: a processed or stale `subscription.*` or `transaction.*` event, or an `adjustment.*` that is not `unmatched`. `customer.*` never counts (it has no line items, so `owns` never checks it). `null` if there is none yet. Since v0.5.0. |
 | `notOursLast24h` | Events acked as `not_ours` in the last 24 hours (other products on a shared seller account). Since v0.5.0. |
 
 **Alert rule for a wrong `owns`:** `lastOwnedAt` older than N days (your longest normal gap between your own sales or renewals) **and** `notOursLast24h > 0` = your `owns` is wrong. Paddle's events still arrive, but the kit sends all of them to `not_ours`, so `lastEventAt` stays fresh and `failedLast24h` stays 0. On a shared seller account `notOursLast24h > 0` alone is normal traffic; do not alert on it.
+
+Limits of this rule:
+
+- It catches an `owns` that matches **nothing**. If `owns` misses only one new price while older subscriptions still renew, those renewals keep `lastOwnedAt` fresh, and the rule stays quiet.
+- v0.4.0 recorded a refund of a transaction it never saw with reason `null`, not `unmatched`. Such rows count in `lastOwnedAt` until they are older than your N days.
 
 **Reason codes:** `missing_body`, `bad_signature_header`, `signature_mismatch`, `stale_timestamp`, `bad_json`, `bad_payload`, `unknown_event`, `no_user_id`, `out_of_order`, `store_error`, `hook_error`, `not_ours`, `unmatched`.
 
