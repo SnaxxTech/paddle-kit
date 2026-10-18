@@ -11,7 +11,12 @@ export type ReasonCode =
   | 'store_error'
   | 'hook_error'
   /** Shared seller account: the event belongs to another product (see `owns`). Recorded as `ignored`; not a failure. */
-  | 'not_ours';
+  | 'not_ours'
+  /**
+   * An adjustment of a transaction this app never saw as its own (`ctx.known === false`): `processed`, the hook ran, no
+   * warn line. It may be another app's refund on a shared seller account, so it does not count in `Health.lastOwnedAt`.
+   */
+  | 'unmatched';
 
 export type SubscriptionStatus = 'active' | 'trialing' | 'past_due' | 'paused' | 'canceled';
 export type EventStatus = 'received' | 'processed' | 'ignored' | 'stale' | 'failed';

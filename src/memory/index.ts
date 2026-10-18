@@ -72,7 +72,7 @@ export function memoryStore(): Store {
         ...failures,
       ].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
       const last = fails.at(-1);
-      const owned = rows.filter((r) => r.status === 'processed' || r.status === 'stale').map((r) => r.receivedAt).sort((a, b) => Date.parse(a) - Date.parse(b));
+      const owned = rows.filter((r) => (r.status === 'processed' || r.status === 'stale') && r.reason !== 'unmatched').map((r) => r.receivedAt).sort((a, b) => Date.parse(a) - Date.parse(b));
       return {
         lastEventAt: done.at(-1) ?? null,
         lastFailureAt: last?.at ?? null,

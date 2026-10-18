@@ -105,7 +105,7 @@ export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<
         if (seen && !seen.owned && !onOurSubscription) return NOT_OURS;
         const ctx: AdjustmentContext = { eventId: ev.eventId, eventType: ev.eventType, store: d.store, known: seen?.owned === true || onOurSubscription };
         await runHook(d.onAdjustment && (() => d.onAdjustment!(ev.adjustment, ctx)));
-        return { status: 'processed', reason: null };
+        return { status: 'processed', reason: ctx.known ? null : 'unmatched' };
       }
       case 'ignored':
         return { status: 'ignored', reason: 'unknown_event' };
@@ -152,7 +152,7 @@ export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<
       recorded = true;
       const outcome = await apply(ev);
       await d.store.markEvent(ev.eventId, outcome.status, outcome.reason);
-      if (outcome.reason && outcome.reason !== 'unknown_event' && outcome.reason !== 'not_ours') d.log({ level: 'warn', reason: outcome.reason, ...tag });
+      if (outcome.reason && outcome.reason !== 'unknown_event' && outcome.reason !== 'not_ours' && outcome.reason !== 'unmatched') d.log({ level: 'warn', reason: outcome.reason, ...tag });
       return json({ received: true }, 200);
     } catch (err) {
       const reason: ReasonCode = err instanceof HookFailure ? 'hook_error' : 'store_error';

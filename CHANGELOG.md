@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Health gains `lastOwnedAt` (last event processed or stale, so taken as this app's) and `notOursLast24h` (events acked as `not_ours` in 24 h), from existing `paddle_events` rows: no migration. A wrong `owns` used to look fully green; README Monitoring has the alert rule. Both fields are optional in the `Health` type, so custom stores keep compiling.
+- Health gains `lastOwnedAt` (last event processed or stale, so taken as this app's; adjustments of a transaction never seen do not count) and `notOursLast24h` (events acked as `not_ours` in 24 h), from existing `paddle_events` rows: no migration. A wrong `owns` used to look fully green; README Monitoring has the alert rule. An adjustment with `ctx.known === false` is now recorded as `processed` with the new reason `unmatched` (it was `null`), so another app's refund on a shared seller account cannot make `lastOwnedAt` look fresh. Both fields are optional in the `Health` type, so custom stores keep compiling.
 
 ## 0.4.0 (2026-10-16)
 

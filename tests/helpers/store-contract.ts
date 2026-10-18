@@ -87,7 +87,7 @@ export function runStoreContract(name: string, makeStore: () => Promise<Store>):
 
     it('reports lastOwnedAt (processed or stale) and notOursLast24h over the 24h window', async () => {
       const now = new Date('2026-10-15T12:00:00.000Z');
-      const mark = async (id: string, at: string, status: 'processed' | 'ignored' | 'stale', reason: 'not_ours' | 'unknown_event' | 'out_of_order' | null) => {
+      const mark = async (id: string, at: string, status: 'processed' | 'ignored' | 'stale', reason: 'not_ours' | 'unknown_event' | 'out_of_order' | 'unmatched' | null) => {
         await store.recordEvent(ev(id, at));
         await store.markEvent(id, status, reason);
       };
@@ -98,8 +98,9 @@ export function runStoreContract(name: string, makeStore: () => Promise<Store>):
       await mark('evt_other_app_old', '2026-10-13T11:00:00.000Z', 'ignored', 'not_ours');
       await mark('evt_payout', '2026-10-15T11:30:00.000Z', 'ignored', 'unknown_event');
       await store.recordEvent(ev('evt_running', '2026-10-15T11:45:00.000Z')); // received, not finished
+      await mark('evt_refund_unseen_tx', '2026-10-15T11:50:00.000Z', 'processed', 'unmatched'); // maybe another app's
       expect(await store.health(now)).toMatchObject({
-        lastEventAt: '2026-10-15T11:30:00.000Z',
+        lastEventAt: '2026-10-15T11:50:00.000Z',
         lastOwnedAt: '2026-10-14T09:00:00.000Z',
         notOursLast24h: 2,
       });

@@ -1,8 +1,10 @@
 import { PGlite } from '@electric-sql/pglite';
+import Database from 'better-sqlite3';
 import { describe, expect, it, vi } from 'vitest';
 import { createBilling, type BillingConfig } from '../src/core/billing';
 import { memoryStore } from '../src/memory';
 import { MIGRATIONS, postgresStore } from '../src/postgres';
+import { SQLITE_MIGRATIONS, sqliteStore } from '../src/sqlite';
 import { reconcile } from '../src/reconcile';
 import type { Adjustment, AdjustmentContext, LogEntry, Store, Transaction } from '../src/core/types';
 import { sign } from './helpers/sign';
@@ -66,8 +68,15 @@ describe('shared seller account: owns', () => {
   it('a misconfigured owns shows in health: notOursLast24h counts our own sale, lastOwnedAt stays null', async () => {
     const db = new PGlite();
     for (const m of MIGRATIONS) await db.exec(m.sql);
-    for (const store of [memoryStore(), postgresStore({ query: (q, p) => db.query(q, p) as any })]) {
+    const lite = new Database(':memory:');
+    for (const m of SQLITE_MIGRATIONS) lite.exec(m.sql);
+    for (const store of [memoryStore(), postgresStore({ query: (q, p) => db.query(q, p) as any }), sqliteStore({ db: lite })]) {
       const t = setup({ owns: { priceIds: ['pri_typo'] } }, store);
+      // another app's refund of a payment this app never saw: reaches onAdjustment, but is not proof that owns works
+      expect((await t.send(adjustment({ eventId: 'evt_foreign_refund', transactionId: 'txn_other_app' }))).status).toBe(200);
+      expect(t.adjs.map((a) => a.ctx.known)).toEqual([false]);
+      expect(await store.health(NOW)).toMatchObject({ lastOwnedAt: null, notOursLast24h: 0 });
+      expect(t.reasonOf('evt_foreign_refund')).toEqual(['processed', 'unmatched']);
       expect((await t.send(txn())).status).toBe(200);
       expect(t.txs).toHaveLength(0);
       expect(await store.health(NOW)).toMatchObject({ lastEventAt: NOW.toISOString(), failedLast24h: 0, notOursLast24h: 1, lastOwnedAt: null });
@@ -152,7 +161,7 @@ describe('shared seller account: adjustments', () => {
     expect((await t.send(adjustment({ eventId: 'evt_adj', transactionId: txId }))).status).toBe(200);
     expect(t.adjs).toHaveLength(1);
     expect(t.adjs[0]!.ctx.known).toBe(false);
-    expect(t.reasonOf('evt_adj')).toEqual(['processed', null]);
+    expect(t.reasonOf('evt_adj')).toEqual(['processed', 'unmatched']);
     // the payment arrives afterwards and is still fulfilled
     await t.send(txn());
     expect(t.txs).toHaveLength(1);
@@ -210,7 +219,7 @@ describe('shared seller account: adjustments', () => {
     expect(rows).toEqual([
       { event_id: 'evt_other', status: 'ignored', reason: 'not_ours' },
       { event_id: 'evt_refund_other', status: 'ignored', reason: 'not_ours' },
-      { event_id: 'evt_refund_unknown', status: 'processed', reason: null },
+      { event_id: 'evt_refund_unknown', status: 'processed', reason: 'unmatched' },
     ]);
     expect(t.adjs.map((a) => a.ctx.known)).toEqual([false]);
   });
