@@ -13,10 +13,15 @@ export type ReasonCode =
   /** Shared seller account: the event belongs to another product (see `owns`). Recorded as `ignored`; not a failure. */
   | 'not_ours'
   /**
-   * An adjustment of a transaction this app never saw as its own (`ctx.known === false`): `processed`, the hook ran, no
-   * warn line. It may be another app's refund on a shared seller account, so it does not count in `Health.lastOwnedAt`.
+   * Processed, but `owns` never matched it: an adjustment of a transaction this app never saw (`ctx.known === false`,
+   * maybe another app's refund), or a customer.* event (no line items to check). The hook ran; no warn line.
    */
-  | 'unmatched';
+  | 'unmatched'
+  /**
+   * Processed only because its subscription is already in the mirror; `owns` did not match it (a retired price, or a
+   * subscription mirrored before `owns` was set). The hook ran; no warn line. Not counted in `Health.lastOwnedAt`.
+   */
+  | 'mirrored';
 
 export type SubscriptionStatus = 'active' | 'trialing' | 'past_due' | 'paused' | 'canceled';
 export type EventStatus = 'received' | 'processed' | 'ignored' | 'stale' | 'failed';
@@ -126,9 +131,8 @@ export interface Health {
   failedLast24h: number;
   unlinkedLast24h: number;
   /**
-   * When the last event that went through `owns` and was taken as this app's arrived: a processed or stale
-   * subscription.* or transaction.* event, or an adjustment.* that is not `unmatched` (customer.* never counts: it has
-   * no line items for `owns` to check). `null` if none yet. With
+   * When the last event that `owns` matched arrived: a processed event with reason `null` or `no_user_id`. Not
+   * `mirrored`, `unmatched` or stale (late) deliveries. Without `owns` every event matches. `null` if none yet. With
    * `notOursLast24h`, it shows a wrong `owns`: other products' events keep `lastEventAt` fresh while this one goes old.
    * Optional so custom stores keep compiling; the kit's stores always return it.
    */

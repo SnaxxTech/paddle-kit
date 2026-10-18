@@ -18,6 +18,15 @@ const SEAT_PRICE = 'pri_01gsz8x8sawmvhz1pv30nge1ke';
 const SEAT_PRODUCT = 'pro_01gsz4t5hdjse780zja8vvr7jg';
 const OTHER_APP = { priceIds: ['pri_someone_else'] };
 
+// The same scenario on all three kit stores.
+async function threeStores(): Promise<Store[]> {
+  const db = new PGlite();
+  for (const m of MIGRATIONS) await db.exec(m.sql);
+  const lite = new Database(':memory:');
+  for (const m of SQLITE_MIGRATIONS) lite.exec(m.sql);
+  return [memoryStore(), postgresStore({ query: (q, p) => db.query(q, p) as any }), sqliteStore({ db: lite })];
+}
+
 function setup(o: Partial<BillingConfig> = {}, store: Store = memoryStore()) {
   const txs: Transaction[] = [];
   const adjs: Array<{ adj: Adjustment; ctx: AdjustmentContext }> = [];
@@ -66,11 +75,7 @@ describe('shared seller account: owns', () => {
   });
 
   it('a misconfigured owns shows in health: notOursLast24h counts our own sale, lastOwnedAt stays null', async () => {
-    const db = new PGlite();
-    for (const m of MIGRATIONS) await db.exec(m.sql);
-    const lite = new Database(':memory:');
-    for (const m of SQLITE_MIGRATIONS) lite.exec(m.sql);
-    for (const store of [memoryStore(), postgresStore({ query: (q, p) => db.query(q, p) as any }), sqliteStore({ db: lite })]) {
+    for (const store of await threeStores()) {
       const t = setup({ owns: { priceIds: ['pri_typo'] } }, store);
       // another app's refund of a payment this app never saw: reaches onAdjustment, but is not proof that owns works
       expect((await t.send(adjustment({ eventId: 'evt_foreign_refund', transactionId: 'txn_other_app' }))).status).toBe(200);
@@ -88,6 +93,52 @@ describe('shared seller account: owns', () => {
       const fixed = setup({ owns: { priceIds: [SEAT_PRICE] } }, store);
       expect((await fixed.send(txn({ eventId: 'evt_next_sale', id: 'txn_next' }))).status).toBe(200);
       expect((await store.health(NOW)).lastOwnedAt).toBe(NOW.toISOString());
+    }
+  });
+
+  it('owns breaks after a subscription is mirrored: its renewals are processed as mirrored and do not refresh lastOwnedAt', async () => {
+    const DAY1 = new Date(NOW.getTime() - 19 * 86_400_000);
+    const SUB = loadFixture('subscription.created').data.id;
+    for (const store of await threeStores()) {
+      const day1 = setup({ owns: { priceIds: [SEAT_PRICE] }, now: () => DAY1 }, store);
+      expect((await day1.send(subscriptionEvent({ eventId: 'evt_d1_sub' }))).status).toBe(200);
+      expect(day1.reasonOf('evt_d1_sub')).toEqual(['processed', null]);
+      expect((await store.health(DAY1)).lastOwnedAt).toBe(DAY1.toISOString());
+
+      const broken = setup({ owns: { priceIds: ['pri_typo'] } }, store); // day 20
+      const update = subscriptionEvent({ eventId: 'evt_d20_sub', eventType: 'subscription.updated', occurredAt: '2026-10-16T00:00:00Z', data: { status: 'past_due' } });
+      expect((await broken.send(update)).status).toBe(200);
+      expect((await store.getSubscription(SUB))?.status).toBe('past_due'); // still mirrored, as before
+      expect((await broken.send(txn({ eventId: 'evt_d20_renewal', id: 'txn_renewal_d20' }))).status).toBe(200);
+      expect(broken.txs).toHaveLength(1); // the renewal on the mirrored subscription still runs the hook
+      // a refund of that renewal: known (the subscription is mirrored), but owns does not match it either
+      expect((await broken.send(adjustment({ eventId: 'evt_d20_refund', transactionId: 'txn_renewal_d20', subscriptionId: SUB }))).status).toBe(200);
+      expect(broken.adjs.map((a) => a.ctx.known)).toEqual([true]);
+      expect(broken.reasonOf('evt_d20_refund')).toEqual(['processed', 'mirrored']);
+      const newSale = txn({ eventId: 'evt_d20_new_sale', id: 'txn_new_sale' });
+      expect((await broken.send({ ...newSale, data: { ...newSale.data, subscription_id: null } })).status).toBe(200);
+      expect(await store.health(NOW)).toMatchObject({ lastOwnedAt: DAY1.toISOString(), notOursLast24h: 1, failedLast24h: 0 });
+      expect([broken.reasonOf('evt_d20_sub'), broken.reasonOf('evt_d20_renewal')]).toEqual([['processed', 'mirrored'], ['processed', 'mirrored']]);
+
+      const fixed = setup({ owns: { priceIds: [SEAT_PRICE] } }, store);
+      expect((await fixed.send(txn({ eventId: 'evt_d20_renewal_2', id: 'txn_renewal_2' }))).status).toBe(200);
+      expect(fixed.reasonOf('evt_d20_renewal_2')).toEqual(['processed', null]);
+      expect((await fixed.send(adjustment({ eventId: 'evt_d20_refund_2', transactionId: 'txn_renewal_2', subscriptionId: SUB }))).status).toBe(200);
+      expect(fixed.reasonOf('evt_d20_refund_2')).toEqual(['processed', null]);
+      expect((await store.health(NOW)).lastOwnedAt).toBe(NOW.toISOString());
+    }
+  });
+
+  it('a foreign subscription mirrored before owns existed does not refresh lastOwnedAt once owns is set', async () => {
+    const DAY1 = new Date(NOW.getTime() - 19 * 86_400_000);
+    for (const store of await threeStores()) {
+      const before = setup({ now: () => DAY1 }, store); // no owns yet: every event is ours, so the other app's subscription is mirrored
+      expect((await before.send(subscriptionEvent({ eventId: 'evt_foreign_sub' }))).status).toBe(200);
+      const after = setup({ owns: OTHER_APP }, store);
+      expect((await after.send(subscriptionEvent({ eventId: 'evt_foreign_upd', eventType: 'subscription.updated', occurredAt: '2026-10-16T00:00:00Z' }))).status).toBe(200);
+      expect((await after.send(txn({ eventId: 'evt_foreign_renewal', id: 'txn_foreign_renewal' }))).status).toBe(200);
+      expect(await store.health(NOW)).toMatchObject({ lastOwnedAt: DAY1.toISOString() });
+      expect(after.reasonOf('evt_foreign_upd')).toEqual(['processed', 'mirrored']);
     }
   });
 

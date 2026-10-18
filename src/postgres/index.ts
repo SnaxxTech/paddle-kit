@@ -139,7 +139,7 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
            (SELECT count(*)::int FROM paddle_events WHERE status = 'failed' AND received_at > $1 AND received_at <= $2) AS failed_events,
            (SELECT coalesce(sum(hits), 0)::int FROM paddle_failures WHERE last_at > $1 AND last_at <= $2) AS failed_requests,
            (SELECT count(*)::int FROM paddle_events WHERE reason = 'no_user_id' AND received_at > $1 AND received_at <= $2) AS unlinked,
-           (SELECT max(received_at) FROM paddle_events WHERE status IN ('processed','stale') AND (event_type LIKE 'subscription.%' OR event_type LIKE 'transaction.%' OR (event_type LIKE 'adjustment.%' AND coalesce(reason, '') <> 'unmatched'))) AS last_owned_at,
+           (SELECT max(received_at) FROM paddle_events WHERE status = 'processed' AND (reason IS NULL OR reason = 'no_user_id')) AS last_owned_at,
            (SELECT count(*)::int FROM paddle_events WHERE reason = 'not_ours' AND received_at > $1 AND received_at <= $2) AS not_ours`,
         [since, until],
       );

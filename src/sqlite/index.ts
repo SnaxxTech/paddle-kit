@@ -190,7 +190,7 @@ export function sqliteStore({ db }: { db: SqliteDatabase }): Store {
            (SELECT COUNT(*) FROM paddle_events WHERE status = 'failed' AND received_at > ? AND received_at <= ?) AS failed_events,
            (SELECT COALESCE(SUM(hits), 0) FROM paddle_failures WHERE last_at > ? AND last_at <= ?) AS failed_requests,
            (SELECT COUNT(*) FROM paddle_events WHERE reason = 'no_user_id' AND received_at > ? AND received_at <= ?) AS unlinked,
-           (SELECT MAX(received_at) FROM paddle_events WHERE status IN ('processed','stale') AND (event_type LIKE 'subscription.%' OR event_type LIKE 'transaction.%' OR (event_type LIKE 'adjustment.%' AND COALESCE(reason, '') <> 'unmatched'))) AS last_owned_at,
+           (SELECT MAX(received_at) FROM paddle_events WHERE status = 'processed' AND (reason IS NULL OR reason = 'no_user_id')) AS last_owned_at,
            (SELECT COUNT(*) FROM paddle_events WHERE reason = 'not_ours' AND received_at > ? AND received_at <= ?) AS not_ours`).get(
         since, until, since, until, since, until, since, until,
       ) as Row;

@@ -20,6 +20,9 @@ export interface HandlerDeps {
 /** Marks an error thrown by a user hook, so it is not mistaken for a store failure. */
 class HookFailure extends Error {}
 
+/** Labels of normal traffic on a shared seller account: recorded, never a warn line. */
+const QUIET: ReadonlySet<ReasonCode> = new Set(['unknown_event', 'not_ours', 'unmatched', 'mirrored']);
+
 const json = (body: unknown, status: number) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
@@ -57,8 +60,9 @@ export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<
     switch (ev.kind) {
       case 'subscription': {
         const prev = await d.store.getSubscription(ev.subscription.subscriptionId);
+        const ours = matches({ kind: 'subscription', items: itemsOf(ev.subscription), customData: customDataOf(ev.subscription) });
         // A subscription already in the mirror stays ours, so a later item change can never strand a stale row.
-        if (!prev && !matches({ kind: 'subscription', items: itemsOf(ev.subscription), customData: customDataOf(ev.subscription) })) return NOT_OURS;
+        if (!prev && !ours) return NOT_OURS;
         const pastDueSince = nextPastDueSince(prev, ev.subscription.status, ev.occurredAt);
         const { applied } = await d.store.upsertSubscription({ ...ev.subscription, pastDueSince });
         if (!applied) {
@@ -73,17 +77,19 @@ export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<
           }
           return { status: 'stale', reason: 'out_of_order' };
         }
+        // kept only because it is mirrored: processed as before, but no proof that owns matches (Health.lastOwnedAt)
+        if (!ours) return { status: 'processed', reason: 'mirrored' };
         return { status: 'processed', reason: ev.subscription.userId ? null : 'no_user_id' };
       }
       case 'customer': {
         const { applied } = await d.store.upsertCustomer(ev.customer);
-        return applied ? { status: 'processed', reason: null } : { status: 'stale', reason: 'out_of_order' };
+        // no line items, so owns never checks it: `unmatched`
+        return applied ? { status: 'processed', reason: 'unmatched' } : { status: 'stale', reason: 'out_of_order' };
       }
       case 'transaction': {
         const tx = ev.transaction;
-        const owned =
-          matches({ kind: 'transaction', items: tx.items, customData: tx.customData }) ||
-          (tx.subscriptionId !== null && (await d.store.getSubscription(tx.subscriptionId)) !== null);
+        const ours = matches({ kind: 'transaction', items: tx.items, customData: tx.customData });
+        const owned = ours || (tx.subscriptionId !== null && (await d.store.getSubscription(tx.subscriptionId)) !== null);
         // Remembered either way, so a later refund of it can be told apart from a refund of a payment not seen yet.
         await d.store.recordTransaction?.({
           transactionId: tx.transactionId, owned, subscriptionId: tx.subscriptionId, customerId: tx.customerId,
@@ -95,17 +101,20 @@ export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<
           const ctx: HookContext = { eventId: ev.eventId, eventType: ev.eventType, store: d.store };
           await runHook(d.onTransaction && (() => d.onTransaction!(ev.transaction, ctx)));
         }
-        return { status: 'processed', reason: null };
+        return { status: 'processed', reason: ours ? null : 'mirrored' };
       }
       case 'adjustment': {
         const adj = ev.adjustment;
         const seen = (await d.store.getTransaction?.(adj.transactionId)) ?? null;
-        const onOurSubscription = adj.subscriptionId !== null && (await d.store.getSubscription(adj.subscriptionId)) !== null;
+        const sub = adj.subscriptionId === null ? null : await d.store.getSubscription(adj.subscriptionId);
+        const onOurSubscription = sub !== null;
         // Only a transaction we saw and know is someone else's is filtered. An unseen one may be ours and early: keep it.
         if (seen && !seen.owned && !onOurSubscription) return NOT_OURS;
         const ctx: AdjustmentContext = { eventId: ev.eventId, eventType: ev.eventType, store: d.store, known: seen?.owned === true || onOurSubscription };
+        // owns matched what it adjusts: the mirrored subscription's items, or a one-time payment seen as ours
+        const ours = sub ? matches({ kind: 'subscription', items: itemsOf(sub), customData: customDataOf(sub) }) : seen?.owned === true;
         await runHook(d.onAdjustment && (() => d.onAdjustment!(ev.adjustment, ctx)));
-        return { status: 'processed', reason: ctx.known ? null : 'unmatched' };
+        return { status: 'processed', reason: !ctx.known ? 'unmatched' : ours ? null : 'mirrored' };
       }
       case 'ignored':
         return { status: 'ignored', reason: 'unknown_event' };
@@ -152,7 +161,7 @@ export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<
       recorded = true;
       const outcome = await apply(ev);
       await d.store.markEvent(ev.eventId, outcome.status, outcome.reason);
-      if (outcome.reason && outcome.reason !== 'unknown_event' && outcome.reason !== 'not_ours' && outcome.reason !== 'unmatched') d.log({ level: 'warn', reason: outcome.reason, ...tag });
+      if (outcome.reason && !QUIET.has(outcome.reason)) d.log({ level: 'warn', reason: outcome.reason, ...tag });
       return json({ received: true }, 200);
     } catch (err) {
       const reason: ReasonCode = err instanceof HookFailure ? 'hook_error' : 'store_error';

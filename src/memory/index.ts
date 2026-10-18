@@ -1,14 +1,10 @@
 import type { Customer, EventStatus, Health, ReasonCode, Store, Subscription } from '../core/types';
 
-interface EventRow { eventId: string; eventType: string; receivedAt: string; status: EventStatus; reason: ReasonCode | null }
+interface EventRow { eventId: string; receivedAt: string; status: EventStatus; reason: ReasonCode | null }
 interface FailureHit { at: string; reason: ReasonCode }
 
 const DAY_MS = 86_400_000;
 const DONE: ReadonlySet<EventStatus> = new Set(['processed', 'ignored', 'stale']);
-// Event types that went through `owns`: only these can show that it matches. Same rule as the SQL stores.
-const ownedRow = (r: EventRow) =>
-  (r.status === 'processed' || r.status === 'stale') &&
-  (/^(subscription|transaction)\./.test(r.eventType) || (r.eventType.startsWith('adjustment.') && r.reason !== 'unmatched'));
 
 export function memoryStore(): Store {
   const events = new Map<string, EventRow>();
@@ -22,7 +18,7 @@ export function memoryStore(): Store {
     async recordEvent(e) {
       const existing = events.get(e.eventId);
       if (existing && DONE.has(existing.status)) return { alreadyDone: true };
-      if (!existing) events.set(e.eventId, { eventId: e.eventId, eventType: e.eventType, receivedAt: e.receivedAt, status: 'received', reason: null });
+      if (!existing) events.set(e.eventId, { eventId: e.eventId, receivedAt: e.receivedAt, status: 'received', reason: null });
       if (e.leaseExpiredBefore === undefined) return { alreadyDone: false };
       const held = claims.get(e.eventId);
       if (held !== undefined && Date.parse(held) >= Date.parse(e.leaseExpiredBefore)) return { alreadyDone: false, inProgress: true };
@@ -76,7 +72,7 @@ export function memoryStore(): Store {
         ...failures,
       ].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
       const last = fails.at(-1);
-      const owned = rows.filter(ownedRow).map((r) => r.receivedAt).sort((a, b) => Date.parse(a) - Date.parse(b));
+      const owned = rows.filter((r) => r.status === 'processed' && (r.reason === null || r.reason === 'no_user_id')).map((r) => r.receivedAt).sort((a, b) => Date.parse(a) - Date.parse(b));
       return {
         lastEventAt: done.at(-1) ?? null,
         lastFailureAt: last?.at ?? null,

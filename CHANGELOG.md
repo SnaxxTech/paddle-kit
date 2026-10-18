@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Health gains `lastOwnedAt` (the last processed or stale event of a type that went through `owns`: `subscription.*`, `transaction.*`, and `adjustment.*` that is not `unmatched`; `customer.*` never counts) and `notOursLast24h` (events acked as `not_ours` in 24 h), from existing `paddle_events` rows: no migration. A wrong `owns` used to look fully green; README Monitoring has the alert rule. An adjustment with `ctx.known === false` is now recorded as `processed` with the new reason `unmatched` (it was `null`), so another app's refund on a shared seller account cannot make `lastOwnedAt` look fresh. Both fields are optional in the `Health` type, so custom stores keep compiling.
+- Health gains `lastOwnedAt` (the last event that `owns` matched: a processed event with reason `null` or `no_user_id`) and `notOursLast24h` (events acked as `not_ours` in 24 h), from existing `paddle_events` rows: no migration. A wrong `owns` used to look fully green; README Monitoring has the alert rule. New reasons, both `processed`, hook still run, no warn line: `mirrored` (kept only because its subscription is already mirrored; `owns` did not match; adjustments of such a subscription too; it replaces `no_user_id` on those events) and `unmatched` (an adjustment with `ctx.known === false`, which was `null`, or a `customer.*` event, which was `null`). `owns` now also runs for events of mirrored subscriptions, so a throwing predicate fails those events too. Both health fields are optional in the `Health` type, so custom stores keep compiling.
 
 ## 0.4.0 (2026-10-16)
 
