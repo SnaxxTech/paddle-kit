@@ -72,12 +72,15 @@ export function memoryStore(): Store {
         ...failures,
       ].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
       const last = fails.at(-1);
+      const owned = rows.filter((r) => r.status === 'processed' || r.status === 'stale').map((r) => r.receivedAt).sort((a, b) => Date.parse(a) - Date.parse(b));
       return {
         lastEventAt: done.at(-1) ?? null,
         lastFailureAt: last?.at ?? null,
         lastFailureReason: last?.reason ?? null,
         failedLast24h: fails.filter((f) => inWindow(f.at)).length,
         unlinkedLast24h: rows.filter((r) => r.reason === 'no_user_id' && inWindow(r.receivedAt)).length,
+        lastOwnedAt: owned.at(-1) ?? null,
+        notOursLast24h: rows.filter((r) => r.reason === 'not_ours' && inWindow(r.receivedAt)).length,
       };
     },
   };

@@ -63,6 +63,20 @@ describe('shared seller account: owns', () => {
     expect(t.logs).toEqual([]); // normal traffic on a shared account: no warn line
   });
 
+  it('a misconfigured owns shows in health: notOursLast24h counts our own sale, lastOwnedAt stays null', async () => {
+    const db = new PGlite();
+    for (const m of MIGRATIONS) await db.exec(m.sql);
+    for (const store of [memoryStore(), postgresStore({ query: (q, p) => db.query(q, p) as any })]) {
+      const t = setup({ owns: { priceIds: ['pri_typo'] } }, store);
+      expect((await t.send(txn())).status).toBe(200);
+      expect(t.txs).toHaveLength(0);
+      expect(await store.health(NOW)).toMatchObject({ lastEventAt: NOW.toISOString(), failedLast24h: 0, notOursLast24h: 1, lastOwnedAt: null });
+      const fixed = setup({ owns: { priceIds: [SEAT_PRICE] } }, store);
+      expect((await fixed.send(txn({ eventId: 'evt_next_sale', id: 'txn_next' }))).status).toBe(200);
+      expect((await store.health(NOW)).lastOwnedAt).toBe(NOW.toISOString());
+    }
+  });
+
   it('transaction.paid that is not ours is ignored/not_ours too', async () => {
     const t = setup({ owns: OTHER_APP });
     expect((await t.send(txn({ eventId: 'evt_paid', eventType: 'transaction.paid' }))).status).toBe(200);

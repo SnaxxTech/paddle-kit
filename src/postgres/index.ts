@@ -138,7 +138,9 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
            (SELECT max(received_at) FROM paddle_events WHERE status IN ('processed','ignored','stale')) AS last_event_at,
            (SELECT count(*)::int FROM paddle_events WHERE status = 'failed' AND received_at > $1 AND received_at <= $2) AS failed_events,
            (SELECT coalesce(sum(hits), 0)::int FROM paddle_failures WHERE last_at > $1 AND last_at <= $2) AS failed_requests,
-           (SELECT count(*)::int FROM paddle_events WHERE reason = 'no_user_id' AND received_at > $1 AND received_at <= $2) AS unlinked`,
+           (SELECT count(*)::int FROM paddle_events WHERE reason = 'no_user_id' AND received_at > $1 AND received_at <= $2) AS unlinked,
+           (SELECT max(received_at) FROM paddle_events WHERE status IN ('processed','stale')) AS last_owned_at,
+           (SELECT count(*)::int FROM paddle_events WHERE reason = 'not_ours' AND received_at > $1 AND received_at <= $2) AS not_ours`,
         [since, until],
       );
       const { rows: [last] } = await query(
@@ -154,6 +156,8 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
         lastFailureReason: (last?.reason as ReasonCode | undefined) ?? null,
         failedLast24h: Number(agg?.failed_events ?? 0) + Number(agg?.failed_requests ?? 0),
         unlinkedLast24h: Number(agg?.unlinked ?? 0),
+        lastOwnedAt: iso(agg?.last_owned_at),
+        notOursLast24h: Number(agg?.not_ours ?? 0),
       };
     },
   };

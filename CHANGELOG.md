@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Health gains `lastOwnedAt` (last event processed or stale, so taken as this app's) and `notOursLast24h` (events acked as `not_ours` in 24 h), from existing `paddle_events` rows: no migration. A wrong `owns` used to look fully green; README Monitoring has the alert rule. Both fields are optional in the `Health` type, so custom stores keep compiling.
+
 ## 0.4.0 (2026-10-16)
 
 Upgrade steps: [UPGRADING.md](UPGRADING.md). **Run migration `002_claims_transactions` before deploying.**

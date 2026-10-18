@@ -528,6 +528,10 @@ What the kit does with each event:
 | `lastFailureReason` | Our own reason code for it. Never secret text, never driver text. |
 | `failedLast24h` | Refused requests plus failed events in the last 24 hours. |
 | `unlinkedLast24h` | Subscription events with no `userId` (stored with `user_id = NULL`, reason `no_user_id`). To fix, open each checkout with `createCheckout`, which sets `customData.userId`. |
+| `lastOwnedAt` | When the last event that the app took as its own arrived (processed or stale). `null` if there is none yet. Since v0.5.0. |
+| `notOursLast24h` | Events acked as `not_ours` in the last 24 hours (other products on a shared seller account). Since v0.5.0. |
+
+**Alert rule for a wrong `owns`:** `lastOwnedAt` older than N days (your longest normal gap between your own sales or renewals) **and** `notOursLast24h > 0` = your `owns` is wrong. Paddle's events still arrive, but the kit sends all of them to `not_ours`, so `lastEventAt` stays fresh and `failedLast24h` stays 0. On a shared seller account `notOursLast24h > 0` alone is normal traffic; do not alert on it.
 
 **Reason codes:** `missing_body`, `bad_signature_header`, `signature_mismatch`, `stale_timestamp`, `bad_json`, `bad_payload`, `unknown_event`, `no_user_id`, `out_of_order`, `store_error`, `hook_error`, `not_ours`.
 

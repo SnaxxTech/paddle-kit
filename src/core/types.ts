@@ -120,6 +120,14 @@ export interface Health {
   lastFailureReason: ReasonCode | null;
   failedLast24h: number;
   unlinkedLast24h: number;
+  /**
+   * When the last event this app treated as its own arrived (processed or stale). `null` if none yet. With
+   * `notOursLast24h`, it shows a wrong `owns`: other products' events keep `lastEventAt` fresh while this one goes old.
+   * Optional so custom stores keep compiling; the kit's stores always return it.
+   */
+  lastOwnedAt?: string | null;
+  /** Events acked as `not_ours` in the last 24 hours. Normal on a shared seller account; alert only together with an old `lastOwnedAt`. */
+  notOursLast24h?: number;
 }
 
 export interface Store {
