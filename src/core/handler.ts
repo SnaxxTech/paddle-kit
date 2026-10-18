@@ -75,10 +75,6 @@ export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<
         }
         return { status: 'processed', reason: ev.subscription.userId ? null : 'no_user_id' };
       }
-      case 'customer': {
-        const { applied } = await d.store.upsertCustomer(ev.customer);
-        return applied ? { status: 'processed', reason: null } : { status: 'stale', reason: 'out_of_order' };
-      }
       case 'transaction': {
         const tx = ev.transaction;
         const owned =

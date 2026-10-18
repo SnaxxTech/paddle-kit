@@ -3,7 +3,7 @@ import { expect, it } from 'vitest';
 import { MIGRATIONS, postgresStore } from '../src/postgres';
 import { createBilling } from '../src/core/billing';
 import { sign } from './helpers/sign';
-import { subscriptionEvent } from './helpers/fixtures';
+import { loadFixture, subscriptionEvent } from './helpers/fixtures';
 import { runStoreContract } from './helpers/store-contract';
 
 async function freshDb() {
@@ -55,4 +55,25 @@ it('accepts a raw payload containing a NUL character (jsonb rejects \\u0000)', a
   };
   expect(await store.upsertSubscription(s)).toEqual({ applied: true });
   expect(((await store.getSubscription('sub_nul'))!.raw as any).custom_data).toBe('ab');
+});
+
+it("never stores another app's customer: customer.* is acked 200 as ignored, 0 rows in paddle_customers", async () => {
+  const db = await freshDb();
+  const now = new Date('2026-10-15T12:00:00Z');
+  const billing = createBilling({
+    environment: 'sandbox', webhookSecret: 'sec', entitlements: {}, owns: { priceIds: ['pri_only_ours'] },
+    store: postgresStore({ query: (t, p) => db.query(t, p) as any }), now: () => now, log: () => {},
+  });
+  const ts = Math.floor(now.getTime() / 1000);
+  for (const [i, eventType] of ['customer.created', 'customer.updated'].entries()) {
+    const body = JSON.stringify({ ...loadFixture('customer.created'), event_id: `evt_ctm_${i}`, event_type: eventType });
+    const res = await billing.handleWebhook(new Request('https://x/', { method: 'POST', headers: { 'paddle-signature': sign(body, 'sec', ts) }, body }));
+    expect(res.status).toBe(200);
+  }
+  expect((await db.query('SELECT * FROM paddle_customers')).rows).toEqual([]);
+  const evs = (await db.query('SELECT event_id, status, reason FROM paddle_events ORDER BY event_id')).rows;
+  expect(evs).toEqual([
+    { event_id: 'evt_ctm_0', status: 'ignored', reason: 'unknown_event' },
+    { event_id: 'evt_ctm_1', status: 'ignored', reason: 'unknown_event' },
+  ]);
 });

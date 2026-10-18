@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **No more foreign customer emails.** `customer.created` / `customer.updated` are acknowledged 200 and recorded as `ignored` / `unknown_event`; nothing is written to `paddle_customers`. Before, every customer event was stored before any `owns` check, so on a shared seller account each app kept every other app's customer emails, and the kit never read them. `customer` is gone from `EVENT_TYPES`, so the catalog `EVENTS` list has 13 events and the next `paddle-kit-catalog` sync unsubscribes an existing destination from `customer.*`. `Store.upsertCustomer` and the `Customer` type stay, deprecated, until v0.6.0. Existing `paddle_customers` rows are not deleted: see UPGRADING.
+
 ## 0.4.0 (2026-10-16)
 
 Upgrade steps: [UPGRADING.md](UPGRADING.md). **Run migration `002_claims_transactions` before deploying.**

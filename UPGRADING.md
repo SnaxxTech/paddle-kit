@@ -29,6 +29,12 @@ Commit the `package.json` and lockfile change. CI needs the `PADDLE_KIT_READ_TOK
 
 ## Per-version notes
 
+### 0.4.x → 0.5.0
+
+1. **`paddle_customers` is no longer written.** Rows written before 0.5.0 stay, and on a shared seller account they include other apps' customer emails. Deleting them (`DELETE FROM paddle_customers;`) is the owner's decision, per app: the kit never reads the table, so the delete changes nothing for the kit. Keep the table: migration `001_init` still creates it.
+2. **Catalog sync** now subscribes the destination to 13 events (no `customer.*`). The next sync of an existing destination updates it. A destination you manage by hand: unsubscribe `customer.created` and `customer.updated` in the Paddle dashboard; if you leave them, they are acked as `ignored`.
+3. A custom `Store` still compiles: `upsertCustomer` stays in the interface (deprecated) until 0.6.0. The kit no longer calls it.
+
 ### 0.3.x → 0.4.0
 
 1. **Migration `002_claims_transactions`** adds `paddle_event_claims` and `paddle_transactions`. Run it before deploying 0.4.0.

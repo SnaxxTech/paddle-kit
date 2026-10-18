@@ -286,7 +286,8 @@ describe('syncCatalog', () => {
     for (const e of ['transaction.completed', 'transaction.paid', 'adjustment.created', 'adjustment.updated', 'subscription.imported']) {
       expect(EVENTS).toContain(e);
     }
-    expect(EVENTS).toHaveLength(15);
+    expect(EVENTS).not.toContain('customer.created');
+    expect(EVENTS).toHaveLength(13);
     expect(paddle.calls.filter((c) => c.path === '/client-tokens')).toHaveLength(1);
   });
 
