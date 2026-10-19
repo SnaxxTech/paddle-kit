@@ -13,7 +13,17 @@ export type ReasonCode =
   | 'store_error'
   | 'hook_error'
   /** Shared seller account: the event belongs to another product (see `owns`). Recorded as `ignored`; not a failure. */
-  | 'not_ours';
+  | 'not_ours'
+  /**
+   * Processed, but `owns` never matched it: an adjustment of a transaction this app never saw (`ctx.known === false`,
+   * maybe another app's refund). The hook ran; no warn line.
+   */
+  | 'unmatched'
+  /**
+   * Processed only because its subscription is already in the mirror; `owns` did not match it (a retired price, or a
+   * subscription mirrored before `owns` was set). The hook ran; no warn line. Not counted in `Health.lastOwnedAt`.
+   */
+  | 'mirrored';
 
 export type SubscriptionStatus = 'active' | 'trialing' | 'past_due' | 'paused' | 'canceled';
 export type EventStatus = 'received' | 'processed' | 'ignored' | 'stale' | 'failed';
@@ -123,6 +133,15 @@ export interface Health {
   lastFailureReason: ReasonCode | null;
   failedLast24h: number;
   unlinkedLast24h: number;
+  /**
+   * When the last event that `owns` matched arrived: a processed event with reason `null` or `no_user_id`. Not
+   * `mirrored`, `unmatched` or stale (late) deliveries. Without `owns` every event matches. `null` if none yet. With
+   * `notOursLast24h`, it shows a wrong `owns`: other products' events keep `lastEventAt` fresh while this one goes old.
+   * Optional so custom stores keep compiling; the kit's stores always return it.
+   */
+  lastOwnedAt?: string | null;
+  /** Events acked as `not_ours` in the last 24 hours. Normal on a shared seller account; alert only together with an old `lastOwnedAt`. */
+  notOursLast24h?: number;
 }
 
 export interface Store {

@@ -1,6 +1,7 @@
 import { decideAccess } from './access';
 import { createWebhookHandler } from './handler';
 import { ownershipPredicate } from './owns';
+import { constantTimeEqual } from './signature';
 import type { Adjustment, AdjustmentContext, HookContext, Logger, Owns, Store, Transaction } from './types';
 
 export interface BillingConfig {
@@ -98,7 +99,7 @@ export function createBilling(config: BillingConfig): Billing {
     handleWebhook,
     async handleHealth(req) {
       if (!config.healthToken) return new Response(null, { status: 404 });
-      if (req.headers.get('authorization') !== `Bearer ${config.healthToken}`) return new Response(null, { status: 401 });
+      if (!constantTimeEqual(req.headers.get('authorization') ?? '', `Bearer ${config.healthToken}`)) return new Response(null, { status: 401 });
       try {
         return Response.json(await config.store.health(now()));
       } catch {

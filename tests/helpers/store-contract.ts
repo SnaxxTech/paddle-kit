@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { Store, Subscription } from '../../src/core/types';
+import type { ReasonCode, Store, Subscription } from '../../src/core/types';
 
 const sub = (o: Partial<Subscription> = {}): Subscription => ({
   subscriptionId: 'sub_1', customerId: 'ctm_1', userId: 'user_1', status: 'active', priceIds: ['pri_pro'],
@@ -63,7 +63,7 @@ export function runStoreContract(name: string, makeStore: () => Promise<Store>):
 
     it('reports health over a 24h window', async () => {
       const now = new Date('2026-10-15T12:00:00.000Z');
-      expect(await store.health(now)).toEqual({ lastEventAt: null, lastFailureAt: null, lastFailureReason: null, failedLast24h: 0, unlinkedLast24h: 0 });
+      expect(await store.health(now)).toEqual({ lastEventAt: null, lastFailureAt: null, lastFailureReason: null, failedLast24h: 0, unlinkedLast24h: 0, lastOwnedAt: null, notOursLast24h: 0 });
 
       await store.recordEvent(ev('evt_ok', '2026-10-15T10:00:00.000Z'));
       await store.markEvent('evt_ok', 'processed', null);
@@ -80,6 +80,32 @@ export function runStoreContract(name: string, makeStore: () => Promise<Store>):
         lastFailureReason: 'signature_mismatch',
         failedLast24h: 2,
         unlinkedLast24h: 1,
+        lastOwnedAt: '2026-10-15T10:30:00.000Z',
+        notOursLast24h: 0,
+      });
+    });
+
+    it('reports lastOwnedAt (last processed event that owns matched: reason null or no_user_id) and notOursLast24h', async () => {
+      const now = new Date('2026-10-15T12:00:00.000Z');
+      const mark = async (id: string, at: string, status: 'processed' | 'ignored' | 'stale', reason: ReasonCode | null, eventType = 'subscription.updated') => {
+        await store.recordEvent({ ...ev(id, at), eventType });
+        await store.markEvent(id, status, reason);
+      };
+      await mark('evt_owned', '2026-10-14T08:00:00.000Z', 'processed', null, 'transaction.completed');
+      await mark('evt_unlinked', '2026-10-14T09:00:00.000Z', 'processed', 'no_user_id'); // owns matched, no userId
+      await mark('evt_late', '2026-10-15T09:30:00.000Z', 'stale', 'out_of_order'); // a late delivery proves nothing new
+      await mark('evt_other_app_1', '2026-10-15T10:00:00.000Z', 'ignored', 'not_ours');
+      await mark('evt_other_app_2', '2026-10-15T11:00:00.000Z', 'ignored', 'not_ours');
+      await mark('evt_other_app_old', '2026-10-13T11:00:00.000Z', 'ignored', 'not_ours');
+      await mark('evt_payout', '2026-10-15T11:30:00.000Z', 'ignored', 'unknown_event', 'payout.paid');
+      await mark('evt_mirrored', '2026-10-15T11:40:00.000Z', 'processed', 'mirrored'); // kept only because already mirrored
+      await store.recordEvent(ev('evt_running', '2026-10-15T11:45:00.000Z')); // received, not finished
+      await mark('evt_refund_unseen_tx', '2026-10-15T11:50:00.000Z', 'processed', 'unmatched', 'adjustment.created');
+      await mark('evt_customer', '2026-10-15T11:55:00.000Z', 'processed', 'unmatched', 'customer.created');
+      expect(await store.health(now)).toMatchObject({
+        lastEventAt: '2026-10-15T11:55:00.000Z',
+        lastOwnedAt: '2026-10-14T09:00:00.000Z',
+        notOursLast24h: 2,
       });
     });
 

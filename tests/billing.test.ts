@@ -3,6 +3,12 @@ import { createBilling } from '../src/core/billing';
 import { memoryStore } from '../src/memory';
 import { sign } from './helpers/sign';
 import { loadFixture, subscriptionEvent } from './helpers/fixtures';
+import * as signature from '../src/core/signature';
+
+vi.mock('../src/core/signature', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/core/signature')>();
+  return { ...real, constantTimeEqual: vi.fn(real.constantTimeEqual) };
+});
 
 const base = () => ({ environment: 'sandbox' as const, webhookSecret: 's', store: memoryStore(), entitlements: { pri_pro: ['pro'] } });
 
@@ -55,6 +61,12 @@ describe('handleHealth', () => {
     const ok = await b.handleHealth(new Request('https://x/', { headers: { authorization: 'Bearer tok' } }));
     expect(ok.status).toBe(200);
     expect(await ok.json()).toMatchObject({ lastEventAt: null, failedLast24h: 0 });
+  });
+  it('compares the token in constant time (same-length wrong token → 401)', async () => {
+    const b = createBilling({ ...base(), healthToken: 'tok' });
+    expect((await b.handleHealth(new Request('https://x/', { headers: { authorization: 'Bearer tox' } }))).status).toBe(401);
+    expect((await b.handleHealth(new Request('https://x/'))).status).toBe(401);
+    expect(signature.constantTimeEqual).toHaveBeenCalledWith('Bearer tox', 'Bearer tok');
   });
   it('503 store_error (and logs) instead of throwing when the store is down', async () => {
     const logs: any[] = [];

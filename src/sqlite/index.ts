@@ -189,8 +189,10 @@ export function sqliteStore({ db }: { db: SqliteDatabase }): Store {
            (SELECT MAX(received_at) FROM paddle_events WHERE status IN ('processed','ignored','stale')) AS last_event_at,
            (SELECT COUNT(*) FROM paddle_events WHERE status = 'failed' AND received_at > ? AND received_at <= ?) AS failed_events,
            (SELECT COALESCE(SUM(hits), 0) FROM paddle_failures WHERE last_at > ? AND last_at <= ?) AS failed_requests,
-           (SELECT COUNT(*) FROM paddle_events WHERE reason = 'no_user_id' AND received_at > ? AND received_at <= ?) AS unlinked`).get(
-        since, until, since, until, since, until,
+           (SELECT COUNT(*) FROM paddle_events WHERE reason = 'no_user_id' AND received_at > ? AND received_at <= ?) AS unlinked,
+           (SELECT MAX(received_at) FROM paddle_events WHERE status = 'processed' AND (reason IS NULL OR reason = 'no_user_id')) AS last_owned_at,
+           (SELECT COUNT(*) FROM paddle_events WHERE reason = 'not_ours' AND received_at > ? AND received_at <= ?) AS not_ours`).get(
+        since, until, since, until, since, until, since, until,
       ) as Row;
       const last = q(`SELECT at, reason FROM (
            SELECT received_at AS at, COALESCE(reason, 'store_error') AS reason FROM paddle_events WHERE status = 'failed'
@@ -202,6 +204,8 @@ export function sqliteStore({ db }: { db: SqliteDatabase }): Store {
         lastFailureReason: (last?.reason as ReasonCode | undefined) ?? null,
         failedLast24h: Number(agg.failed_events) + Number(agg.failed_requests),
         unlinkedLast24h: Number(agg.unlinked),
+        lastOwnedAt: iso(agg.last_owned_at),
+        notOursLast24h: Number(agg.not_ours),
       };
     },
   };
