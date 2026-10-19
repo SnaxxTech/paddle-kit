@@ -1,4 +1,4 @@
-import type { Adjustment, Customer, LineItem, Subscription, SubscriptionStatus, Transaction } from './types';
+import type { Adjustment, LineItem, Subscription, SubscriptionStatus, Transaction } from './types';
 
 export type SubscriptionInput = Omit<Subscription, 'pastDueSince'>;
 
@@ -10,12 +10,15 @@ interface Envelope {
 
 export type NormalisedEvent =
   | (Envelope & { kind: 'subscription'; subscription: SubscriptionInput })
-  | (Envelope & { kind: 'customer'; customer: Customer })
   | (Envelope & { kind: 'transaction'; transaction: Transaction })
   | (Envelope & { kind: 'adjustment'; adjustment: Adjustment })
   | (Envelope & { kind: 'ignored' });
 
-/** Every Paddle event type the handler understands, by kind. The catalog CLI subscribes its destination to all of them. */
+/**
+ * Every Paddle event type the handler understands, by kind. The catalog CLI subscribes its destination to all of them.
+ * No customer.*: the kit never read paddle_customers, and on a shared seller account those events carry every app's
+ * customer emails (customer events have no line items, so `owns` cannot filter them). They are `ignored` / `unknown_event`.
+ */
 export const EVENT_TYPES = {
   subscription: [
     'subscription.created',
@@ -28,13 +31,11 @@ export const EVENT_TYPES = {
     'subscription.resumed',
     'subscription.canceled',
   ],
-  customer: ['customer.created', 'customer.updated'],
   transaction: ['transaction.completed', 'transaction.paid'],
   adjustment: ['adjustment.created', 'adjustment.updated'],
 } as const satisfies Record<string, readonly string[]>;
 
 export const SUBSCRIPTION_EVENT_TYPES: ReadonlySet<string> = new Set(EVENT_TYPES.subscription);
-const CUSTOMER_EVENT_TYPES: ReadonlySet<string> = new Set(EVENT_TYPES.customer);
 const TRANSACTION_EVENT_TYPES: ReadonlySet<string> = new Set(EVENT_TYPES.transaction);
 const ADJUSTMENT_EVENT_TYPES: ReadonlySet<string> = new Set(EVENT_TYPES.adjustment);
 const STATUSES: ReadonlySet<string> = new Set(['active', 'trialing', 'past_due', 'paused', 'canceled']);
@@ -110,10 +111,6 @@ export function parseEvent(json: unknown): NormalisedEvent | null {
   if (SUBSCRIPTION_EVENT_TYPES.has(env.eventType)) {
     const subscription = subscriptionFrom(data, env.occurredAt);
     return subscription ? { ...env, kind: 'subscription', subscription } : null;
-  }
-  if (CUSTOMER_EVENT_TYPES.has(env.eventType)) {
-    if (!isStr(data.id)) return null;
-    return { ...env, kind: 'customer', customer: { customerId: data.id, email: optStr(data.email), lastEventAt: env.occurredAt } };
   }
   if (TRANSACTION_EVENT_TYPES.has(env.eventType)) {
     if (!isStr(data.id)) return null;

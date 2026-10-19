@@ -110,6 +110,7 @@ export interface SeenTransaction {
   owned: boolean;
 }
 
+/** @deprecated since v0.5.0: the kit no longer writes customers. Removed in v0.6.0. */
 export interface Customer {
   customerId: string;
   email: string | null;
@@ -134,6 +135,7 @@ export interface Store {
   recordEvent(e: { eventId: string; eventType: string; occurredAt: string; receivedAt: string; leaseExpiredBefore?: string }): Promise<{ alreadyDone: boolean; inProgress?: boolean }>;
   markEvent(eventId: string, status: EventStatus, reason: ReasonCode | null): Promise<void>;
   recordFailure(reason: ReasonCode, at: Date): Promise<void>;
+  /** @deprecated since v0.5.0: the kit no longer calls it (customer.* events are ignored). Removed from the interface in v0.6.0. */
   upsertCustomer(c: Customer): Promise<{ applied: boolean }>;
   upsertSubscription(s: Subscription): Promise<{ applied: boolean }>;
   getSubscription(subscriptionId: string): Promise<Subscription | null>;
