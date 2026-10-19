@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createWebhookHandler } from '../src/core/handler';
+import { createWebhookHandler, MAX_WEBHOOK_BODY_BYTES } from '../src/core/handler';
 import { memoryStore } from '../src/memory';
 import type { Adjustment, HookContext, LogEntry, Store, Transaction } from '../src/core/types';
 import { sign } from './helpers/sign';
@@ -130,6 +130,57 @@ describe('webhook handler', () => {
       const res = await handle(req);
       expect(res.status).toBe(400);
       expect((await store.health(NOW)).lastFailureReason).toBe('missing_body');
+    });
+
+    describe('body cap', () => {
+      const CHUNK = 64 * 1024;
+      // An endless unsigned body, counting the bytes the handler pulls from it.
+      function flood(headers: Record<string, string> = {}) {
+        const pulled = { bytes: 0 };
+        const chunk = new Uint8Array(CHUNK).fill(32);
+        const body = new ReadableStream({ pull(c) { if (pulled.bytes >= 64 * 1024 * 1024) return c.close(); pulled.bytes += CHUNK; c.enqueue(chunk); } });
+        return { pulled, req: new Request('https://app.test/api/paddle', { method: 'POST', headers, body, duplex: 'half' } as any) };
+      }
+
+      it.each([
+        ['no content-length', {}],
+        ['a content-length that lies', { 'content-length': '100' }],
+      ])('64 MB unsigned stream with %s → 413 body_too_large, read stops at the cap', async (_n, headers) => {
+        const { pulled, req } = flood(headers);
+        const res = await handle(req);
+        expect(res.status).toBe(413);
+        expect(await res.json()).toEqual({ error: 'body_too_large' });
+        expect(pulled.bytes).toBeLessThanOrEqual(MAX_WEBHOOK_BODY_BYTES + 2 * CHUNK); // the chunk that crossed + one buffered
+        const h = await store.health(NOW);
+        expect(h.lastFailureReason).toBe('body_too_large');
+        expect(h.failedLast24h).toBe(1);
+      });
+
+      it('content-length over the cap → 413 before reading', async () => {
+        const { pulled, req } = flood({ 'content-length': String(MAX_WEBHOOK_BODY_BYTES + 1) });
+        expect((await handle(req)).status).toBe(413);
+        expect(pulled.bytes).toBeLessThanOrEqual(CHUNK);
+      });
+
+      it('a signed body exactly at the cap, streamed with a 2-byte character split across chunks, is verified and processed', async () => {
+        const event = subscriptionEvent({ eventId: 'evt_big' });
+        const shell = JSON.stringify({ ...event, padding: '' });
+        const big = JSON.stringify({ ...event, padding: 'x'.repeat(MAX_WEBHOOK_BODY_BYTES - new TextEncoder().encode(shell).length - 2) + 'é' });
+        const bytes = new TextEncoder().encode(big);
+        expect(bytes.length).toBe(MAX_WEBHOOK_BODY_BYTES);
+        const cut = bytes.length - 3; // between the two bytes of 'é' (it is followed by '"}')
+        const body = new ReadableStream({ start(c) { c.enqueue(bytes.slice(0, cut)); c.enqueue(bytes.slice(cut)); c.close(); } });
+        const req = new Request('https://app.test/api/paddle', { method: 'POST', headers: { 'paddle-signature': sign(big, SECRET, nowSec) }, body, duplex: 'half' } as any);
+        expect((await handle(req)).status).toBe(200);
+        expect(await store.getSubscription(event.data.id)).not.toBeNull();
+      });
+
+      it('maxBodyBytes lowers the cap', async () => {
+        const h = createWebhookHandler({ store, secret: SECRET, toleranceSeconds: 5, log: (e) => logs.push(e), now: () => NOW, maxBodyBytes: 256_000 });
+        const big = JSON.stringify({ ...subscriptionEvent({ eventId: 'evt_300k' }), padding: 'x'.repeat(300_000) });
+        expect((await h(post(big))).status).toBe(413);
+        expect((await h(post(JSON.stringify(subscriptionEvent({ eventId: 'evt_small' }))))).status).toBe(200);
+      });
     });
 
     it('total store outage → 500 and a log line, no throw', async () => {

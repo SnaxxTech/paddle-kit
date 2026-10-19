@@ -14,7 +14,7 @@ it('package.json exports exactly the v0.4 subpaths', () => {
 });
 
 it('runtime exports of core, client and reconcile', () => {
-  expect(Object.keys(core).sort()).toEqual(['createBilling']);
+  expect(Object.keys(core).sort()).toEqual(['MAX_WEBHOOK_BODY_BYTES', 'createBilling']);
   expect(Object.keys(client).sort()).toEqual(['createCheckout']);
   expect(Object.keys(reconcile).sort()).toEqual(['reconcile']);
 });
