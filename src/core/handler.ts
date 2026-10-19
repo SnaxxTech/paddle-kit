@@ -110,11 +110,6 @@ export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<
         if (!ours) return { status: 'processed', reason: 'mirrored' };
         return { status: 'processed', reason: ev.subscription.userId ? null : 'no_user_id' };
       }
-      case 'customer': {
-        const { applied } = await d.store.upsertCustomer(ev.customer);
-        // no line items, so owns never checks it: `unmatched`
-        return applied ? { status: 'processed', reason: 'unmatched' } : { status: 'stale', reason: 'out_of_order' };
-      }
       case 'transaction': {
         const tx = ev.transaction;
         const ours = matches({ kind: 'transaction', items: tx.items, customData: tx.customData });

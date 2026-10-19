@@ -86,7 +86,7 @@ The kit never changes your database schema itself. Do one of these two steps in 
 
 | Migration | Tables | Since |
 |---|---|---|
-| `001_init` | `paddle_events`, `paddle_subscriptions`, `paddle_customers`, `paddle_failures` | v0.1.0 |
+| `001_init` | `paddle_events`, `paddle_subscriptions`, `paddle_customers` (unused since v0.5.0; see UPGRADING), `paddle_failures` | v0.1.0 |
 | `002_claims_transactions` | `paddle_event_claims` (one row per event while a delivery runs its hooks), `paddle_transactions` (each transaction seen, and if it was this app's) | v0.4.0 |
 
 Rules:
@@ -496,16 +496,16 @@ app.post('/paddle', express.raw({ type: '*/*' }), async (req, res) => {
 
 Make a notification destination (type: webhook) that points to your route. Subscribe it to these events:
 
-`subscription.created`, `subscription.imported`, `subscription.updated`, `subscription.activated`, `subscription.trialing`, `subscription.past_due`, `subscription.paused`, `subscription.resumed`, `subscription.canceled`, `customer.created`, `customer.updated`, `transaction.completed`, `transaction.paid`, `adjustment.created`, `adjustment.updated`.
+`subscription.created`, `subscription.imported`, `subscription.updated`, `subscription.activated`, `subscription.trialing`, `subscription.past_due`, `subscription.paused`, `subscription.resumed`, `subscription.canceled`, `transaction.completed`, `transaction.paid`, `adjustment.created`, `adjustment.updated`.
 
-The catalog CLI subscribes its destination to all 15.
+The catalog CLI subscribes its destination to all 13. Do not subscribe `customer.*`: the kit ignores it (see below).
 
 What the kit does with each event:
 
 | Event | What the kit does |
 |---|---|
 | `subscription.*` | Updates the mirror. `subscription.imported` counts as `subscription.created`. |
-| `customer.*` | Updates `paddle_customers`. |
+| `customer.*` | Records it as `ignored`, reason `unknown_event`. Answers 200. Since v0.5.0 the kit stores no customer: on a shared seller account these events carry every app's customer emails, and the kit never read them. |
 | `transaction.completed` | Records it as `processed`, and runs `onTransaction` if you set it. |
 | `transaction.paid` | Records it as `processed`. No hook. |
 | `adjustment.created`, `adjustment.updated` | Records them as `processed`, and runs `onAdjustment` if you set it. |
@@ -545,7 +545,7 @@ Limits of this rule:
 
 - `not_ours` (v0.4.0) is `ignored`. It is never a failure.
 - `body_too_large` is a 413 for a body over `maxBodyBytes` (default 4 MB, `MAX_WEBHOOK_BODY_BYTES`, just under Vercel's request limit). The kit stops reading at the cap, before it checks the signature, and counts the request in `failedLast24h`. A Paddle event is a few KB plus about 2 KB per line item. If you lower the cap, keep it far above your largest transaction: Paddle retries a refused event and then drops it.
-- `unmatched` (v0.5.0) is `processed`, but `owns` never matched it: an adjustment with `ctx.known === false` (on a shared seller account it can be another app's refund), or a `customer.*` event (it has no line items). The hook ran. It is not a failure and writes no log line. It does not count in `lastOwnedAt`.
+- `unmatched` (v0.5.0) is `processed`, but `owns` never matched it: an adjustment with `ctx.known === false` (on a shared seller account it can be another app's refund). The hook ran. It is not a failure and writes no log line. It does not count in `lastOwnedAt`.
 - `mirrored` (v0.5.0) is `processed` only because its subscription is already in the mirror; `owns` did not match it. An adjustment of such a subscription is `mirrored` too. The hook ran. It is not a failure and writes no log line. It does not count in `lastOwnedAt`.
 - A 409 `in_progress` answer is not a failure. It is not logged or counted. Paddle's next try becomes a 200 duplicate.
 - Log lines contain only `reason`, `eventId` and `eventType`. They never contain the body, the signature header or secrets.

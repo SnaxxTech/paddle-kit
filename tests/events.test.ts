@@ -66,15 +66,11 @@ describe('parseEvent', () => {
     expect(parseEvent(subscriptionEvent({ eventType: 'subscription.imported' }))?.kind).toBe('subscription');
   });
 
-  it('normalises customer.created', () => {
+  it('ignores customer.created and customer.updated (no email is kept)', () => {
     const raw = loadFixture('customer.created');
-    expect(parseEvent(raw)).toEqual({
-      kind: 'customer',
-      eventId: raw.event_id,
-      eventType: 'customer.created',
-      occurredAt: raw.occurred_at,
-      customer: { customerId: raw.data.id, email: raw.data.email ?? null, lastEventAt: raw.occurred_at },
-    });
+    for (const eventType of ['customer.created', 'customer.updated']) {
+      expect(parseEvent({ ...raw, event_type: eventType })).toEqual({ kind: 'ignored', eventId: raw.event_id, eventType, occurredAt: raw.occurred_at });
+    }
   });
 
   it('normalises transaction.completed as a transaction event (v0.2: record-only)', () => {
