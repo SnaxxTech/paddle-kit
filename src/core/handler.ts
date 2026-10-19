@@ -15,6 +15,35 @@ export interface HandlerDeps {
   onAdjustment?: (adj: Adjustment, ctx: AdjustmentContext) => Promise<void> | void;
   /** From `ownershipPredicate(config.owns)`; null = every event is ours. */
   owns?: OwnsPredicate | null;
+  /** Largest body read, in bytes. Default `MAX_WEBHOOK_BODY_BYTES`. */
+  maxBodyBytes?: number;
+}
+
+/** Default body cap: just under Vercel's 4.5 MB request limit. A body over it gets 413 `body_too_large`, unread past the cap. */
+export const MAX_WEBHOOK_BODY_BYTES = 4_000_000;
+
+/** The body as text, or null when it is over `max` bytes. Stops reading at the cap; decodes once, as `req.text()` does. */
+async function readBody(req: Request, max: number): Promise<string | null> {
+  if (Number(req.headers.get('content-length')) > max) return null;
+  if (!req.body) return '';
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (let r = await reader.read(); !r.done; r = await reader.read()) {
+    size += r.value.byteLength;
+    if (size > max) {
+      reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(r.value);
+  }
+  const bytes = new Uint8Array(size);
+  let at = 0;
+  for (const c of chunks) {
+    bytes.set(c, at);
+    at += c.byteLength;
+  }
+  return new TextDecoder().decode(bytes); // UTF-8, BOM stripped, bad bytes replaced: the same text as req.text()
 }
 
 /** Marks an error thrown by a user hook, so it is not mistaken for a store failure. */
@@ -123,12 +152,13 @@ export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<
 
   return async function handle(req: Request): Promise<Response> {
     if (req.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
-    let rawBody: string;
+    let rawBody: string | null;
     try {
-      rawBody = await req.text();
+      rawBody = await readBody(req, d.maxBodyBytes ?? MAX_WEBHOOK_BODY_BYTES);
     } catch {
       return reject('missing_body', 400);
     }
+    if (rawBody === null) return reject('body_too_large', 413);
     if (!rawBody) return reject('missing_body', 400);
 
     const verified = await verifySignature({

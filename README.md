@@ -541,9 +541,10 @@ Limits of this rule:
 - The trade-off: if all of an app's paying subscribers are on a retired price that is no longer in `owns`, their renewals are `mirrored`, and the rule gives a false alarm. Add the retired price to `owns`.
 - v0.4.0 recorded refunds of transactions it never saw, `customer.*` events and events kept only because their subscription was mirrored with reason `null`. Such rows count in `lastOwnedAt` until they are older than your N days.
 
-**Reason codes:** `missing_body`, `bad_signature_header`, `signature_mismatch`, `stale_timestamp`, `bad_json`, `bad_payload`, `unknown_event`, `no_user_id`, `out_of_order`, `store_error`, `hook_error`, `not_ours`, `unmatched`, `mirrored`.
+**Reason codes:** `missing_body`, `body_too_large`, `bad_signature_header`, `signature_mismatch`, `stale_timestamp`, `bad_json`, `bad_payload`, `unknown_event`, `no_user_id`, `out_of_order`, `store_error`, `hook_error`, `not_ours`, `unmatched`, `mirrored`.
 
 - `not_ours` (v0.4.0) is `ignored`. It is never a failure.
+- `body_too_large` is a 413 for a body over `maxBodyBytes` (default 4 MB, `MAX_WEBHOOK_BODY_BYTES`, just under Vercel's request limit). The kit stops reading at the cap, before it checks the signature, and counts the request in `failedLast24h`. A Paddle event is a few KB plus about 2 KB per line item. If you lower the cap, keep it far above your largest transaction: Paddle retries a refused event and then drops it.
 - `unmatched` (v0.5.0) is `processed`, but `owns` never matched it: an adjustment with `ctx.known === false` (on a shared seller account it can be another app's refund), or a `customer.*` event (it has no line items). The hook ran. It is not a failure and writes no log line. It does not count in `lastOwnedAt`.
 - `mirrored` (v0.5.0) is `processed` only because its subscription is already in the mirror; `owns` did not match it. An adjustment of such a subscription is `mirrored` too. The hook ran. It is not a failure and writes no log line. It does not count in `lastOwnedAt`.
 - A 409 `in_progress` answer is not a failure. It is not logged or counted. Paddle's next try becomes a 200 duplicate.

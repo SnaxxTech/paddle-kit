@@ -79,6 +79,14 @@ describe('handleHealth', () => {
   });
 });
 
+describe('maxBodyBytes', () => {
+  it('reaches the webhook handler', async () => {
+    const b = createBilling({ ...base(), maxBodyBytes: 10 });
+    const res = await b.handleWebhook(new Request('https://x/', { method: 'POST', body: '{"event_id":"evt_eleven"}' }));
+    expect(res.status).toBe(413);
+  });
+});
+
 describe('config exposure', () => {
   it('does not expose the webhook secret', () => {
     const billing = createBilling({ ...base(), webhookSecret: 'super-secret-value' });

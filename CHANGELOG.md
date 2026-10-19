@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Health gains `lastOwnedAt` (the last event that `owns` matched: a processed event with reason `null` or `no_user_id`) and `notOursLast24h` (events acked as `not_ours` in 24 h), from existing `paddle_events` rows: no migration. A wrong `owns` used to look fully green; README Monitoring has the alert rule. New reasons, both `processed`, hook still run, no warn line: `mirrored` (kept only because its subscription is already mirrored; `owns` did not match; adjustments of such a subscription too; it replaces `no_user_id` on those events) and `unmatched` (an adjustment with `ctx.known === false`, which was `null`, or a `customer.*` event, which was `null`). `owns` now also runs for events of mirrored subscriptions, so a throwing predicate fails those events too. Both health fields are optional in the `Health` type, so custom stores keep compiling.
+- The webhook stops reading a body at 4 MB (`MAX_WEBHOOK_BODY_BYTES`) and answers 413 with the new reason code `body_too_large`, before the signature is checked. It used to read any size into memory. The cap holds when `content-length` is missing or wrong. `createBilling({ maxBodyBytes })` lowers or raises it. The body is decoded once, after the read, so the signature sees the same text as before.
 
 ## 0.4.0 (2026-10-16)
 
