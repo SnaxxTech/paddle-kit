@@ -47,6 +47,12 @@ export interface BillingConfig {
    * Unset: every event is ours (a seller account of its own).
    */
   owns?: Owns;
+  /**
+   * Largest webhook body read, in bytes; a bigger one gets 413 `body_too_large` and is not read past the cap.
+   * Default 4 MB (`MAX_WEBHOOK_BODY_BYTES`), just under Vercel's request limit. Paddle events are a few KB plus ~2 KB per
+   * line item: lower it only if your largest transaction is far below the new value, or Paddle retries it and then drops it.
+   */
+  maxBodyBytes?: number;
   log?: Logger;
   now?: () => Date;
 }
@@ -82,6 +88,7 @@ export function createBilling(config: BillingConfig): Billing {
     now,
     onTransaction: config.onTransaction,
     onAdjustment: config.onAdjustment,
+    maxBodyBytes: config.maxBodyBytes,
   });
 
   const { webhookSecret: _omitted, ...publicConfig } = config;
