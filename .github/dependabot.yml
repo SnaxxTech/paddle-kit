@@ -1,7 +1,7 @@
 version: 2
 updates:
   # Minor and patch updates come as one weekly PR; .github/workflows/dependabot-auto-merge.yml merges it once CI is
-  # green. Majors come one per PR and wait for a person.
+  # green. Major updates come as a second grouped PR that waits for a person.
   - package-ecosystem: npm
     directory: /
     schedule: { interval: weekly }
@@ -9,6 +9,9 @@ updates:
       minor-and-patch:
         patterns: ['*']
         update-types: [minor, patch]
+      major:
+        patterns: ['*']
+        update-types: [major]
     ignore:
       # TypeScript 7 has no compiler API, so tsup's d.ts build fails (tsup 8 and 9). Drop this when tsup supports it.
       - dependency-name: typescript
@@ -20,3 +23,6 @@ updates:
       minor-and-patch:
         patterns: ['*']
         update-types: [minor, patch]
+      major:
+        patterns: ['*']
+        update-types: [major]
