@@ -77,12 +77,12 @@
     "@paddle/paddle-node-sdk": "^3.10.0",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.6.5",
-    "better-sqlite3": "^12.11.1",
+    "better-sqlite3": "^13.0.3",
     "embedded-postgres": "17.10.0-beta.17",
-    "pg": "8.16.3",
-    "tsup": "^8.5.1",
+    "pg": "8.23.1",
+    "tsup": "^9.0.0",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.12"
+    "vitest": "^5.0.5"
   }
 }
