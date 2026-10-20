@@ -56,7 +56,7 @@ npm i github:SnaxxTech/paddle-kit#v0.5.0
 ```
 
 - The repository is public (since v0.5.0). CI and the host install it with no token. Your secrets never go in this repository: each app keeps its own Paddle keys and webhook secret in its own env files and host settings (see Environment variables).
-- The kit pins the Paddle API to version 1: each REST call sends `Paddle-Version: 1`, and the catalog CLI sets `api_version: 1` on the webhook destination. A new Paddle API version can then not change the payloads that the kit reads.
+- The kit pins the Paddle API to version 1: each REST call sends `Paddle-Version: 1`, and the catalog CLI sets `api_version: 1` on the webhook destination. A new Paddle API version can then not change the payloads that the kit reads. Paddle refuses a version older than the account's default. So if a future Paddle account has a default newer than 1, each REST call and the destination step fail with `PaddleError`. This is on purpose: the kit's parsers must be updated first.
 - `memoryStore` (`paddle-kit/memory`) is for tests and local development only. It keeps data in memory, and it is not shared between server instances. Use `postgresStore` or `sqliteStore` in production.
 - The only optional peer dependency is `@paddle/paddle-js`. You need it only for `paddle-kit/client` (the browser checkout).
 - `reconcile` and the catalog CLI call the Paddle REST API with `fetch`. You do not need the Paddle Node SDK (since v0.4.0).

@@ -15,8 +15,8 @@ We built one billing helper, **paddle-kit**, and we put it into our web apps. Th
 
 | Project | State | Pull request | What is done | What is next |
 |---|---|---|---|---|
-| **paddle-kit** | **v0.5.0 in review** (public repo, CI on) | — (on `main`) | Webhook checks, one-time processing, subscription copy, `hasAccess`, trials, env checks, catalog CLI, refunds, shared-account filter (`owns`). 305 tests pass on real Postgres 17. | Turn on CI. Test v0.4.0 with real sandbox events. |
-| **Offday** | **Ready for review** | [SnaxxTech/offday#34](https://github.com/SnaxxTech/offday/pull/34) | Monthly and yearly plans, 30-day trial, read-only mode after the trial (behind `BILLING_ENFORCE`, off by default). On kit v0.4.0 with `owns`. A real sandbox checkout and cancel worked (on v0.2). | Owner adds the CI secret. Review and merge. |
+| **paddle-kit** | **v0.5.0 in review** (public repo, CI on) | — (on `main`) | Webhook checks, one-time processing, subscription copy, `hasAccess`, trials, env checks, catalog CLI, refunds, shared-account filter (`owns`). 321 tests pass on real Postgres 17. CI is on. | Test v0.5.0 with real sandbox events. |
+| **Offday** | **Ready for review** | [SnaxxTech/offday#34](https://github.com/SnaxxTech/offday/pull/34) | Monthly and yearly plans, 30-day trial, read-only mode after the trial (behind `BILLING_ENFORCE`, off by default). On kit v0.4.0 with `owns`. A real sandbox checkout and cancel worked (on v0.2). | Upgrade to v0.5.0 (no CI secret needed). Review and merge. |
 | **AppCare** | **Ready for review** | [SnaxxTech/SlopRemover#7](https://github.com/SnaxxTech/SlopRemover/pull/7) | One-time Full Scan. Payment checks, refunds, chargebacks, a review queue for people, `billing:status` and `billing:reconcile`. Passed 3 review rounds. On kit v0.4.0 with an `owns` function. 222 tests pass. | Choose the host. Run migration 0005 there. Review and merge. |
 | **QR-Lab** | **Plan only** | [SnaxxTech/QR-Lab#5](https://github.com/SnaxxTech/QR-Lab/pull/5) | Billing plan, price catalog file, a test that the catalog matches the pricing page. | Owner decides backend, login and database. Then we build. |
 
