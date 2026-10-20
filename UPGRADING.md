@@ -31,7 +31,7 @@ Commit the `package.json` and lockfile change. Since v0.5.0 the repository is pu
 
 ### 0.4.x → 0.5.0
 
-1. **No token to install.** The repository is public. Delete the `PADDLE_KIT_READ_TOKEN` secret and the `git config ... insteadOf` step from CI, and commit a lockfile with a `git+https` URL for the kit (README checklist, step 4).
+1. **No token to install.** The repository is public. Delete the `PADDLE_KIT_READ_TOKEN` secret and the `git config ... insteadOf` step from CI. A lockfile with a `git+ssh://` URL still installs with no SSH key (README checklist, step 4).
 2. **API version pinned to 1.** The REST calls of `reconcile` and the catalog CLI send `Paddle-Version: 1`. The next catalog sync with `--webhook-url` sets `api_version: 1` on an existing destination (one PATCH). A destination you manage by hand: check that its API version is 1 in the Paddle dashboard. Payloads of version 1 are what the kit reads.
 3. **Health has two more fields:** `kitVersion` and `environment`. A monitor that compares the whole JSON must accept them.
 4. **`paddle_customers` is no longer written.** Rows written before 0.5.0 stay, and on a shared seller account they include other apps' customer emails. Deleting them (`DELETE FROM paddle_customers;`) is the owner's decision, per app: the kit never reads the table, so the delete changes nothing for the kit. Keep the table: migration `001_init` still creates it.
