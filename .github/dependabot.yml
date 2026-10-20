@@ -6,6 +6,10 @@ updates:
     schedule: { interval: weekly }
     groups:
       paddle: { patterns: ['@paddle/*'] }
+    ignore:
+      # TypeScript 7 has no compiler API, so tsup's d.ts build fails (tsup 8 and 9). Drop this when tsup supports it.
+      - dependency-name: typescript
+        versions: ['>=7']
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
