@@ -3,6 +3,8 @@
 
 export const SANDBOX_BASE = 'https://sandbox-api.paddle.com';
 export const LIVE_BASE = 'https://api.paddle.com';
+/** The Paddle API version the kit's parsers are written for. Sent on every request and set on the webhook destination. */
+export const PADDLE_API_VERSION = 1;
 
 export type FetchLike = (
   url: string,
@@ -30,7 +32,7 @@ export function paddleClient(base: string, apiKey: string, fetchImpl: FetchLike,
   async function call(method: string, apiPath: string, body?: unknown): Promise<Json> {
     const res = await fetchImpl(base + apiPath, {
       method,
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'Paddle-Version': String(PADDLE_API_VERSION) },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     let parsed: Json = {};

@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # @paddle/paddle-js (the client peer) and @paddle/paddle-node-sdk (the signature test's oracle) are the Paddle packages.
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      paddle: { patterns: ['@paddle/*'] }
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }

@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import { EVENT_TYPES } from '../core/events';
 import type { PriceMap } from '../config';
-import { LIVE_BASE, PaddleError, SANDBOX_BASE, paddleClient, redactSecrets, type FetchLike, type Json } from '../core/paddle-api';
+import { LIVE_BASE, PADDLE_API_VERSION, PaddleError, SANDBOX_BASE, paddleClient, redactSecrets, type FetchLike, type Json } from '../core/paddle-api';
 
 export { LIVE_BASE, PaddleError, SANDBOX_BASE, redactSecrets, type FetchLike };
 
@@ -423,6 +423,7 @@ export async function syncCatalog(opts: SyncOptions): Promise<SyncResult> {
           traffic_source: 'all',
           subscribed_events: EVENTS,
           include_sensitive_fields: false,
+          api_version: PADDLE_API_VERSION,
         })
       ).data;
       secret = created.endpoint_secret_key;
@@ -431,6 +432,7 @@ export async function syncCatalog(opts: SyncOptions): Promise<SyncResult> {
       const drift: Json = {};
       if (found.destination !== url) drift.destination = url;
       if (found.active !== true) drift.active = true;
+      if (found.api_version !== PADDLE_API_VERSION) drift.api_version = PADDLE_API_VERSION;
       if (!sameSet(found.subscribed_events?.map?.((e: any) => (typeof e === 'string' ? e : e?.name)), EVENTS)) {
         drift.subscribed_events = EVENTS;
       }

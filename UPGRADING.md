@@ -22,18 +22,21 @@ Check first that your database has no tables of the new names with a different s
 ## 3. Bump the tag
 
 ```bash
-npm i github:SnaxxTech/paddle-kit#v0.4.0
+npm i github:SnaxxTech/paddle-kit#v0.5.0
 ```
 
-Commit the `package.json` and lockfile change. CI needs the `PADDLE_KIT_READ_TOKEN` secret (see the README checklist). Then run the app's own tests and its sandbox end-to-end check.
+Commit the `package.json` and lockfile change. Since v0.5.0 the repository is public, so CI needs no token (README checklist, step 4). Then run the app's own tests and its sandbox end-to-end check.
 
 ## Per-version notes
 
 ### 0.4.x → 0.5.0
 
-1. **`paddle_customers` is no longer written.** Rows written before 0.5.0 stay, and on a shared seller account they include other apps' customer emails. Deleting them (`DELETE FROM paddle_customers;`) is the owner's decision, per app: the kit never reads the table, so the delete changes nothing for the kit. Keep the table: migration `001_init` still creates it.
-2. **Catalog sync** now subscribes the destination to 13 events (no `customer.*`). The next sync of an existing destination updates it. A destination you manage by hand: unsubscribe `customer.created` and `customer.updated` in the Paddle dashboard; if you leave them, they are acked as `ignored`.
-3. A custom `Store` still compiles: `upsertCustomer` stays in the interface (deprecated) until 0.6.0. The kit no longer calls it.
+1. **No token to install.** The repository is public. Delete the `PADDLE_KIT_READ_TOKEN` secret and the `git config ... insteadOf` step from CI, and commit a lockfile with a `git+https` URL for the kit (README checklist, step 4).
+2. **API version pinned to 1.** The REST calls of `reconcile` and the catalog CLI send `Paddle-Version: 1`. The next catalog sync with `--webhook-url` sets `api_version: 1` on an existing destination (one PATCH). A destination you manage by hand: check that its API version is 1 in the Paddle dashboard. Payloads of version 1 are what the kit reads.
+3. **Health has two more fields:** `kitVersion` and `environment`. A monitor that compares the whole JSON must accept them.
+4. **`paddle_customers` is no longer written.** Rows written before 0.5.0 stay, and on a shared seller account they include other apps' customer emails. Deleting them (`DELETE FROM paddle_customers;`) is the owner's decision, per app: the kit never reads the table, so the delete changes nothing for the kit. Keep the table: migration `001_init` still creates it.
+5. **Catalog sync** now subscribes the destination to 13 events (no `customer.*`). The next sync of an existing destination updates it. A destination you manage by hand: unsubscribe `customer.created` and `customer.updated` in the Paddle dashboard; if you leave them, they are acked as `ignored`.
+6. A custom `Store` still compiles: `upsertCustomer` stays in the interface (deprecated) until 0.6.0. The kit no longer calls it.
 
 ### 0.3.x → 0.4.0
 

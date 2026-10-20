@@ -14,6 +14,7 @@ const UPDATED_AT = SUB.updated_at as string;
 function fakeApi(pages: unknown[][], o: { next?: (page: number) => string } = {}) {
   const calls: Array<{ url: string; auth: string }> = [];
   const fetch: FetchLike = async (url, init) => {
+    expect(init.headers['Paddle-Version']).toBe('1');
     calls.push({ url, auth: init.headers.Authorization! });
     const page = calls.length - 1;
     const last = page >= pages.length - 1;

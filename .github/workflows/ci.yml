@@ -1,5 +1,3 @@
-# Not active: GitHub Actions only runs files under .github/workflows/.
-# To enable: git mv docs/ci-workflow.yml .github/workflows/ci.yml (pushing it needs a token with the 'workflow' scope).
 name: ci
 on:
   push:
