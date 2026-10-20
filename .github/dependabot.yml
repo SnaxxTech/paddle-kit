@@ -1,11 +1,14 @@
 version: 2
 updates:
-  # @paddle/paddle-js (the client peer) and @paddle/paddle-node-sdk (the signature test's oracle) are the Paddle packages.
+  # Minor and patch updates come as one weekly PR; .github/workflows/dependabot-auto-merge.yml merges it once CI is
+  # green. Majors come one per PR and wait for a person.
   - package-ecosystem: npm
     directory: /
     schedule: { interval: weekly }
     groups:
-      paddle: { patterns: ['@paddle/*'] }
+      minor-and-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
     ignore:
       # TypeScript 7 has no compiler API, so tsup's d.ts build fails (tsup 8 and 9). Drop this when tsup supports it.
       - dependency-name: typescript
@@ -13,3 +16,7 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
+    groups:
+      minor-and-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
