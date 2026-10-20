@@ -49,6 +49,7 @@ function fakePaddle(opts: FakeOptions = {}) {
     calls.push({ method: init.method, path: p + u.search, body });
     expect(u.origin).toBe('https://sandbox-api.paddle.com');
     expect(init.headers.Authorization).toBe(`Bearer ${KEY}`);
+    expect(init.headers['Paddle-Version']).toBe('1');
     const ok = (data: unknown, meta?: unknown) => ({
       ok: true,
       status: 200,
@@ -257,6 +258,20 @@ describe('syncCatalog', () => {
     expect(writes[0]).toMatchObject({ method: 'PATCH', path: `/prices/${ids[2]}` });
     expect(writes[0]!.body).toEqual({ unit_price: { amount: '1999', currency_code: 'USD' } });
     expect(paddle.prices[2].unit_price.amount).toBe('1999');
+  });
+
+  test('pins the destination to API version 1: on create, and repairs an existing one on another version', async () => {
+    const paddle = fakePaddle();
+    await syncCatalog({ apiKey: KEY, catalog: CATALOG, webhookUrl: HOOK, fetch: paddle.fetch, log: () => {} });
+    expect(paddle.writes().find((c) => c.method === 'POST' && c.path === '/notification-settings')!.body.api_version).toBe(1);
+
+    paddle.settings[0].api_version = 2;
+    paddle.calls.length = 0;
+    await syncCatalog({ apiKey: KEY, catalog: CATALOG, webhookUrl: HOOK, fetch: paddle.fetch, log: () => {} });
+    expect(paddle.writes().filter((c) => c.path.startsWith('/notification-settings'))).toEqual([
+      { method: 'PATCH', path: `/notification-settings/${paddle.settings[0].id}`, body: { api_version: 1 } },
+    ]);
+    expect(paddle.settings[0].api_version).toBe(1);
   });
 
   test('writes destination, secret, token and env; preserves unrelated lines; mode 0600', async () => {

@@ -52,10 +52,11 @@ What it does **not** do: in-app purchases in mobile store apps. Google Play and 
 ## Install
 
 ```bash
-npm i github:SnaxxTech/paddle-kit#v0.4.0
+npm i github:SnaxxTech/paddle-kit#v0.5.0
 ```
 
-- The repository is private. CI and the host need a read token (see the Integration checklist, step 4).
+- The repository is public (since v0.5.0). CI and the host install it with no token. Your secrets never go in this repository: each app keeps its own Paddle keys and webhook secret in its own env files and host settings (see Environment variables).
+- The kit pins the Paddle API to version 1: each REST call sends `Paddle-Version: 1`, and the catalog CLI sets `api_version: 1` on the webhook destination. A new Paddle API version can then not change the payloads that the kit reads. Paddle refuses a version older than the account's default. So if a future Paddle account has a default newer than 1, each REST call and the destination step fail with `PaddleError`. This is on purpose: the kit's parsers must be updated first.
 - `memoryStore` (`paddle-kit/memory`) is for tests and local development only. It keeps data in memory, and it is not shared between server instances. Use `postgresStore` or `sqliteStore` in production.
 - The only optional peer dependency is `@paddle/paddle-js`. You need it only for `paddle-kit/client` (the browser checkout).
 - `reconcile` and the catalog CLI call the Paddle REST API with `fetch`. You do not need the Paddle Node SDK (since v0.4.0).
@@ -531,6 +532,8 @@ What the kit does with each event:
 | `unlinkedLast24h` | Subscription events with no `userId` (stored with `user_id = NULL`, reason `no_user_id`). To fix, open each checkout with `createCheckout`, which sets `customData.userId`. |
 | `lastOwnedAt` | When the last event that `owns` matched arrived: a processed event with reason `null` or `no_user_id`. Events with reason `mirrored` or `unmatched`, and late (`out_of_order`) deliveries, do not count. Without `owns`, every event matches. `null` if there is none yet. Since v0.5.0. |
 | `notOursLast24h` | Events acked as `not_ours` in the last 24 hours (other products on a shared seller account). Since v0.5.0. |
+| `kitVersion` | The paddle-kit version that the app runs, for example `"0.5.0"`. Added by the route, not by the store. Since v0.5.0. |
+| `environment` | `sandbox` or `production`, from `createBilling`. Added by the route, not by the store. Since v0.5.0. |
 
 **Alert rule for a wrong `owns`:** `lastOwnedAt` older than N days (your longest normal gap between your own sales or renewals) **and** `notOursLast24h > 0` = your `owns` is wrong. Paddle's events still arrive, but the kit sends all of them to `not_ours`, so `lastEventAt` stays fresh and `failedLast24h` stays 0. On a shared seller account `notOursLast24h > 0` alone is normal traffic; do not alert on it.
 
@@ -593,18 +596,7 @@ Do these steps one time for each app: first in sandbox, then again for live.
    We found no API for this setting (**UNVERIFIED** that there is none).
 2. **Make the catalog.** Run `paddle-kit-catalog --webhook-url https://<host>/api/paddle` (see Catalog CLI). Read the table that it shows. Never copy the webhook secret by hand.
 3. **Check the env.** Deploy with `readBillingEnv`. Make sure that `problems` is empty in the deployed environment, not only on your computer.
-4. **Give CI and the host access to the private kit.**
-   1. Make a fine-grained GitHub token with read access to the contents of `SnaxxTech/paddle-kit`.
-   2. Save it as the repository secret `PADDLE_KIT_READ_TOKEN`.
-   3. Before `npm ci`, rewrite all three GitHub URL forms that npm can use:
-      ```bash
-      for from in "ssh://git@github.com/" "git@github.com:" "https://github.com/"; do
-        git config --global url."https://x-access-token:${PADDLE_KIT_READ_TOKEN}@github.com/".insteadOf "$from"
-      done
-      ```
-   4. Give the secret to that step: `env: PADDLE_KIT_READ_TOKEN: ${{ secrets.PADDLE_KIT_READ_TOKEN }}`.
-   5. **Make sure that the secret exists:** `gh api repos/<owner>/<repo>/actions/secrets --jq '.secrets[].name'` must show `PADDLE_KIT_READ_TOKEN`. A missing secret becomes an empty string, and the install fails with an unclear auth error.
-   6. The host (for example Vercel) also needs access. How to do this depends on the host. **UNVERIFIED**: check the host's documents.
+4. **Install in CI and on the host.** The kit is public since v0.5.0, so `npm ci` needs no token. An app that used the old private-repo recipe can delete the `PADDLE_KIT_READ_TOKEN` secret and its `git config ... insteadOf` step. A lockfile with a `git+ssh://` URL for the kit also installs with no SSH key: npm downloads public GitHub dependencies as a tarball (tested with npm 10.8.2, SSH turned off, no GitHub login). Each host is **UNVERIFIED** until its first install.
 5. **A tunnel restart changes the URL.** A quick tunnel gets a new hostname each time it starts. Run the catalog CLI again with the new `--webhook-url`. It should move the existing destination and keep its secret. **UNVERIFIED**: after a restart, check that `PADDLE_NOTIFICATION_WEBHOOK_SECRET` in the env file still matches the destination.
 6. **Do a test checkout.** In sandbox, pay with the test card `4242 4242 4242 4242`, any future expiry date and any CVC. Make sure that `subscription.*` and `transaction.completed` arrive, and that `hasAccess` changes.
 7. **Do the wrong-secret drill.**
@@ -616,7 +608,7 @@ Do these steps one time for each app: first in sandbox, then again for live.
    - Run the CLI with `--live` and a **separate env file** (`--env-file .env.production.local`, never the dev `.env.local`). Then a live key and a `test_` token cannot be in one file.
    - Use `PADDLE_ENV=production` and a `live_` client token.
 
-## Known issues (still open in v0.4.0)
+## Known issues (still open in v0.5.0)
 
 - **The past_due grace period can move.** The kit calculates the grace start from the stored row.
   - Two `past_due` events at the same time can make the grace longer, by the time between them.

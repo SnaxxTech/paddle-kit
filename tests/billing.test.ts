@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { createBilling } from '../src/core/billing';
 import { memoryStore } from '../src/memory';
 import { sign } from './helpers/sign';
@@ -61,6 +62,12 @@ describe('handleHealth', () => {
     const ok = await b.handleHealth(new Request('https://x/', { headers: { authorization: 'Bearer tok' } }));
     expect(ok.status).toBe(200);
     expect(await ok.json()).toMatchObject({ lastEventAt: null, failedLast24h: 0 });
+  });
+  it('reports the kit version and the environment, so one dashboard can show every app', async () => {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    const b = createBilling({ ...base(), healthToken: 'tok' });
+    const res = await b.handleHealth(new Request('https://x/', { headers: { authorization: 'Bearer tok' } }));
+    expect(await res.json()).toMatchObject({ kitVersion: pkg.version, environment: base().environment });
   });
   it('compares the token in constant time (same-length wrong token → 401)', async () => {
     const b = createBilling({ ...base(), healthToken: 'tok' });

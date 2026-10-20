@@ -1,7 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 (2026-10-20)
 
+Upgrade steps: [UPGRADING.md](UPGRADING.md). No new migration.
+
+- **Public repository.** Install with `npm i github:SnaxxTech/paddle-kit#v0.5.0` and no token. The history was scanned before the change (gitleaks 8.30.1 over all 79 commits, plus a pattern search for Paddle keys, webhook secrets, client tokens, GitHub tokens and database URLs): no real secret. Apps keep their secrets in their own env files.
+- **Paddle API version pinned to 1.** Every REST call (`reconcile`, catalog CLI) sends `Paddle-Version: 1`. Before, Paddle answered with the account's default version, so a new default could change the shapes the kit reads. The catalog CLI creates the destination with `api_version: 1` and sets it on an existing destination with another version.
+- **Health has `kitVersion` and `environment`**, so one monitor can show which app runs which kit version against which Paddle account. The route adds them; `Store.health` is unchanged.
+- CI is on (`.github/workflows/ci.yml`), and Dependabot checks npm packages and GitHub Actions each week.
 - Health gains `lastOwnedAt` (the last event that `owns` matched: a processed event with reason `null` or `no_user_id`) and `notOursLast24h` (events acked as `not_ours` in 24 h), from existing `paddle_events` rows: no migration. A wrong `owns` used to look fully green; README Monitoring has the alert rule. New reasons, both `processed`, hook still run, no warn line: `mirrored` (kept only because its subscription is already mirrored; `owns` did not match; adjustments of such a subscription too; it replaces `no_user_id` on those events) and `unmatched` (an adjustment with `ctx.known === false`, which was `null`). `owns` now also runs for events of mirrored subscriptions, so a throwing predicate fails those events too. Both health fields are optional in the `Health` type, so custom stores keep compiling.
 - **No more foreign customer emails.** `customer.created` / `customer.updated` are acknowledged 200 and recorded as `ignored` / `unknown_event`; nothing is written to `paddle_customers`. Before, every customer event was stored before any `owns` check, so on a shared seller account each app kept every other app's customer emails, and the kit never read them. `customer` is gone from `EVENT_TYPES`, so the catalog `EVENTS` list has 13 events and the next `paddle-kit-catalog` sync unsubscribes an existing destination from `customer.*`. `Store.upsertCustomer` and the `Customer` type stay, deprecated, until v0.6.0. Existing `paddle_customers` rows are not deleted: see UPGRADING.
 - The webhook stops reading a body at 4 MB (`MAX_WEBHOOK_BODY_BYTES`) and answers 413 with the new reason code `body_too_large`, before the signature is checked. It used to read any size into memory. The cap holds when `content-length` is missing or wrong. `createBilling({ maxBodyBytes })` lowers or raises it. The body is decoded once, after the read, so the signature sees the same text as before.
@@ -36,7 +42,7 @@ Upgrade steps: [UPGRADING.md](UPGRADING.md). **Run migration `002_claims_transac
 - New real-Postgres suite `npm run test:pg` (N=50 parallel duplicates, shuffled parallel `subscription.updated`, flaky-hook redeliveries, 1,000-event load with p95 and a sample-count reconciliation). It skips with a loud SKIP line when no server is available, and fails in CI (`PADDLE_KIT_REQUIRE_PG=1`) instead of skipping.
 
 ### Tooling
-- `UPGRADING.md`; CI workflow, shipped disabled at `docs/ci-workflow.yml` (move it to `.github/workflows/ci.yml` to enable): typecheck, tests, build, edge check, the packed-tarball smoke check in a scratch app (now also checks that `paddle-kit/hono` and `paddle-kit/express` no longer resolve), and the Postgres suite against a `postgres:16` service. The real-Postgres suite prints the server version.
+- `UPGRADING.md`; CI workflow, shipped disabled at `docs/ci-workflow.yml` (enabled in 0.5.0): typecheck, tests, build, edge check, the packed-tarball smoke check in a scratch app (now also checks that `paddle-kit/hono` and `paddle-kit/express` no longer resolve), and the Postgres suite against a `postgres:16` service. The real-Postgres suite prints the server version.
 - `npm run smoke` now also runs a signed webhook through the installed tarball (`owns` filtering and a known/unknown refund).
 
 ## 0.3.1 (2026-10-16)

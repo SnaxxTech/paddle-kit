@@ -2,6 +2,7 @@ import { decideAccess } from './access';
 import { createWebhookHandler } from './handler';
 import { ownershipPredicate } from './owns';
 import { constantTimeEqual } from './signature';
+import { version as kitVersion } from '../../package.json';
 import type { Adjustment, AdjustmentContext, HookContext, Logger, Owns, Store, Transaction } from './types';
 
 export interface BillingConfig {
@@ -101,7 +102,7 @@ export function createBilling(config: BillingConfig): Billing {
       if (!config.healthToken) return new Response(null, { status: 404 });
       if (!constantTimeEqual(req.headers.get('authorization') ?? '', `Bearer ${config.healthToken}`)) return new Response(null, { status: 401 });
       try {
-        return Response.json(await config.store.health(now()));
+        return Response.json({ ...(await config.store.health(now())), kitVersion, environment: config.environment });
       } catch {
         log({ level: 'error', reason: 'store_error' });
         return Response.json({ error: 'store_error' }, { status: 503 });
