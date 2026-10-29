@@ -102,6 +102,10 @@ describe('reconcile', () => {
     const other = apiSub({ id: 'sub_other', items: [{ ...SUB.items[0], price: { ...SUB.items[0].price, id: 'pri_someone_else' } }] });
     expect(await reconcile(ours, { apiKey: 'pdl_sdbx_apikey_x', fetch: fakeApi([[SUB, other]]).fetch })).toEqual({ scanned: 2, applied: 1, notOurs: 1, invalid: 0 });
 
+    // A resolver may return a predicate too: the same filter.
+    const byPredicate = billing({ owns: { resolve: async () => ({ items }) => items.some((i) => i.priceId === SUB.items[0].price.id) } });
+    expect(await reconcile(byPredicate, { apiKey: 'pdl_sdbx_apikey_x', fetch: fakeApi([[SUB, other]]).fetch })).toEqual({ scanned: 2, applied: 1, notOurs: 1, invalid: 0 });
+
     const down = billing({ owns: { resolve: async () => { throw new Error('paddle down'); } } });
     const api = fakeApi([[SUB]]);
     await expect(reconcile(down, { apiKey: 'pdl_sdbx_apikey_x', fetch: api.fetch })).rejects.toThrow('paddle down');

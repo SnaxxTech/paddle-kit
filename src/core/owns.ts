@@ -15,7 +15,7 @@ export function ownershipPredicate(owns: OwnedIds | OwnsPredicate | undefined): 
   return ({ items }) => items.some((i) => prices.has(i.priceId) || (i.productId !== null && products.has(i.productId)));
 }
 
-/** Like `ownershipPredicate`, awaiting a resolver first. A resolver that fails or finds no id throws: never "owns everything". */
+/** Like `ownershipPredicate`, awaiting a resolver first (ids or a predicate). A resolver that fails or finds no id throws: never "owns everything". */
 export async function resolveOwnership(owns: Owns | undefined): Promise<OwnsPredicate | null> {
   if (!isOwnsResolver(owns)) return ownershipPredicate(owns);
   return ownershipPredicate((await owns.resolve()) ?? {});

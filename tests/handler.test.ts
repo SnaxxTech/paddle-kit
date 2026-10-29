@@ -476,6 +476,36 @@ describe('webhook handler', () => {
       expect((await store.health(NOW)).notOursLast24h).toBe(1);
     });
 
+    it('owns resolver may return a predicate (an app that also matches its own order_id, as LeakScan does)', async () => {
+      const onTransaction = vi.fn();
+      const resolve = vi.fn(async () => {
+        const scan = 'pri_scan_found_by_label';
+        return ({ items, customData }: { items: { priceId: string }[]; customData: Record<string, unknown> | null }) =>
+          items.some((i) => i.priceId === scan) || typeof customData?.order_id === 'string';
+      });
+      const { h } = make({ owns: { resolve }, onTransaction });
+      const tx = (eventId: string, id: string, customData: unknown) => {
+        const raw = loadFixture('transaction.completed');
+        return JSON.stringify({ ...raw, event_id: eventId, data: { ...raw.data, id, subscription_id: null, custom_data: customData } });
+      };
+      expect((await h(post(tx('evt_order', 'txn_with_order', { order_id: 'ord_7' })))).status).toBe(200);
+      expect(onTransaction).toHaveBeenCalledTimes(1);
+      expect((await h(post(tx('evt_other', 'txn_other_app', null)))).status).toBe(200);
+      expect(onTransaction).toHaveBeenCalledTimes(1);
+      expect(await store.getTransaction!('txn_other_app')).toEqual({ transactionId: 'txn_other_app', owned: false });
+      expect(resolve).toHaveBeenCalledTimes(2);
+    });
+
+    it('owns resolver: a returned predicate that throws fails the event as hook_error, not as not_ours', async () => {
+      const onTransaction = vi.fn();
+      const { h, errors } = make({ owns: { resolve: async () => () => { throw new Error('predicate bug'); } }, onTransaction });
+      const res = await h(post(txBody()));
+      expect([res.status, await res.json()]).toEqual([500, { error: 'hook_error' }]);
+      expect(onTransaction).not.toHaveBeenCalled();
+      expect(errors[0]).toEqual([new Error('predicate bug'), expect.objectContaining({ reason: 'hook_error' })]);
+      expect((await store.health(NOW)).notOursLast24h).toBe(0);
+    });
+
     it('owns resolver: a resolver slower than hookTimeoutMs is a failed lookup (503)', async () => {
       const { h } = make({ hookTimeoutMs: 20, owns: { resolve: () => new Promise(() => {}) } });
       expect((await h(post(txBody()))).status).toBe(503);

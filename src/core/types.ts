@@ -120,13 +120,14 @@ export interface OwnedIds {
 }
 export type OwnsPredicate = (x: { kind: 'subscription' | 'transaction'; items: LineItem[]; customData: Record<string, unknown> | null }) => boolean;
 /**
- * Owned ids found at run time (`readBillingEnv` with `resolvePrices`, since v0.7.0). Awaited for each event whose
- * ownership it decides (subscription and transaction events, and adjustments of a mirrored subscription); a throw (or
- * no id) answers 503 `prices_unavailable`, so Paddle retries and no event is marked `not_ours` because a lookup failed.
- * Cache inside `resolve`: it runs once per such event.
+ * `owns` found at run time (`readBillingEnv` with `resolvePrices`, since v0.7.0): owned ids, or a predicate built from
+ * them (an app that also matches its own custom data, e.g. `({ items, customData }) => …`). Awaited for each event
+ * whose ownership it decides (subscription and transaction events, and adjustments of a mirrored subscription); a
+ * throw (or no id) answers 503 `prices_unavailable`, so Paddle retries and no event is marked `not_ours` because a
+ * lookup failed. Cache inside `resolve`: it runs once per such event.
  */
 export interface OwnsResolver {
-  resolve(): Promise<OwnedIds>;
+  resolve(): Promise<OwnedIds | OwnsPredicate>;
 }
 export type Owns = OwnedIds | OwnsPredicate | OwnsResolver;
 

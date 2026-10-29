@@ -341,6 +341,16 @@ export const billing = config
   : null;
 ```
 
+**An app with its own `owns` function** (LeakScan also matches its own `order_id`, so a sale with a wrong price still reaches review) keeps that function and builds it from the found ids: a resolver may return a predicate as well as ids.
+
+```ts
+const scanIds = async () => {
+  const { scan } = await config.resolvePrices(); // kept 10 min per instance
+  return [scan as string];
+};
+owns: { resolve: async () => leakScanOwns(await scanIds()) }, // (x) => boolean, built from the ids found by label
+```
+
 The trade-offs, so you can choose:
 
 | | `PADDLE_PRICES` in the env | Found by label |
@@ -388,7 +398,7 @@ export const billing = config
 
 How `owns` works:
 
-- **Three forms.** `owns` is an object `{ priceIds?, productIds? }`, a function `({ kind, items, customData }) => boolean`, or (since v0.7.0) a resolver `{ resolve: () => Promise<{ priceIds?, productIds? }> }`, which `readBillingEnv` returns with `resolvePrices` (see Find prices by their label). A resolver that throws, is slower than `hookTimeoutMs` or finds no id fails the event with 503 `prices_unavailable`; it never reads as "not ours" or "owns everything". Cache inside `resolve`: it runs for each event.
+- **Three forms.** `owns` is an object `{ priceIds?, productIds? }`, a function `({ kind, items, customData }) => boolean`, or (since v0.7.0) a resolver `{ resolve: () => Promise<ids | predicate> }`: `readBillingEnv` returns one with `resolvePrices` (see Find prices by their label), and an app with its own `owns` function builds one that returns that function. A resolver that throws, is slower than `hookTimeoutMs` or finds no id fails the event with 503 `prices_unavailable`; it never reads as "not ours" or "owns everything". Cache inside `resolve`: it runs for each event.
 - **Default value.** `readBillingEnv` returns `config.owns = { priceIds: [each id in PADDLE_PRICES] }`. If the app also sells prices that are not in `PADDLE_PRICES`, add them: `owns: { priceIds: [...config.owns!.priceIds, 'pri_legacy'] }`.
 - **The match.** An event is ours when **one or more** of its line items match.
 - **Errors.** An `owns` object with no ids throws in `createBilling`, because it would ignore every event. A function that throws fails the event as `hook_error`.
@@ -848,7 +858,7 @@ Do these steps one time for each app: first in sandbox, then again for live.
 | 2026-10-16 | v0.3 | A real full refund through the API | `onAdjustment` ran two times: `adjustment.created` (`pending_approval`, `type: full`), then about 7 minutes later `adjustment.updated` (`approved`, `type: full`). |
 | 2026-10-16 | v0.3 | Catalog CLI on the real sandbox | It made a catalog, did nothing on a second run, and its teardown removed only its own resources. It also moved Offday's old catalog. |
 | 2026-10-17 | v0.4 | Test suite on a real Postgres 17.10 server (`embedded-postgres`) | 305 of 305 tests pass. 50 parallel copies of one event run the hook one time. A load of 1,000 events gave 0 errors. |
-| 2026-10-29 | v0.7 | Test suite, plus the real-Postgres suite on Postgres 17.10 (`embedded-postgres`) | 403 of 403 tests, and 5 of 5 on real Postgres (1,000 events: 0 errors, 1,000 of 1,000 samples counted). 500 unsigned and forged POSTs made 0 store calls (v0.6.0 made one `recordFailure` per request). |
+| 2026-10-29 | v0.7 | Test suite, plus the real-Postgres suite on Postgres 17.10 (`embedded-postgres`) | 405 of 405 tests, and 5 of 5 on real Postgres (1,000 events: 0 errors, 1,000 of 1,000 samples counted). 500 unsigned and forged POSTs made 0 store calls (v0.6.0 made one `recordFailure` per request). |
 | 2026-10-29 | v0.7 | The packed tarball in a scratch app (`npm run smoke`), and the built `paddle-kit-doctor --apps` against two local health routes (real `fetch`, a real apps file) | Smoke passed. The doctor printed the table and the JSON, exited 1 for the misconfigured app and 0 for the healthy one in single-app mode, and printed no token. |
 
 Test fixtures are the real payloads that we captured (see `tests/fixtures/SOURCES.md`).

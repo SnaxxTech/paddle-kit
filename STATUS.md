@@ -16,7 +16,7 @@ We built one billing helper, **paddle-kit**, and we put it into our web apps. Th
 | Project | State | Kit | Database | What is next |
 |---|---|---|---|---|
 | **paddle-kit** | v0.6.0 released (tag `v0.6.0`); **v0.7.0 in review** | — | — | Review and merge v0.7.0, tag it, then move the apps (UPGRADING, 0.6.x → 0.7.0). |
-| **LeakScan** (was called AppCare here; repo `SnaxxTech/SlopRemover`) | On `main` | v0.6.0 | Postgres on Neon (drizzle + postgres-js) | 0.7.0: run the catalog CLI with `--live` once (live destination → `platform`), add `onError` and a price-source health check, then consider prices by label (`resolvePrices`). |
+| **LeakScan** (was called AppCare here; repo `SnaxxTech/SlopRemover`) | On `main` | v0.6.0 | Postgres on Neon (drizzle + postgres-js) | 0.7.0: run the catalog CLI with `--live` once (live destination → `platform`), add `onError` and a price-source health check, then prices by label: `resolvePrices`, with `leakScanOwns` returned from an `owns` resolver. |
 | **Offday** | Billing on kit v0.5.0 (PR state not re-checked on 2026-10-29) | v0.5.0 | SQLite | Upgrade to 0.7.0 (no migration since 0.4.0). |
 | **QR Lab** | Billing pull request open, stacked on `SnaxxTech/QR-Lab#15` | v0.6.0 | Postgres on Neon (postgres-js) | Merge; then 0.7.0. See the postgres-js jsonb note in the session notes before production. |
 | **billing-watch** | Not started | — | — | New private repo: `paddle-kit-doctor --apps apps.json --json` every 6 hours from GitHub Actions; one issue per red app, closed when green. |
