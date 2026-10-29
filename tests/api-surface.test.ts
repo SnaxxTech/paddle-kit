@@ -3,17 +3,22 @@ import { expect, it } from 'vitest';
 import * as core from '../src/core';
 import * as client from '../src/client';
 import * as reconcile from '../src/reconcile';
+import * as next from '../src/next';
+import * as price from '../src/price';
 
-// The v0.4.0 public surface. Growing it is a decision: change this list on purpose.
-it('package.json exports exactly the v0.4 subpaths', () => {
+// The public surface. Growing it is a decision: change this list on purpose (0.6.0 added ./price and the doctor bin).
+it('package.json exports exactly the v0.6 subpaths and bins', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-  expect(Object.keys(pkg.exports)).toEqual(['./core', './memory', './postgres', './sqlite', './next', './client', './reconcile', './plan', './config', './catalog']);
+  expect(Object.keys(pkg.exports)).toEqual(['./core', './memory', './postgres', './sqlite', './next', './client', './reconcile', './plan', './config', './catalog', './price']);
+  expect(pkg.bin).toEqual({ 'paddle-kit-catalog': './dist/catalog/cli.js', 'paddle-kit-doctor': './dist/doctor/cli.js' });
   for (const e of Object.values(pkg.exports) as Record<string, string>[]) expect(Object.keys(e)).toEqual(['types', 'default']);
   expect(Object.keys(pkg.peerDependencies ?? {})).toEqual(['@paddle/paddle-js']);
   expect(pkg.files).toEqual(['dist']);
 });
 
-it('runtime exports of core, client and reconcile', () => {
+it('runtime exports of core, client, reconcile, next and price', () => {
+  expect(Object.keys(next).sort()).toEqual(['createNextRoute', 'createWebhookRoute']);
+  expect(Object.keys(price).sort()).toEqual(['PriceError', 'formatPrice', 'getPrice']);
   expect(Object.keys(core).sort()).toEqual(['MAX_WEBHOOK_BODY_BYTES', 'createBilling']);
   expect(Object.keys(client).sort()).toEqual(['createCheckout']);
   expect(Object.keys(reconcile).sort()).toEqual(['reconcile']);

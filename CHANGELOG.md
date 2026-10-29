@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0 (unreleased)
+
+Upgrade steps: [UPGRADING.md](UPGRADING.md). No new migration. Additive: nothing is removed, and no existing response changes.
+
+- **New `paddle-kit/price`** (edge-safe): `getPrice(priceId, { apiKey, environment, fetch?, timeoutMs? })` reads `GET /prices/{id}` with `Paddle-Version: 1` and returns `{ id, amount, currency, interval, name, status }`. Errors are `PriceError` (extends `PaddleError`) with `code` `unauthorized` (401/403 or a key for the other environment), `not_found` (404 or an id that is not `pri_…`), `timeout` (default 5 s, the request is aborted), `network`, `malformed` or `http` (other statuses, in `status`); the message never has the key. `formatPrice(amount, currency, locale = 'en-US')`: whole amounts without cents (`$15`, `$9.99`), zero-decimal currencies not divided by 100. No caching in the kit; the README shows Next.js 16 `"use cache"` + `cacheLife('hours')` with a built-in fallback. Why: LeakScan kept its price in code and in Paddle, so a price change needed two edits.
+- **New `createWebhookRoute({ billing, problems, healthToken? })` in `paddle-kit/next`**: the null-safe route that the README and the skill had as hand-written code. Billing on: `handleWebhook` / `handleHealth` (GET 404 `{ "error": "health_off" }` without a health token). Billing off: 404, GET `{ "error": "billing_off" }`. Misconfigured: 503, and a GET with the health token gets `{ "error": "misconfigured", "problems": [...] }` (names only). It never builds billing. `createNextRoute` is unchanged.
+- **New `paddle-kit-doctor` bin**: `--url <route> --token <PADDLE_HEALTH_TOKEN>` (or the env variable) calls the deployed health route and prints reachable or not, billing on/off, environment, kit version, env problems by name, last event time and the last failure reason in plain words. Exit 1 on a problem (not reachable, redirect, refused token, billing off, health off, misconfigured, `store_error`, or a `signature_mismatch` / `store_error` / `hook_error` in the last 24 h). It does not follow redirects, so the token stays on that host; https only, except localhost.
+- **Catalog CLI prints a host block** after each run (not after `--teardown`): `PADDLE_ENV`, `PADDLE_PRICES`, `PADDLE_NOTIFICATION_WEBHOOK_SECRET`, `NEXT_PUBLIC_PADDLE_CLIENT_TOKEN` from the env file, the secret as a comment with its last 4 characters unless `--show-secrets`. `--host vercel` adds `vercel env add <NAME> <environment>` lines (sandbox: preview and development; `--live`: production), never run. Why: a production app had checkout off because `PADDLE_PRICES` and the client token were only in `.env.local`.
+- **npx outside an app**: the README explains the npm E404 (the kit is not on the registry) and the two ways that work. Run from the npx cache in a folder whose `package.json` does not depend on the kit, the catalog CLI prints one line that says so.
+- `PaddleError` has an optional `status` (the HTTP status of a Paddle error answer). `FetchLike`'s init may carry a `signal`.
+- `Store.upsertCustomer` and `Customer` stay deprecated (0.5.0 said "until v0.6.0"); they are not removed in this additive release.
+
 ## 0.5.0 (2026-10-20)
 
 Upgrade steps: [UPGRADING.md](UPGRADING.md). No new migration.

@@ -8,11 +8,15 @@ export const PADDLE_API_VERSION = 1;
 
 export type FetchLike = (
   url: string,
-  init: { method: string; headers: Record<string, string>; body?: string },
+  init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal },
 ) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 
 export class PaddleError extends Error {
   override name = 'PaddleError';
+  /** The HTTP status when Paddle answered with an error; undefined for errors raised before or without a response. */
+  constructor(message: string, readonly status?: number) {
+    super(message);
+  }
 }
 
 // ---------- redaction ----------
@@ -28,12 +32,13 @@ export function redactSecrets(text: string, known: readonly string[] = []): stri
 
 export type Json = Record<string, any>;
 
-export function paddleClient(base: string, apiKey: string, fetchImpl: FetchLike, known: string[]) {
+export function paddleClient(base: string, apiKey: string, fetchImpl: FetchLike, known: string[], signal?: AbortSignal) {
   async function call(method: string, apiPath: string, body?: unknown): Promise<Json> {
     const res = await fetchImpl(base + apiPath, {
       method,
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'Paddle-Version': String(PADDLE_API_VERSION) },
       body: body === undefined ? undefined : JSON.stringify(body),
+      ...(signal ? { signal } : {}),
     });
     let parsed: Json = {};
     try {
@@ -45,6 +50,7 @@ export function paddleClient(base: string, apiKey: string, fetchImpl: FetchLike,
       const err = parsed?.error ?? {};
       throw new PaddleError(
         redactSecrets(`${method} ${apiPath} failed: ${res.status} ${String(err.code ?? 'unknown_error')}: ${String(err.detail ?? 'no detail')}`, known),
+        res.status,
       );
     }
     return parsed;

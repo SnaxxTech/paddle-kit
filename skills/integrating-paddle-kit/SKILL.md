@@ -23,17 +23,18 @@ Read the target app before deciding: confirm its roles, auth, DB driver, existin
 1. **Pricing source of truth** → `paddle.catalog.json` generated from (or checked against) the app's pricing constants; add a test that catalog totals equal the published prices.
 2. **Store**: Postgres/Neon → `postgresStore({ query })` + kit `MIGRATIONS`; SQLite → `sqliteStore({ db })` + `SQLITE_MIGRATIONS`. Additive `paddle_*` tables only; run **every** entry (001, 002, …) the way the app runs its own migrations, and before deploying the code that needs them.
 3. **Env**: `readBillingEnv(process.env, { requiredPrices, requiredCycles?, requireLaunchAt? })` from `paddle-kit/config`. Construct `createBilling` **only when `config` is non-null**; log `problems` (names only). Pass `owns: config.owns` (every price id in `PADDLE_PRICES`): the SnaxxTech seller account is **shared by several apps**, and every app's webhook receives every product's events. Never construct at import with a possibly-missing secret — CI `next build` and preview deploys run without secrets.
-4. **Webhook route**, null-safe:
+4. **Webhook route**, null-safe (404 off, 503 misconfigured; since v0.6.0):
    ```ts
    // app/api/paddle/route.ts
-   const off = () => new Response(null, { status: problems.length ? 503 : 404 });
-   export const POST = (r: Request) => (billing ? billing.handleWebhook(r) : off());
-   export const GET  = (r: Request) => (billing ? billing.handleHealth(r)  : off()); // PADDLE_HEALTH_TOKEN
+   import { createWebhookRoute } from 'paddle-kit/next';
+   export const { POST, GET } = createWebhookRoute({ billing, problems, healthToken: process.env.PADDLE_HEALTH_TOKEN });
    ```
-   Not Next.js: pass the framework's raw Web `Request` (Hono `c.req.raw`); Express needs `express.raw()` and a `Request` built from the raw body. There are no Hono/Express adapters since v0.4.0. Missed webhooks: `reconcile(billing, { apiKey })` from an existing cron (fetch-based, no Paddle SDK).
+   Not Next.js, same null checks by hand: pass the framework's raw Web `Request` (Hono `c.req.raw`); Express needs `express.raw()` and a `Request` built from the raw body. There are no Hono/Express adapters since v0.4.0. Missed webhooks: `reconcile(billing, { apiKey })` from an existing cron (fetch-based, no Paddle SDK).
 5. **Hooks (one-time/refunds)**: `onTransaction` runs on `transaction.completed` (also renewals → filter `subscriptionId === null`), **at least once**: write order + grant in ONE DB transaction keyed on `transactionId`. `customData` is untrusted — match `tx.items` priceId and grant by quantity; never equality-check amounts (discounts, tax, local currency). Unknown price → persist a review row, don't drop silently. Other products' transactions never reach the hook when `owns` is set (they are ledger rows `ignored` / `not_ours`); don't hand-write that filter in the app. `onAdjustment`: act on `status === 'approved'` and `type === 'full'`; partial → review. **`ctx.known === false`** means the kit never saw the transaction as yours (a refund can arrive before its payment, or the payment predates v0.4.0): record it (e.g. a resolved `refund_unmatched` row the payment path checks) — never return early on it.
 6. **UI**: checkout via `paddle-kit/client` (`items`, `userId`, extra `customData`); poll the app's own state after `checkout.completed` — the webhook, not the browser, grants access.
-7. **CI and the deploy host** install the kit with no token (public since v0.5.0). Secrets never go in the kit: each app keeps its Paddle key, webhook secret and client token in its own env files and host settings. A `git+ssh://` lockfile URL is fine: npm downloads public GitHub dependencies as a tarball, with no SSH key.
+7. **Price**: never hard-code the price in the app. Read it with `getPrice` + `formatPrice` (`paddle-kit/price`), cached by the app (Next.js 16: `"use cache"` + `cacheLife('hours')`), with the old constant as fallback outside the cached function. A changed amount keeps its price id.
+8. **Host env**: paste the block that `paddle-kit-catalog` prints into the host (`--host vercel` prints the commands); a variable only in `.env.local` is missing in production (LeakScan shipped with checkout off this way). Then `npx paddle-kit-doctor --url https://<host>/api/paddle` (token in `PADDLE_HEALTH_TOKEN`) must end `Result: OK` in every environment that takes payments.
+9. **CI and the deploy host** install the kit with no token (public since v0.5.0). Secrets never go in the kit: each app keeps its Paddle key, webhook secret and client token in its own env files and host settings. A `git+ssh://` lockfile URL is fine: npm downloads public GitHub dependencies as a tarball, with no SSH key.
 
 ## Sandbox end-to-end (required before any PR is "done")
 1. `cloudflared tunnel --url http://localhost:<port>` (quick tunnels die — on "Tunnel not found", restart and re-run the catalog CLI to re-point).
@@ -60,6 +61,8 @@ Read the target app before deciding: confirm its roles, auth, DB driver, existin
 | Hand-typed dashboard prices | Prices drift from the landing page |
 | Hand-written "not our product" filter instead of `owns` | Dropped real refunds once (AppCare): a refund of an unseen payment looked foreign |
 | Returning early on `onAdjustment` with `ctx.known === false` | A refund that beat its payment is lost; the payment is then granted |
+| `npx paddle-kit-catalog` outside the app | npm E404: the kit is not on the registry. Run it in the app after install, or `npx --package=github:SnaxxTech/paddle-kit#vX.Y.Z paddle-kit-catalog` |
+| Env only in `.env.local` | The deployed app has billing off or misconfigured; `paddle-kit-doctor` shows it |
 | Treating 409 `in_progress` as an outage | It is a concurrent duplicate; Paddle's retry of it is a 200 duplicate |
 
 ## Monitoring

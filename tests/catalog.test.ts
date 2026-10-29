@@ -14,7 +14,7 @@ import {
   type Catalog,
   type FetchLike,
 } from '../src/catalog/index';
-import { main, parseArgs } from '../src/catalog/cli';
+import { hostEnvBlock, main, npxHint, parseArgs } from '../src/catalog/cli';
 
 const KEY = 'pdl_sdbx_apikey_SECRET_VALUE';
 const WH_SECRET = 'pdl_ntfset_SECRET_endpoint_key';
@@ -465,15 +465,19 @@ describe('syncCatalog', () => {
 
 describe('paddle-kit-catalog cli', () => {
   test('parseArgs defaults, flags and errors', () => {
-    expect(parseArgs([])).toEqual({ catalog: 'paddle.catalog.json', envFile: '.env.local', teardown: false, live: false, help: false });
-    expect(parseArgs(['--catalog', 'c.json', '--env-file', 'e', '--webhook-url', 'https://x.example/h', '--teardown', '--live'])).toEqual({
+    expect(parseArgs([])).toEqual({ catalog: 'paddle.catalog.json', envFile: '.env.local', teardown: false, live: false, showSecrets: false, help: false });
+    expect(parseArgs(['--catalog', 'c.json', '--env-file', 'e', '--webhook-url', 'https://x.example/h', '--teardown', '--live', '--host', 'vercel', '--show-secrets'])).toEqual({
       catalog: 'c.json',
       envFile: 'e',
       webhookUrl: 'https://x.example/h',
       teardown: true,
       live: true,
+      host: 'vercel',
+      showSecrets: true,
       help: false,
     });
+    expect(() => parseArgs(['--host', 'netlify'])).toThrow('unknown --host "netlify" (supported: vercel)');
+    expect(() => parseArgs(['--host'])).toThrow('--host needs a value');
     // the https rule lives once, in syncCatalog (tested below with every non-https shape), before any request
     expect(parseArgs(['--webhook-url', 'http://x']).webhookUrl).toBe('http://x');
     expect(() => parseArgs(['--catalog'])).toThrow('--catalog needs a value');
@@ -615,5 +619,124 @@ describe('fix round 1', () => {
     chmodSync(file, 0o644);
     await syncCatalog({ apiKey: KEY, catalog: CATALOG, envFile: file, teardown: true, fetch: paddle.fetch, log: () => {} });
     expect(mode(file)).toBe(0o600);
+  });
+});
+
+describe('host env block', () => {
+  const PRICES = '{"team25":{"monthly":"pri_1","yearly":"pri_2"},"pack5":"pri_3"}';
+  const full = { PADDLE_ENV: 'sandbox', PADDLE_PRICES: PRICES, PADDLE_NOTIFICATION_WEBHOOK_SECRET: WH_SECRET, NEXT_PUBLIC_PADDLE_CLIENT_TOKEN: TOKEN, PADDLE_API_KEY: KEY, OTHER: 'x' };
+
+  test('names and values, the secret hidden as a comment with its last 4 characters, never the API key', () => {
+    const lines = hostEnvBlock(full, { envFile: '.env.local', live: false, showSecrets: false });
+    const text = lines.join('\n');
+    expect(lines).toContain('PADDLE_ENV=sandbox');
+    expect(lines).toContain(`PADDLE_PRICES=${PRICES}`);
+    expect(lines).toContain(`NEXT_PUBLIC_PADDLE_CLIENT_TOKEN=${TOKEN}`);
+    expect(lines).toContain('# PADDLE_NOTIFICATION_WEBHOOK_SECRET=<secret ending in _key: copy it from .env.local, or run with --show-secrets>');
+    expect(text).not.toContain(WH_SECRET);
+    expect(text).not.toContain(KEY);
+    expect(text).not.toContain('OTHER');
+    expect(text).not.toContain('vercel env add');
+    expect(lines[0]).toContain('sandbox: Preview and Development');
+    // readEnvFile parses the uncommented lines back to the same values: the block is valid dotenv.
+    const file = tmpEnv(lines.join('\n'));
+    expect(readEnvFile(file)).toEqual({ PADDLE_ENV: 'sandbox', PADDLE_PRICES: PRICES, NEXT_PUBLIC_PADDLE_CLIENT_TOKEN: TOKEN });
+  });
+
+  test('--show-secrets prints the secret; a short secret shows no tail', () => {
+    expect(hostEnvBlock(full, { envFile: '.env.local', live: false, showSecrets: true })).toContain(`PADDLE_NOTIFICATION_WEBHOOK_SECRET=${WH_SECRET}`);
+    expect(hostEnvBlock({ ...full, PADDLE_NOTIFICATION_WEBHOOK_SECRET: 'short' }, { envFile: 'e', live: false, showSecrets: false })).toContain(
+      '# PADDLE_NOTIFICATION_WEBHOOK_SECRET=<secret: copy it from e, or run with --show-secrets>',
+    );
+  });
+
+  test('a run without --webhook-url says which variables are still missing', () => {
+    const lines = hostEnvBlock({ PADDLE_ENV: 'sandbox', PADDLE_PRICES: PRICES }, { envFile: '.env.local', live: false, showSecrets: false });
+    expect(lines).toContain('# PADDLE_NOTIFICATION_WEBHOOK_SECRET is not set yet: run again with --webhook-url');
+    expect(lines).toContain('# NEXT_PUBLIC_PADDLE_CLIENT_TOKEN is not set yet: run again with --webhook-url');
+  });
+
+  test('--host vercel: sandbox goes to preview and development, live to production; quoted values; secret not piped', () => {
+    const sandbox = hostEnvBlock(full, { envFile: '.env.local', live: false, host: 'vercel', showSecrets: false }).filter((l) => l.includes('vercel env add'));
+    expect(sandbox).toEqual([
+      "printf '%s' 'sandbox' | vercel env add PADDLE_ENV preview",
+      "printf '%s' 'sandbox' | vercel env add PADDLE_ENV development",
+      `printf '%s' '${PRICES}' | vercel env add PADDLE_PRICES preview`,
+      `printf '%s' '${PRICES}' | vercel env add PADDLE_PRICES development`,
+      'vercel env add PADDLE_NOTIFICATION_WEBHOOK_SECRET preview   # asks for the value: copy it from .env.local',
+      'vercel env add PADDLE_NOTIFICATION_WEBHOOK_SECRET development   # asks for the value: copy it from .env.local',
+      `printf '%s' '${TOKEN}' | vercel env add NEXT_PUBLIC_PADDLE_CLIENT_TOKEN preview`,
+      `printf '%s' '${TOKEN}' | vercel env add NEXT_PUBLIC_PADDLE_CLIENT_TOKEN development`,
+    ]);
+    const liveEnv = { ...full, PADDLE_ENV: 'production', NEXT_PUBLIC_PADDLE_CLIENT_TOKEN: "live_it's" };
+    const live = hostEnvBlock(liveEnv, { envFile: '.env.production.local', live: true, host: 'vercel', showSecrets: true });
+    expect(live[0]).toContain('live: Production');
+    expect(live.filter((l) => l.includes('vercel env add')).every((l) => l.endsWith(' production'))).toBe(true);
+    expect(live).toContain(`printf '%s' '${WH_SECRET}' | vercel env add PADDLE_NOTIFICATION_WEBHOOK_SECRET production`);
+    expect(live).toContain(`printf '%s' 'live_it'\\''s' | vercel env add NEXT_PUBLIC_PADDLE_CLIENT_TOKEN production`);
+  });
+
+  test('the CLI prints the block after a successful sync, not after teardown, and never the key or the secret', async () => {
+    const paddle = fakePaddle();
+    vi.stubGlobal('fetch', paddle.fetch);
+    const dir = mkdtempSync(path.join(tmpdir(), 'paddle-catalog-cli-'));
+    const envFile = path.join(dir, '.env.local');
+    const catalog = path.join(dir, 'c.json');
+    writeFileSync(envFile, `PADDLE_API_KEY=${KEY}\n`);
+    writeFileSync(catalog, JSON.stringify(CATALOG));
+    const prev = process.env.PADDLE_API_KEY;
+    delete process.env.PADDLE_API_KEY;
+    try {
+      const run = await captured(() => main(['--catalog', catalog, '--env-file', envFile, '--webhook-url', HOOK, '--host', 'vercel']));
+      expect(run.result).toBe(0);
+      expect(run.output).toContain('Set these on the host too');
+      expect(run.output).toContain(`NEXT_PUBLIC_PADDLE_CLIENT_TOKEN=${TOKEN}`);
+      expect(run.output).toContain('vercel env add PADDLE_NOTIFICATION_WEBHOOK_SECRET preview');
+      expect(run.output).not.toContain(KEY);
+      expect(run.output).not.toContain(WH_SECRET);
+      const down = await captured(() => main(['--catalog', catalog, '--env-file', envFile, '--teardown']));
+      expect(down.result).toBe(0);
+      expect(down.output).not.toContain('Set these on the host');
+    } finally {
+      if (prev !== undefined) process.env.PADDLE_API_KEY = prev;
+    }
+  });
+});
+
+describe('npx hint', () => {
+  const NPX = '/home/u/.npm/_npx/3f2a/node_modules/.bin/paddle-kit-catalog';
+  const app = (pkg: object | null) => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'paddle-npx-'));
+    if (pkg) writeFileSync(path.join(dir, 'package.json'), JSON.stringify(pkg));
+    return dir;
+  };
+
+  test('only from the npx cache, and only outside an app that depends on the kit', () => {
+    const hint = npxHint(NPX, app(null));
+    expect(hint).toMatch(/^Note: paddle-kit runs from the npx cache, and .+ is not an app that depends on it/);
+    expect(hint).toContain('npm i github:SnaxxTech/paddle-kit#v0.6.0');
+    expect(hint!.split('\n')).toHaveLength(1);
+    expect(npxHint(NPX, app({ name: 'other', dependencies: { next: '16' } }))).not.toBeNull();
+    expect(npxHint('C:\\Users\\u\\AppData\\Local\\npm-cache\\_npx\\3f2a\\node_modules\\paddle-kit\\dist\\catalog\\cli.js', app(null))).not.toBeNull();
+    expect(npxHint(NPX, app({ dependencies: { 'paddle-kit': 'github:SnaxxTech/paddle-kit#v0.6.0' } }))).toBeNull();
+    expect(npxHint(NPX, app({ devDependencies: { 'paddle-kit': 'github:SnaxxTech/paddle-kit#v0.6.0' } }))).toBeNull();
+    expect(npxHint('/app/node_modules/.bin/paddle-kit-catalog', app(null))).toBeNull();
+    const broken = app(null);
+    writeFileSync(path.join(broken, 'package.json'), '{nope');
+    expect(npxHint(NPX, broken)).not.toBeNull();
+  });
+
+  test('main prints it on stderr, once, before anything else', async () => {
+    const dir = app(null);
+    const cwd = process.cwd();
+    process.chdir(dir);
+    try {
+      const run = await captured(() => main(['--help'], NPX));
+      expect(run.result).toBe(0);
+      expect(run.output.startsWith('Note: paddle-kit runs from the npx cache')).toBe(true);
+      expect(run.output.match(/npx cache/g)).toHaveLength(1);
+    } finally {
+      process.chdir(cwd);
+    }
   });
 });

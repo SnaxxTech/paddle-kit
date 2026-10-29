@@ -1,10 +1,11 @@
 {
   "name": "paddle-kit",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "bin": {
-    "paddle-kit-catalog": "./dist/catalog/cli.js"
+    "paddle-kit-catalog": "./dist/catalog/cli.js",
+    "paddle-kit-doctor": "./dist/doctor/cli.js"
   },
   "engines": {
     "node": ">=20"
@@ -52,6 +53,10 @@
     "./catalog": {
       "types": "./dist/catalog/index.d.ts",
       "default": "./dist/catalog/index.js"
+    },
+    "./price": {
+      "types": "./dist/price/index.d.ts",
+      "default": "./dist/price/index.js"
     }
   },
   "scripts": {

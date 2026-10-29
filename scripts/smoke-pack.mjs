@@ -7,7 +7,7 @@ const tgz = execFileSync('npm', ['pack', '--silent'], { encoding: 'utf8' }).trim
 const dir = mkdtempSync(join(tmpdir(), 'paddle-kit-smoke-'));
 writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'smoke', type: 'module', private: true }));
 execFileSync('npm', ['i', '--silent', resolve(tgz), '@paddle/paddle-js', 'typescript@5.9.3', '@types/node'], { cwd: dir, stdio: 'inherit' });
-const subpaths = ['core', 'memory', 'postgres', 'sqlite', 'next', 'client', 'reconcile', 'plan', 'config', 'catalog'];
+const subpaths = ['core', 'memory', 'postgres', 'sqlite', 'next', 'client', 'reconcile', 'plan', 'config', 'catalog', 'price'];
 const code = subpaths.map((p) => `await import('paddle-kit/${p}');`).join('\n') + "\nconsole.log('all subpaths import');";
 // CommonJS-style resolvers (Playwright, tsx, Jest) resolve through the "default" condition.
 const resolveCheck = subpaths.map((p) => `require.resolve('paddle-kit/${p}');`).join('\n') + "\nconsole.log('all subpaths resolve via require');";
@@ -26,13 +26,14 @@ writeFileSync(join(dir, 'check.mts'), `import type { Billing } from 'paddle-kit/
 import { memoryStore } from 'paddle-kit/memory';
 import { postgresStore } from 'paddle-kit/postgres';
 import { sqliteStore } from 'paddle-kit/sqlite';
-import { createNextRoute } from 'paddle-kit/next';
+import { createNextRoute, createWebhookRoute } from 'paddle-kit/next';
+import { getPrice, formatPrice, PriceError, type Price } from 'paddle-kit/price';
 import { createCheckout } from 'paddle-kit/client';
 import { reconcile } from 'paddle-kit/reconcile';
 import { planOf, type Plan } from 'paddle-kit/plan';
 import { readBillingEnv, type BillingEnv, type PriceMap } from 'paddle-kit/config';
 import { syncCatalog, validateCatalog, type Catalog } from 'paddle-kit/catalog';
-export type T = [Billing, typeof memoryStore, typeof postgresStore, typeof sqliteStore, typeof createNextRoute, typeof createCheckout, typeof reconcile, typeof planOf, Plan, typeof readBillingEnv, BillingEnv, PriceMap, typeof syncCatalog, typeof validateCatalog, Catalog];
+export type T = [Billing, typeof memoryStore, typeof postgresStore, typeof sqliteStore, typeof createNextRoute, typeof createWebhookRoute, typeof createCheckout, typeof reconcile, typeof planOf, Plan, typeof readBillingEnv, BillingEnv, PriceMap, typeof syncCatalog, typeof validateCatalog, Catalog, typeof getPrice, typeof formatPrice, PriceError, Price];
 `);
 execFileSync('npx', ['tsc', '-p', '.'], { cwd: dir, stdio: 'inherit' });
 console.log('types resolve under NodeNext');
@@ -44,6 +45,10 @@ if ((statSync(resolve(dir, 'node_modules/paddle-kit/dist/catalog/cli.js')).mode 
 const help = execFileSync(bin, ['--help'], { cwd: dir, encoding: 'utf8' });
 if (!help.includes('--webhook-url')) throw new Error('paddle-kit-catalog --help printed no usage');
 console.log('paddle-kit-catalog bin runs');
+const doctorBin = join(dir, 'node_modules', '.bin', 'paddle-kit-doctor');
+if (!existsSync(doctorBin)) throw new Error('paddle-kit-doctor bin missing after install');
+if (!execFileSync(doctorBin, ['--help'], { cwd: dir, encoding: 'utf8' }).includes('--url')) throw new Error('paddle-kit-doctor --help printed no usage');
+console.log('paddle-kit-doctor bin runs');
 
 // Behaviour through the installed package: signed webhooks with shared-seller filtering and the known flag.
 writeFileSync(join(dir, 'webhook.mjs'), `
