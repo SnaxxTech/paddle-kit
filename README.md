@@ -24,11 +24,25 @@ What the kit does for you:
 | Sell one-time items and handle refunds | Two hooks: `onTransaction`, `onAdjustment` |
 | Trials and "free until launch" | `planOf()` in `paddle-kit/plan` |
 | Check the env variables | `readBillingEnv()` names the bad variable, never its value |
-| Create products and prices in Paddle | `npx paddle-kit-catalog` reads a JSON file |
+| Create products and prices in Paddle | `npx paddle-kit-catalog` reads a JSON file, and prints the variables for your host |
 | Open the checkout in the browser | `createCheckout()` in `paddle-kit/client` |
+| Show the price that is set in Paddle | `getPrice()` and `formatPrice()` in `paddle-kit/price` (since v0.6.0) |
+| A webhook route that is safe without env | `createWebhookRoute()` in `paddle-kit/next` (since v0.6.0) |
+| Check a deployed app | `npx paddle-kit-doctor --url …` (since v0.6.0) |
 | Repair after an outage | `reconcile()` copies subscriptions from the Paddle API |
 
 What it does **not** do: in-app purchases in mobile store apps. Google Play and the App Store require their own billing for digital goods. Paddle is for web checkout only.
+
+## Add the kit to a new Next.js app (since v0.6.0)
+
+1. Install: `npm i github:SnaxxTech/paddle-kit#v0.6.0`.
+2. Run one CLI command in the app folder: `npx paddle-kit-catalog --webhook-url https://<host>/api/paddle` (see Catalog CLI). It makes the product, the prices, the webhook destination and the client token, and writes `.env.local`.
+3. Paste the host block that the CLI prints into your host's settings (Vercel: add `--host vercel` to get the commands). Redeploy.
+4. Add `lib/billing.ts` and the route file `app/api/paddle/route.ts` (see Next.js example), and call `billing.hasAccess` where a paid feature starts.
+5. Set the default payment link in the Paddle dashboard (Integration checklist, step 1).
+6. Check the deployed app: `npx paddle-kit-doctor --url https://<host>/api/paddle --token <PADDLE_HEALTH_TOKEN>`.
+
+The full list, with the sandbox test and the go-live steps, is the Integration checklist at the end of this file.
 
 ## What v0.4.0 changed (simple words)
 
@@ -52,8 +66,13 @@ What it does **not** do: in-app purchases in mobile store apps. Google Play and 
 ## Install
 
 ```bash
-npm i github:SnaxxTech/paddle-kit#v0.5.0
+npm i github:SnaxxTech/paddle-kit#v0.6.0
 ```
+
+**The kit is not on the npm registry.** So `npx paddle-kit-catalog` in a folder that has not installed the kit fails with `npm error 404 Not Found`: npx looks for a package of that name on the registry. Two ways work:
+
+- Run it in the app, after `npm i github:SnaxxTech/paddle-kit#v0.6.0`. Then `npx paddle-kit-catalog …` (and `npx paddle-kit-doctor …`) use the installed copy.
+- Outside an app: `npx --package=github:SnaxxTech/paddle-kit#v0.6.0 paddle-kit-catalog …` (the same for `paddle-kit-doctor`). The catalog CLI then prints one line to say that it runs from the npx cache, because it writes its env file in the current folder.
 
 - The repository is public (since v0.5.0). CI and the host install it with no token. Your secrets never go in this repository: each app keeps its own Paddle keys and webhook secret in its own env files and host settings (see Environment variables).
 - The kit pins the Paddle API to version 1: each REST call sends `Paddle-Version: 1`, and the catalog CLI sets `api_version: 1` on the webhook destination. A new Paddle API version can then not change the payloads that the kit reads. Paddle refuses a version older than the account's default. So if a future Paddle account has a default newer than 1, each REST call and the destination step fail with `PaddleError`. This is on purpose: the kit's parsers must be updated first.
@@ -67,7 +86,7 @@ npm i github:SnaxxTech/paddle-kit#v0.5.0
 |---|---|---|
 | `PADDLE_ENV` | server | `sandbox` or `production`. |
 | `PADDLE_NOTIFICATION_WEBHOOK_SECRET` | server | The secret key of the notification destination. Required: `createBilling` throws if it is missing or empty. `billing.config` never contains it. |
-| `PADDLE_API_KEY` | `reconcile`, catalog CLI | `pdl_sdbx_...` for sandbox, `pdl_live_...` for production. A key that does not agree with `PADDLE_ENV` throws. Keys without these prefixes are refused. |
+| `PADDLE_API_KEY` | `reconcile`, `getPrice`, catalog CLI | `pdl_sdbx_...` for sandbox, `pdl_live_...` for production. A key that does not agree with `PADDLE_ENV` throws. Keys without these prefixes are refused. |
 | `NEXT_PUBLIC_PADDLE_CLIENT_TOKEN` | browser | `test_...` for sandbox, `live_...` for production. A token that does not agree with the environment throws in `createCheckout`. |
 | `PADDLE_PRICES` | server | A JSON price map, for example `{ "team": { "monthly": "pri_..", "yearly": "pri_.." }, "pack": "pri_.." }`. The catalog CLI writes it. `readBillingEnv` checks it. |
 | `BILLING_LAUNCH_AT` | server | Optional. The launch time, in ISO format with a timezone. |
@@ -75,6 +94,8 @@ npm i github:SnaxxTech/paddle-kit#v0.5.0
 | `PADDLE_HEALTH_TOKEN` | server | Optional. Turns on the health route (see Monitoring). |
 
 `readBillingEnv` (below) checks all of these at the same time. It names the bad variable, so that you do not get an error later.
+
+**Set them on the host too, not only in `.env.local`.** `.env.local` is on your computer only. A deployed app reads only the variables in the host's settings (Vercel: Project > Settings > Environment Variables). A production app once had its checkout turned off for this reason: `PADDLE_PRICES` and `NEXT_PUBLIC_PADDLE_CLIENT_TOKEN` were only in `.env.local`. After each run, the catalog CLI prints the block to paste (see Catalog CLI), and `paddle-kit-doctor` shows what the deployed app sees. `NEXT_PUBLIC_` variables are read when the app is built, so redeploy after each change.
 
 **Production guard:** `environment: 'production'` throws when `NODE_ENV` is set to a value that is not `'production'`. To skip this guard, pass `allowProductionInDev: true`. Runtimes without `NODE_ENV` (for example Cloudflare Workers) skip the guard.
 
@@ -105,34 +126,47 @@ Timestamps are kept to the millisecond (Paddle sends microseconds). When two eve
 
 ```ts
 import { Pool } from '@neondatabase/serverless';
+import { readBillingEnv } from 'paddle-kit/config';
 import { createBilling } from 'paddle-kit/core';
 import { postgresStore } from 'paddle-kit/postgres';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-export const billing = createBilling({
-  environment: process.env.PADDLE_ENV === 'production' ? 'production' : 'sandbox',
-  webhookSecret: process.env.PADDLE_NOTIFICATION_WEBHOOK_SECRET,
-  store: postgresStore({ query: (text, params) => pool.query(text, params) }),
-  entitlements: {
-    pri_01abc: ['pro'],          // price id -> features it unlocks
-    pri_01def: ['pro', 'team'],
-  },
-  pastDueGraceDays: 7,
-  healthToken: process.env.PADDLE_HEALTH_TOKEN, // optional, see Monitoring
-});
-```
+export const { config, problems } = readBillingEnv(process.env, { requiredPrices: ['pro'] });
+if (problems.length > 0) console.error('billing misconfigured:', problems.join('; ')); // names only, never values
 
-In a real app, build `billing` only when the env is valid. See "Env validation" below.
+// Built only from a valid config: a CI or preview build without the secrets still builds. null = billing off.
+export const billing = config
+  ? createBilling({
+      environment: config.environment,
+      webhookSecret: config.webhookSecret,
+      store: postgresStore({ query: (text, params) => pool.query(text, params) }),
+      entitlements: { [config.prices.pro as string]: ['pro'] }, // price id -> features it unlocks (a cycle map: one entry per id)
+      owns: config.owns, // the seller account is shared by several apps (see Shared seller accounts)
+      pastDueGraceDays: 7,
+      healthToken: config.healthToken, // optional, see Monitoring
+    })
+  : null;
+```
 
 `app/api/paddle/route.ts`
 
 ```ts
-import { createNextRoute } from 'paddle-kit/next';
-import { billing } from '@/lib/billing';
+import { createWebhookRoute } from 'paddle-kit/next';
+import { billing, problems } from '@/lib/billing';
 
-export const { POST, GET } = createNextRoute(billing); // POST = webhook, GET = health (404 unless healthToken is set)
+export const { POST, GET } = createWebhookRoute({ billing, problems, healthToken: process.env.PADDLE_HEALTH_TOKEN });
 ```
+
+What `createWebhookRoute` answers:
+
+| State | POST (Paddle) | GET (health) |
+|---|---|---|
+| Billing on | `billing.handleWebhook` | `billing.handleHealth`; 404 `{ "error": "health_off" }` without `healthToken` |
+| Billing off: no billing variable set, `problems` empty | 404 | 404 `{ "error": "billing_off" }` |
+| Misconfigured: `problems` not empty | 503 | 503; with `Authorization: Bearer <healthToken>` also `{ "error": "misconfigured", "problems": [...] }` (names only) |
+
+It never builds `billing` itself, so a missing secret cannot throw when the route file is imported. The `healthToken` option is used only while billing is off or misconfigured (then `config` is null, so `billing` has no token): `paddle-kit-doctor` uses it to show the problem names. `createNextRoute(billing)` (a `billing` that is never null) still works. Other frameworks: see Other frameworks.
 
 `components/UpgradeButton.tsx` (client component)
 
@@ -157,6 +191,8 @@ export function UpgradeButton({ userId, email }: { userId: string; email: string
 }
 ```
 
+`billing` can be `null` (billing off). Callers check it: `billing ? await billing.hasAccess(userId, 'pro') : false`, or your app's free experience.
+
 Always open the checkout with `createCheckout(...).open(...)`. It sets `customData.userId`, and the kit uses this value to link a subscription to your user. `open` throws if `userId` is empty.
 
 `app/dashboard/page.tsx` (server component)
@@ -166,7 +202,7 @@ import { billing } from '@/lib/billing';
 
 export default async function Dashboard() {
   const userId = await getCurrentUserId(); // your auth
-  const pro = await billing.hasAccess(userId, 'pro');
+  const pro = billing ? await billing.hasAccess(userId, 'pro') : false;
   return pro ? <ProDashboard /> : <UpgradePrompt />;
 }
 ```
@@ -221,6 +257,48 @@ checkout.open({ items: [{ priceId: 'pri_base', quantity: 1 }, { priceId: 'pri_ex
 checkout.open({ items: [{ priceId: 'pri_01abc', quantity: 1 }], userId: 'org_1', customData: { order_id: 'ord_7' } });
 // After payment, Paddle.js sends checkout.completed (onEvent above). Go to your next page there; successUrl was removed in v0.4.0.
 ```
+
+## Show the price from Paddle (`paddle-kit/price`, since v0.6.0)
+
+Keep the price in Paddle only. When the amount changes, the app shows the new amount, with no code change and no deploy.
+
+- **A changed amount keeps its price id.** Paddle's `PATCH /prices/{id}` accepts a new `unit_price`, and the catalog CLI changes an amount in place (the same id). So `PADDLE_PRICES` stays the same, and an app that reads the price follows the change.
+- `getPrice(priceId, { apiKey, environment, fetch?, timeoutMs? })` reads `GET /prices/{id}` with `Paddle-Version: 1`. It returns `{ id, amount, currency, interval, name, status }`. `amount` is a string in the lowest unit (`"1500"` = $15.00). `interval` is `null` for a one-time price, else `{ interval: 'month', frequency: 1 }`.
+- Errors are `PriceError` (a `PaddleError`) with `code`: `unauthorized` (401/403, or a key for the other environment), `not_found` (404, or an id that is not `pri_…`), `timeout` (default 5 s), `network`, `malformed` (a 2xx answer that is not a price), `http` (any other status, in `status`). The message never contains the key.
+- `formatPrice(amount, currency, locale = 'en-US')` uses `Intl.NumberFormat`. Whole amounts have no cents: `"1500"` USD is `$15`, `"999"` is `$9.99`. Zero-decimal currencies are not divided by 100: `"1500"` JPY is `¥1,500`.
+- The kit does **not** cache. Each call is one request to Paddle. Cache it in the app.
+- It needs `PADDLE_API_KEY` on the server (on the host too). Never import it in a client component: the key must not reach the browser.
+
+Next.js 16 with Cache Components (`cacheComponents: true` in `next.config.ts`):
+
+```ts
+// lib/price.ts
+import { cacheLife } from 'next/cache';
+import { formatPrice, getPrice } from 'paddle-kit/price';
+import { config } from '@/lib/billing';
+
+const BUILT_IN_PRICE = '$15'; // shown when Paddle cannot be read
+
+async function paddlePrice(priceId: string, environment: 'sandbox' | 'production'): Promise<string> {
+  'use cache';
+  cacheLife('hours'); // a price change shows within about an hour
+  const price = await getPrice(priceId, { apiKey: process.env.PADDLE_API_KEY!, environment });
+  return formatPrice(price.amount, price.currency);
+}
+
+export async function proPrice(): Promise<string> {
+  if (!config || !process.env.PADDLE_API_KEY) return BUILT_IN_PRICE; // billing off
+  try {
+    return await paddlePrice(config.prices.pro as string, config.environment);
+  } catch {
+    return BUILT_IN_PRICE; // PriceError: keep the page up
+  }
+}
+```
+
+The fallback is outside the cached function, so that a short Paddle outage is not stored as the price for hours. **UNVERIFIED:** we did not run this example in a Next.js 16 app.
+
+Paddle shows the buyer a local price in checkout (for example EUR). `getPrice` returns the base price only. For localised prices on a pricing page, use Paddle.js `PricePreview`.
 
 ## Shared seller accounts (`owns`)
 
@@ -449,6 +527,8 @@ PADDLE_API_KEY=pdl_sdbx_... npx paddle-kit-catalog --catalog paddle.catalog.json
 | `--env-file <path>` | The env file. The CLI reads `PADDLE_API_KEY` from it (after the process environment) and writes the results to it. Default: `.env.local`. The file gets mode 0600. The CLI writes each key when its step is done, and does not touch other lines. |
 | `--teardown` | Archive the prices and the product that this tool made, and turn off its destination. |
 | `--live` | Allow a live (`pdl_live_`) key. Without this flag, the CLI refuses all keys except sandbox keys. |
+| `--host vercel` | Also print the `vercel env add` commands for the host block (since v0.6.0). The CLI never runs them. |
+| `--show-secrets` | Print the webhook secret in the host block. Without it, the secret is a comment that shows only its last 4 characters. |
 
 What you must know:
 
@@ -458,6 +538,9 @@ What you must know:
 - **After `--teardown`,** `PADDLE_PRICES` in the env file still points to the archived prices. Remove it or make it again before the app reads it.
 - The CLI never shows the key. It removes the key from all output and error messages.
 - A top-level `"$schema"` string in the catalog JSON is allowed, and the CLI ignores it.
+- **The host block (since v0.6.0).** After each run (except `--teardown`), the CLI prints the variables that the deployed app needs, from the env file: `PADDLE_ENV`, `PADDLE_PRICES`, `PADDLE_NOTIFICATION_WEBHOOK_SECRET` and `NEXT_PUBLIC_PADDLE_CLIENT_TOKEN`. Paste it into your host (sandbox: Preview and Development; `--live`: Production). The secret is a commented line unless you pass `--show-secrets`, so a pasted block never sets a placeholder as the secret: the deployed app then reports the missing variable instead. Never paste the block into a chat or a ticket with `--show-secrets`.
+- With `--host vercel`, the block also has one `printf '%s' '<value>' | vercel env add <NAME> <environment>` line per variable and environment, and `vercel env add <NAME> <environment>` (it asks for the value) for the hidden secret. **UNVERIFIED:** we did not run these commands against a real Vercel project. Check that `vercel env add … preview` from a pipe does not ask for a Git branch in your Vercel CLI version.
+- The CLI prints the four variables that it writes. It also lists, as a comment, the ones that it cannot know: `PADDLE_API_KEY` (only if the app uses `reconcile` or `getPrice`), `PADDLE_HEALTH_TOKEN`, `BILLING_LAUNCH_AT` and `BILLING_ENFORCE`.
 
 ## Moving an app that already has a catalog
 
@@ -544,6 +627,18 @@ Limits of this rule:
 - The trade-off: if all of an app's paying subscribers are on a retired price that is no longer in `owns`, their renewals are `mirrored`, and the rule gives a false alarm. Add the retired price to `owns`.
 - v0.4.0 recorded refunds of transactions it never saw, `customer.*` events and events kept only because their subscription was mirrored with reason `null`. Such rows count in `lastOwnedAt` until they are older than your N days.
 
+**Deploy check: `paddle-kit-doctor` (since v0.6.0).** It calls the health route of a deployed app and says in plain words what is wrong:
+
+```bash
+npx paddle-kit-doctor --url https://app.example.com/api/paddle --token "$PADDLE_HEALTH_TOKEN"
+```
+
+- `--token` defaults to the `PADDLE_HEALTH_TOKEN` environment variable, so you can keep the token out of your shell history. The token is never printed.
+- It shows: reachable or not, billing on or off, the environment and kit version, the env problems by name, the last event time, and the last failure reason with its meaning (for example `signature_mismatch`: the webhook secret on the host does not match the destination).
+- **Exit 1 on a problem:** not reachable, a redirect (it does not follow it), a refused token, billing off, the health route off, misconfigured, `store_error`, or a `signature_mismatch`, `store_error` or `hook_error` in the last 24 hours. Other failure reasons (often bots) and "no event yet" are shown, but exit 0.
+- The problem names and `billing_off` / `health_off` need a route made with `createWebhookRoute` (v0.6.0). For the names, pass `healthToken` to it. An older route answers a plain 404 or 503, and the doctor says what that can mean.
+- `https` only (http only for `localhost`), because the token is in the request. Timeout: `--timeout <ms>`, default 10000.
+
 **Reason codes:** `missing_body`, `body_too_large`, `bad_signature_header`, `signature_mismatch`, `stale_timestamp`, `bad_json`, `bad_payload`, `unknown_event`, `no_user_id`, `out_of_order`, `store_error`, `hook_error`, `not_ours`, `unmatched`, `mirrored`.
 
 - `not_ours` (v0.4.0) is `ignored`. It is never a failure.
@@ -594,21 +689,24 @@ Do these steps one time for each app: first in sandbox, then again for live.
    4. Start Paddle.js when that page loads (for example, call `createCheckout` in an effect on mount, not only in a button click). Paddle opens a checkout link from the `_ptxn` query parameter when the page loads.
 
    We found no API for this setting (**UNVERIFIED** that there is none).
-2. **Make the catalog.** Run `paddle-kit-catalog --webhook-url https://<host>/api/paddle` (see Catalog CLI). Read the table that it shows. Never copy the webhook secret by hand.
-3. **Check the env.** Deploy with `readBillingEnv`. Make sure that `problems` is empty in the deployed environment, not only on your computer.
-4. **Install in CI and on the host.** The kit is public since v0.5.0, so `npm ci` needs no token. An app that used the old private-repo recipe can delete the `PADDLE_KIT_READ_TOKEN` secret and its `git config ... insteadOf` step. A lockfile with a `git+ssh://` URL for the kit also installs with no SSH key: npm downloads public GitHub dependencies as a tarball (tested with npm 10.8.2, SSH turned off, no GitHub login). Each host is **UNVERIFIED** until its first install.
-5. **A tunnel restart changes the URL.** A quick tunnel gets a new hostname each time it starts. Run the catalog CLI again with the new `--webhook-url`. It should move the existing destination and keep its secret. **UNVERIFIED**: after a restart, check that `PADDLE_NOTIFICATION_WEBHOOK_SECRET` in the env file still matches the destination.
-6. **Do a test checkout.** In sandbox, pay with the test card `4242 4242 4242 4242`, any future expiry date and any CVC. Make sure that `subscription.*` and `transaction.completed` arrive, and that `hasAccess` changes.
-7. **Do the wrong-secret drill.**
-   1. Set `PADDLE_NOTIFICATION_WEBHOOK_SECRET` to a wrong value. Deploy.
-   2. Send a simulator event. You must see HTTP 401 and `lastFailureReason: "signature_mismatch"` in health.
-   3. Put back the real secret. **Deploy again** (an env change is a deploy).
-   4. Make sure that the next real event is accepted.
-8. **Go live.** Do steps 1–3, 6 and 7 again with live credentials:
-   - Run the CLI with `--live` and a **separate env file** (`--env-file .env.production.local`, never the dev `.env.local`). Then a live key and a `test_` token cannot be in one file.
-   - Use `PADDLE_ENV=production` and a `live_` client token.
+2. **Install the kit in the app:** `npm i github:SnaxxTech/paddle-kit#v0.6.0`. The kit is not on the npm registry, so run the CLIs in the app folder (or see Install for `npx --package=…`).
+3. **Make the catalog.** Run `npx paddle-kit-catalog --webhook-url https://<host>/api/paddle` (see Catalog CLI). Read the table that it shows. Never copy the webhook secret by hand.
+4. **Put the variables on the host.** Paste the host block that the CLI prints (`--host vercel` prints the commands). Add `PADDLE_HEALTH_TOKEN` (any long random value), and `PADDLE_API_KEY` if the app uses `getPrice` or `reconcile`. Redeploy.
+5. **Add the code:** `lib/billing.ts` with `readBillingEnv`, the route file with `createWebhookRoute` and the checks with `hasAccess` (see Next.js example). Optional: show the price with `getPrice` (see Show the price from Paddle), so that the price lives only in Paddle.
+6. **Check the deployed app:** `npx paddle-kit-doctor --url https://<host>/api/paddle --token <PADDLE_HEALTH_TOKEN>`. It must say `Billing: on` with the right environment, and `Result: OK`. Do this in each environment that takes payments (preview and production), not only on your computer.
+7. **Install in CI and on the host.** The kit is public since v0.5.0, so `npm ci` needs no token. An app that used the old private-repo recipe can delete the `PADDLE_KIT_READ_TOKEN` secret and its `git config ... insteadOf` step. A lockfile with a `git+ssh://` URL for the kit also installs with no SSH key: npm downloads public GitHub dependencies as a tarball (tested with npm 10.8.2, SSH turned off, no GitHub login). Each host is **UNVERIFIED** until its first install.
+8. **A tunnel restart changes the URL.** A quick tunnel gets a new hostname each time it starts. Run the catalog CLI again with the new `--webhook-url`. It should move the existing destination and keep its secret. **UNVERIFIED**: after a restart, check that `PADDLE_NOTIFICATION_WEBHOOK_SECRET` in the env file still matches the destination.
+9. **Do a test checkout.** In sandbox, pay with the test card `4242 4242 4242 4242`, any future expiry date and any CVC. Make sure that `subscription.*` and `transaction.completed` arrive, and that `hasAccess` changes.
+10. **Do the wrong-secret drill.**
+    1. Set `PADDLE_NOTIFICATION_WEBHOOK_SECRET` to a wrong value. Deploy.
+    2. Send a simulator event. You must see HTTP 401 and `lastFailureReason: "signature_mismatch"` in health (`paddle-kit-doctor` exits 1 and names it).
+    3. Put back the real secret. **Deploy again** (an env change is a deploy).
+    4. Make sure that the next real event is accepted.
+11. **Go live.** Do steps 1, 3, 4, 6, 9 and 10 again with live credentials:
+    - Run the CLI with `--live` and a **separate env file** (`--env-file .env.production.local`, never the dev `.env.local`). Then a live key and a `test_` token cannot be in one file.
+    - Use `PADDLE_ENV=production` and a `live_` client token.
 
-## Known issues (still open in v0.5.0)
+## Known issues (still open in v0.6.0)
 
 - **The past_due grace period can move.** The kit calculates the grace start from the stored row.
   - Two `past_due` events at the same time can make the grace longer, by the time between them.

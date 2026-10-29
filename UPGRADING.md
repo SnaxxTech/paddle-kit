@@ -22,16 +22,25 @@ Check first that your database has no tables of the new names with a different s
 ## 3. Bump the tag
 
 ```bash
-npm i github:SnaxxTech/paddle-kit#v0.5.0
+npm i github:SnaxxTech/paddle-kit#v0.6.0
 ```
 
-Commit the `package.json` and lockfile change. Since v0.5.0 the repository is public, so CI needs no token (README checklist, step 4). Then run the app's own tests and its sandbox end-to-end check.
+Commit the `package.json` and lockfile change. Since v0.5.0 the repository is public, so CI needs no token (README checklist, step 7). Then run the app's own tests and its sandbox end-to-end check.
 
 ## Per-version notes
 
+### 0.5.0 → 0.6.0
+
+Nothing breaks; every step is optional.
+
+1. **Route file.** Replace the hand-written null-safe route with `export const { POST, GET } = createWebhookRoute({ billing, problems, healthToken: process.env.PADDLE_HEALTH_TOKEN })` from `paddle-kit/next`. The statuses stay the same (404 off, 503 misconfigured). New: a GET says `billing_off` / `health_off`, and with the health token the 503 lists the problem names, for `paddle-kit-doctor`. A monitor that checks for an empty 404 or 503 body must accept the JSON body on GET.
+2. **Price in Paddle only.** Read the price with `getPrice` + `formatPrice` (`paddle-kit/price`), cached in the app, with your old constant as the fallback (README, "Show the price from Paddle"). Then delete the price from the app's code. It needs `PADDLE_API_KEY` on the host. A changed amount keeps its price id, so `PADDLE_PRICES` does not change.
+3. **Check each deployment** with `npx paddle-kit-doctor --url https://<host>/api/paddle` (token in `PADDLE_HEALTH_TOKEN`).
+4. **Host variables.** The next `paddle-kit-catalog` run prints the block for the host. Compare it with the host's settings; anything only in `.env.local` is missing in the deployed app.
+
 ### 0.4.x → 0.5.0
 
-1. **No token to install.** The repository is public. Delete the `PADDLE_KIT_READ_TOKEN` secret and the `git config ... insteadOf` step from CI. A lockfile with a `git+ssh://` URL still installs with no SSH key (README checklist, step 4).
+1. **No token to install.** The repository is public. Delete the `PADDLE_KIT_READ_TOKEN` secret and the `git config ... insteadOf` step from CI. A lockfile with a `git+ssh://` URL still installs with no SSH key (README checklist, step 7).
 2. **API version pinned to 1.** The REST calls of `reconcile` and the catalog CLI send `Paddle-Version: 1`. The next catalog sync with `--webhook-url` sets `api_version: 1` on an existing destination (one PATCH). A destination you manage by hand: check that its API version is 1 in the Paddle dashboard. Payloads of version 1 are what the kit reads. Paddle refuses a version older than the account's default: if your account's default is newer than 1, the calls fail on purpose until the kit supports that version.
 3. **Health has two more fields:** `kitVersion` and `environment`. A monitor that compares the whole JSON must accept them.
 4. **`paddle_customers` is no longer written.** Rows written before 0.5.0 stay, and on a shared seller account they include other apps' customer emails. Deleting them (`DELETE FROM paddle_customers;`) is the owner's decision, per app: the kit never reads the table, so the delete changes nothing for the kit. Keep the table: migration `001_init` still creates it.
