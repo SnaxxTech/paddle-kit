@@ -1,7 +1,7 @@
 import { nextPastDueSince } from '../core/access';
 import type { Billing } from '../core/billing';
 import { customDataOf, itemsOf, subscriptionFrom } from '../core/events';
-import { ownershipPredicate } from '../core/owns';
+import { resolveOwnership } from '../core/owns';
 import { LIVE_BASE, SANDBOX_BASE, paddleClient, type FetchLike } from '../core/paddle-api';
 
 export type { FetchLike };
@@ -21,7 +21,8 @@ export async function reconcile(
   }
   const base = billing.config.environment === 'production' ? LIVE_BASE : SANDBOX_BASE;
   const api = paddleClient(base, opts.apiKey, opts.fetch ?? ((url, init) => fetch(url, init)), [opts.apiKey]);
-  const owns = ownershipPredicate(billing.config.owns);
+  // A resolver that fails throws here: reconcile never mirrors every product's subscriptions because a lookup failed.
+  const owns = await resolveOwnership(billing.config.owns);
 
   let scanned = 0;
   let applied = 0;

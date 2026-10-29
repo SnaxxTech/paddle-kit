@@ -96,4 +96,16 @@ describe('reconcile', () => {
     expect(String(err)).toMatch(/403/);
     expect(String(err)).not.toContain('pdl_sdbx_apikey_x');
   });
+
+  it('an owns resolver: resolved ids filter like static owns; a failed lookup throws before any subscription is read', async () => {
+    const ours = billing({ owns: { resolve: async () => ({ priceIds: [SUB.items[0].price.id] }) } });
+    const other = apiSub({ id: 'sub_other', items: [{ ...SUB.items[0], price: { ...SUB.items[0].price, id: 'pri_someone_else' } }] });
+    expect(await reconcile(ours, { apiKey: 'pdl_sdbx_apikey_x', fetch: fakeApi([[SUB, other]]).fetch })).toEqual({ scanned: 2, applied: 1, notOurs: 1, invalid: 0 });
+
+    const down = billing({ owns: { resolve: async () => { throw new Error('paddle down'); } } });
+    const api = fakeApi([[SUB]]);
+    await expect(reconcile(down, { apiKey: 'pdl_sdbx_apikey_x', fetch: api.fetch })).rejects.toThrow('paddle down');
+    expect(api.calls).toHaveLength(0);
+    expect(await down.store.getSubscription(SUB.id)).toBeNull();
+  });
 });

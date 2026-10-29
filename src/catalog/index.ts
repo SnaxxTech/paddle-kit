@@ -411,6 +411,9 @@ export async function syncCatalog(opts: SyncOptions): Promise<SyncResult> {
 
   if (opts.webhookUrl) {
     const url = opts.webhookUrl;
+    // Sandbox: `all`, so the webhook simulator can reach the app. Live: `platform` only, so no simulated event (signed
+    // with the real secret, sent by anyone with dashboard access) can reach a destination that grants real access.
+    const trafficSource = environment === 'production' ? 'platform' : 'all';
     const settings = await paddle.list('/notification-settings');
     const found = settings.find((d) => d.description === destinationName);
     let secret: unknown;
@@ -420,7 +423,7 @@ export async function syncCatalog(opts: SyncOptions): Promise<SyncResult> {
           description: destinationName,
           destination: url,
           type: 'url',
-          traffic_source: 'all',
+          traffic_source: trafficSource,
           subscribed_events: EVENTS,
           include_sensitive_fields: false,
           api_version: PADDLE_API_VERSION,
@@ -433,6 +436,7 @@ export async function syncCatalog(opts: SyncOptions): Promise<SyncResult> {
       if (found.destination !== url) drift.destination = url;
       if (found.active !== true) drift.active = true;
       if (found.api_version !== PADDLE_API_VERSION) drift.api_version = PADDLE_API_VERSION;
+      if (found.traffic_source !== trafficSource) drift.traffic_source = trafficSource;
       if (!sameSet(found.subscribed_events?.map?.((e: any) => (typeof e === 'string' ? e : e?.name)), EVENTS)) {
         drift.subscribed_events = EVENTS;
       }

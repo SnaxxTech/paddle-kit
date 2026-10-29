@@ -1,6 +1,34 @@
 # Changelog
 
-## 0.6.0 (unreleased)
+## 0.7.0 (unreleased)
+
+Upgrade steps: [UPGRADING.md](UPGRADING.md). No new migration. Fixes the three items the 2026-10-29 review confirmed (A1–A3), plus prices found by label and multi-app monitoring.
+
+### Behaviour changes
+- **Live destinations take real events only (review A1).** The catalog CLI created every destination with `traffic_source: "all"`, so a live destination also took simulated events, which are signed with the real secret and can be sent by anyone with dashboard access. With a `pdl_live_` key it now creates `"platform"` and **moves an existing live destination to `"platform"`** on the next run (one PATCH). Sandbox keeps `"all"` (the simulator needs it), and a sandbox destination set to anything else is set back. Paddle's default when the field is omitted is `platform`.
+- **Refused requests no longer write to the store (review A2).** A missing or oversized body, a missing or bad `Paddle-Signature`, and a timestamp out of the window (`missing_body`, `body_too_large`, `bad_signature_header`, `signature_mismatch`, `stale_timestamp`, `future_timestamp`) are answered as before (400/401/413) but make **zero store calls**: before, each wrote a `paddle_failures` row, so a bot on the URL kept a serverless Postgres (Neon) awake. They are counted in the server instance's memory and shown in health as `unverified: { since, count, byReason, lastAt, lastReason }`, with at most one warn log line a minute (new optional `LogEntry.count`: refusals since the last line). Signed requests that fail (`bad_json`, `bad_payload`) and failed events are still recorded. So `lastFailureReason` / `failedLast24h` no longer show a wrong secret: judge it by an old `lastEventAt` (`paddle-kit-doctor --stale-hours`).
+- **Future timestamps are refused**: a signature more than `clockSkewSeconds` (new, default 60) ahead of the server clock is 401 with the **new reason code `future_timestamp`**. The SDK accepted any future timestamp, and so did the kit.
+- **New reason code `prices_unavailable`**: 503 when an `owns` resolver cannot find the app's price ids (see below). Two new `ReasonCode` members break an exhaustive `switch` that ends in a `never` check.
+- `PriceErrorCode` gains `ambiguous`.
+
+### Prices found by their label (C)
+- `findPrice({ app, key, cycle }, { apiKey, environment, fetch?, timeoutMs? })` in `paddle-kit/price` lists the active prices (`include=product`, pinned `Paddle-Version: 1`, all pages, redacted errors) and returns the one the catalog CLI labelled `<key>-<cycle>` on the product labelled `app`, as `getPrice` does. `PriceError` `not_found` (none) or `ambiguous` (more than one). `findPriceMap(app, opts)` returns all of them as the `PADDLE_PRICES` map.
+- `readBillingEnv(env, { …, resolvePrices: { app, cacheSeconds?, fetch?, timeoutMs? } })`: `PADDLE_PRICES` may be unset (then `PADDLE_API_KEY` is required). The result adds `config.resolvePrices()` (the map, looked up and checked against `requiredPrices` / `requiredCycles`; kept `cacheSeconds`, default 600, per instance; failures not kept), and `config.owns` becomes a resolver. A set `PADDLE_PRICES` is the override. Without the option, behaviour and types are unchanged (an overload).
+- `createBilling({ owns })` and `reconcile` accept an `OwnsResolver` (`{ resolve(): Promise<OwnedIds> }`), awaited per event. A lookup that throws, times out (`hookTimeoutMs`) or finds no id answers **503 `prices_unavailable`** and marks the event `failed`, so Paddle retries; nothing is ever marked `not_ours` (or mirrored as "owns everything") because a lookup failed. `reconcile` throws before reading any subscription.
+
+### Monitoring (D, E)
+- `createBilling({ healthChecks: { [name]: () => Promise<{ ok, detail? }> }, healthCheckTimeoutMs? })`: app checks on the authenticated health route, in parallel, each with a timeout (default 3000 ms). A throw, a timeout or a non-result is `{ ok: false }`; the error goes to `onError`, never into the report. Shown as `checks` in health. New exported types `HealthReport`, `CheckResult`, `UnverifiedStats`, `ErrorContext`, `OwnsResolver`.
+- `paddle-kit-doctor --apps apps.json [--json]`: the file lists `{ name, url, tokenEnv, staleHours? }`; each token comes from the variable `tokenEnv` names (an entry with `token` is refused). A table (reachable, env, last verified event and its age against `staleHours`, failures in 24 h with the last reason, app checks) or one JSON result per app for a scheduled job. Exit 0 all green, 1 any app red, 2 a bad file or flags (nothing checked). Single-app mode is unchanged and gains `--stale-hours` and `--json`. It shows the `unverified` counts (a `signature_mismatch` among them is a warning) and app checks, and treats a recent `prices_unavailable` as a problem. Never prints a token.
+
+### Should-fix (B)
+- `onError(error, ctx)`: the original error of a failed hook, `owns`, price lookup, store call or app check, with `ctx.reason` (and `eventId` / `eventType`). The kit still logs only reason codes. A throwing or rejecting `onError` changes nothing.
+- `webhookSecret` takes an array: a request signed with any of them is verified (rotation without downtime). `readBillingEnv` reads several comma-separated secrets from `PADDLE_NOTIFICATION_WEBHOOK_SECRET` into the new `config.webhookSecrets` (`webhookSecret` stays the first).
+- The health token is compared with a new length-independent constant-time compare (both sides hashed with SHA-256 first), in `handleHealth` and `createWebhookRoute`.
+- `hookTimeoutMs` and `storeTimeoutMs` (optional, off by default): a slower hook is a `hook_error`, a slower store call a `store_error` (webhook, health and `hasAccess`). A timed-out hook is not cancelled.
+- Docs: the retry table now says what Paddle says (live: up to 60 tries in about two days; sandbox: 3 tries within about two minutes; it said about 3 days and about 15 minutes); README, skill and catalog notes say `traffic_source: all` is for sandbox only; hooks run **at least once** (said plainly in the README and the JSDoc); the `upsertCustomer` / `Customer` comments no longer claim a removal in 0.6.0 (they stay, deprecated, until a release marked BREAKING); this file dated 0.6.0; the README no longer says CI is off.
+- Tests: the drill now proves zero store calls for every pre-signature refusal (500 unsigned and forged POSTs: no store call, one log line); two shared-seller tests signed events 19 days ahead of their own clock and are fixed.
+
+## 0.6.0 (2026-10-29)
 
 Upgrade steps: [UPGRADING.md](UPGRADING.md). No new migration. Additive: nothing is removed, and no existing response changes.
 

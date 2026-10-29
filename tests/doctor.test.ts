@@ -21,12 +21,16 @@ const health = (over: Record<string, unknown> = {}) =>
     ...over,
   });
 
-async function run(argv: string[], fetch: DoctorFetch, env: Record<string, string> = {}) {
+async function run(argv: string[], fetch: DoctorFetch, env: Record<string, string> = {}, files: Record<string, string> = {}) {
   const lines: string[] = [];
   const orig = { log: console.log, error: console.error };
   console.log = console.error = (...a: unknown[]) => void lines.push(a.join(' '));
+  const readFile = (f: string) => {
+    if (!(f in files)) throw new Error(`ENOENT ${f}`);
+    return files[f]!;
+  };
   try {
-    return { code: await main(argv, { fetch, env, now: NOW }), output: lines.join('\n') };
+    return { code: await main(argv, { fetch, env, now: NOW, readFile }), output: lines.join('\n') };
   } finally {
     Object.assign(console, orig);
   }
@@ -191,7 +195,167 @@ describe('paddle-kit-doctor main', () => {
     const billing = createBilling({ environment: 'sandbox', webhookSecret: 's', store: memoryStore(), entitlements: {}, healthToken: TOKEN, log: () => {} });
     const on = await run(['--url', URL_, '--token', TOKEN], viaRoute(createWebhookRoute({ billing, problems: [] })));
     expect(on.code).toBe(0);
-    expect(on.output).toContain('Billing: on (sandbox), paddle-kit 0.6.0');
+    expect(on.output).toContain('Billing: on (sandbox), paddle-kit 0.7.0');
     expect(on.output).toContain('Last event: none yet');
   });
 });
+
+describe('diagnose: v0.7.0 health fields', () => {
+  it('staleHours: no verified event for longer is a problem; younger is fine; none yet is a problem once staleHours is set', () => {
+    expect(diagnose(200, health(), { now: NOW, staleHours: 4 }).ok).toBe(true);
+    const stale = diagnose(200, health(), { now: NOW, staleHours: 2 });
+    expect(stale.ok).toBe(false);
+    expect(stale.lines.at(-1)).toBe('PROBLEM: no verified event for more than 2 h: check the webhook secret and the Paddle notification destination');
+    expect(diagnose(200, health({ lastEventAt: null }), { now: NOW, staleHours: 2 }).ok).toBe(false);
+  });
+
+  it('unverified rejections are shown, and a signature_mismatch among them is a warning, not a problem (bots can send it)', () => {
+    const d = diagnose(200, health({ unverified: { since: '2026-10-29T10:00:00.000Z', count: 7, byReason: { bad_signature_header: 5, signature_mismatch: 2 }, lastAt: null, lastReason: null } }), { now: NOW });
+    expect(d.ok).toBe(true);
+    expect(d.lines).toContain('Refused before the signature check: 7 since 2026-10-29T10:00:00.000Z, on the server instance that answered (bad_signature_header 5, signature_mismatch 2)');
+    expect(d.lines.some((l) => l.startsWith('WARNING: signature_mismatch'))).toBe(true);
+    expect(diagnose(200, health({ unverified: { since: 'x', count: 0, byReason: {}, lastAt: null, lastReason: null } }), { now: NOW }).lines.join()).not.toContain('Refused');
+  });
+
+  it('app checks: ok ones are lines, a failed one is a problem with its detail', () => {
+    const d = diagnose(200, health({ checks: { price: { ok: true, detail: 'paddle' }, db: { ok: false, detail: 'fallback: timeout' } } }), { now: NOW });
+    expect(d.ok).toBe(false);
+    expect(d.lines).toContain('Check price: ok (paddle)');
+    expect(d.lines).toContain('PROBLEM: check "db" failed: fallback: timeout');
+  });
+
+  it('a recent prices_unavailable is a problem in plain words', () => {
+    const d = diagnose(200, health({ lastFailureReason: 'prices_unavailable', lastFailureAt: '2026-10-29T11:00:00.000Z', failedLast24h: 1 }), { now: NOW });
+    expect(d.ok).toBe(false);
+    expect(d.lines.at(-1)).toMatch(/^PROBLEM: prices_unavailable in the last 24 h: the app could not find its price ids in Paddle/);
+  });
+});
+
+describe('paddle-kit-doctor --apps', () => {
+  const APPS = JSON.stringify([
+    { name: 'leakscan', url: 'https://leakscan.example/api/paddle', tokenEnv: 'LEAKSCAN_TOKEN', staleHours: 48 },
+    { name: 'offday', url: 'https://offday.example/api/paddle', tokenEnv: 'OFFDAY_TOKEN', staleHours: 1 },
+    { name: 'qrlab', url: 'https://qrlab.example/api/paddle', tokenEnv: 'QRLAB_TOKEN' },
+  ]);
+  const ENV = { LEAKSCAN_TOKEN: 'tok-leakscan-1234', OFFDAY_TOKEN: 'tok-offday-5678', QRLAB_TOKEN: 'tok-qrlab-9012' };
+  // Each host answers its own report; the bearer token must be that app's own.
+  const hosts: Record<string, [string, number, string]> = {
+    'leakscan.example': ['tok-leakscan-1234', 200, health({ checks: { price: { ok: true, detail: 'paddle' } } })],
+    'offday.example': ['tok-offday-5678', 200, health()], // last event 3 h ago, staleHours 1
+    'qrlab.example': ['tok-qrlab-9012', 503, JSON.stringify({ error: 'misconfigured', problems: ['PADDLE_PRICES is missing'] })],
+  };
+  const fleet: DoctorFetch = async (url, init) => {
+    const [token, status, body] = hosts[new URL(url).hostname]!;
+    expect(init.redirect).toBe('manual');
+    return init.headers.authorization === `Bearer ${token}` ? answer(status, body)() : answer(401)();
+  };
+
+  it('prints one row per app and every problem, exits 1 when any app is red, and never prints a token', async () => {
+    const r = await run(['--apps', 'apps.json'], fleet, ENV, { 'apps.json': APPS });
+    expect(r.code).toBe(1);
+    const lines = r.output.split('\n');
+    expect(lines[0]).toMatch(/^APP +RESULT +REACHABLE +ENV +LAST EVENT +FAILED 24H +CHECKS$/);
+    expect(lines[1]).toMatch(/^leakscan +OK +yes +ok +3 h ago +0 +price ok$/);
+    expect(lines[2]).toMatch(/^offday +PROBLEM +yes +ok +3 h ago STALE \(>1 h\) +0 +-$/);
+    expect(lines[3]).toMatch(/^qrlab +PROBLEM +yes +1 problem\(s\) +- +- +-$/);
+    expect(r.output).toContain('offday: PROBLEM: no verified event for more than 1 h');
+    expect(r.output).toContain('qrlab: PROBLEM:   PADDLE_PRICES is missing');
+    expect(lines.at(-1)).toBe('Result: PROBLEM in offday, qrlab (exit 1)');
+    for (const t of Object.values(ENV)) expect(r.output).not.toContain(t);
+  });
+
+  it('--json: one machine-readable result per app (no token, only its variable name), for a job that opens one issue per red app', async () => {
+    const r = await run(['--apps', 'apps.json', '--json'], fleet, ENV, { 'apps.json': APPS });
+    expect(r.code).toBe(1);
+    const out = JSON.parse(r.output);
+    expect(out.ok).toBe(false);
+    expect(out.checkedAt).toBe(new Date(NOW).toISOString());
+    expect(out.apps.map((a: any) => [a.name, a.ok])).toEqual([['leakscan', true], ['offday', false], ['qrlab', false]]);
+    expect(out.apps[0]).toMatchObject({
+      url: 'https://leakscan.example/api/paddle', tokenEnv: 'LEAKSCAN_TOKEN', reachable: true, httpStatus: 200, billing: 'on', environment: 'production',
+      kitVersion: '0.6.0', lastEventAt: '2026-10-29T09:00:00.000Z', lastEventAgeHours: 3, staleHours: 48, stale: false, failedLast24h: 0,
+      checks: { price: { ok: true, detail: 'paddle' } }, problems: [],
+    });
+    expect(out.apps[1]).toMatchObject({ stale: true, problems: ['no verified event for more than 1 h: check the webhook secret and the Paddle notification destination'] });
+    expect(out.apps[2]).toMatchObject({ billing: 'misconfigured', envProblems: ['PADDLE_PRICES is missing'], stale: null });
+    expect(out.apps[2].problems).toEqual(['billing is misconfigured on the host:', '  PADDLE_PRICES is missing']);
+    expect('lines' in out.apps[0]).toBe(false);
+    for (const t of Object.values(ENV)) expect(r.output).not.toContain(t);
+  });
+
+  it('all green: exit 0', async () => {
+    const one = JSON.stringify([{ name: 'leakscan', url: 'https://leakscan.example/api/paddle', tokenEnv: 'LEAKSCAN_TOKEN' }]);
+    const r = await run(['--apps', 'a.json'], fleet, ENV, { 'a.json': one });
+    expect([r.code, r.output.split('\n').at(-1)]).toEqual([0, 'Result: OK (1 app)']);
+  });
+
+  it('a token variable that is not set: that app is red, with no request; unreachable and refused apps are red too', async () => {
+    const seen: string[] = [];
+    const r = await run(['--apps', 'apps.json', '--json'], async (url, init) => {
+      seen.push(new URL(url).hostname);
+      if (url.includes('offday')) throw new TypeError(`ECONNREFUSED ${ENV.OFFDAY_TOKEN}`);
+      return fleet(url, init);
+    }, { OFFDAY_TOKEN: ENV.OFFDAY_TOKEN, QRLAB_TOKEN: 'wrong' }, { 'apps.json': APPS });
+    const out = JSON.parse(r.output);
+    expect(r.code).toBe(1);
+    expect(seen.sort()).toEqual(['offday.example', 'qrlab.example']);
+    expect(out.apps[0]).toMatchObject({ name: 'leakscan', ok: false, reachable: false, problems: ['LEAKSCAN_TOKEN is not set in this environment'] });
+    expect(out.apps[1]).toMatchObject({ name: 'offday', ok: false, reachable: false, problems: ['the app is not reachable at this URL'] });
+    expect(out.apps[2].problems[0]).toMatch(/health token was refused/);
+    expect(r.output).not.toContain(ENV.OFFDAY_TOKEN);
+  });
+
+  it('a bad apps file or bad flags: exit 2 before any request (a scheduled job must not close issues on it)', async () => {
+    let calls = 0;
+    const fetch: DoctorFetch = async () => (calls++, answer(200, health())());
+    const bad: Array<[string, RegExp]> = [
+      ['not json', /not valid JSON/],
+      ['[]', /non-empty JSON array/],
+      ['[{"name":"a","url":"https://a.example/x","tokenEnv":"A","token":"secret-in-file"}]', /never put a token in the file/],
+      ['[{"name":"a","url":"http://a.example/x","tokenEnv":"A"}]', /apps\[0\]\.url needs https/],
+      ['[{"name":"a","url":"https://a.example/x","tokenEnv":"A"},{"name":"a","url":"https://b.example/x","tokenEnv":"B"}]', /used twice/],
+      ['[{"name":"a","url":"https://a.example/x","tokenEnv":"no-dash"}]', /tokenEnv must be/],
+      ['[{"name":"a","url":"https://a.example/x","tokenEnv":"A","staleHours":0}]', /staleHours/],
+      ['[{"name":"a","url":"https://a.example/x","tokenEnv":"A","extra":1}]', /unknown key/],
+    ];
+    for (const [file, match] of bad) {
+      const r = await run(['--apps', 'f.json'], fetch, { A: 't' }, { 'f.json': file });
+      expect([r.code, r.output]).toEqual([2, expect.stringMatching(match)]);
+      expect(r.output).not.toContain('secret-in-file');
+    }
+    expect((await run(['--apps', 'missing.json'], fetch)).code).toBe(2);
+    expect((await run(['--apps', 'f.json', '--url', URL_], fetch, {}, { 'f.json': APPS })).code).toBe(2);
+    expect((await run(['--apps', 'f.json', '--token', 't'], fetch, {}, { 'f.json': APPS })).code).toBe(2);
+    expect(calls).toBe(0);
+  });
+
+  it('single-app mode keeps working, and takes --stale-hours and --json too', async () => {
+    const stale = await run(['--url', URL_, '--token', TOKEN, '--stale-hours', '2'], answer(200, health()));
+    expect(stale.code).toBe(1);
+    expect(stale.output).toContain('PROBLEM: no verified event for more than 2 h');
+    const json = JSON.parse((await run(['--url', URL_, '--token', TOKEN, '--json'], answer(200, health()))).output);
+    expect(json.apps).toHaveLength(1);
+    expect(json.apps[0]).toMatchObject({ ok: true, url: URL_, tokenEnv: null });
+    expect((await run(['--url', URL_, '--stale-hours', 'soon'], answer(200, health()))).code).toBe(1);
+  });
+
+  it('end to end against two real routes: kit health with an app check, and billing off', async () => {
+    const viaRoute = (route: { GET(r: Request): Promise<Response> }) => async (url: string, init: { headers: Record<string, string> }) => {
+      const res = await route.GET(new Request(url, { headers: init.headers }));
+      return { status: res.status, headers: res.headers, text: () => res.text() };
+    };
+    const billing = createBilling({
+      environment: 'sandbox', webhookSecret: 's', store: memoryStore(), entitlements: {}, healthToken: TOKEN, log: () => {},
+      healthChecks: { price: async () => ({ ok: false, detail: 'fallback: not_found' }) },
+    });
+    const on = viaRoute(createWebhookRoute({ billing, problems: [] }));
+    const off = viaRoute(createWebhookRoute({ billing: null, problems: [] }));
+    const apps = JSON.stringify([{ name: 'on', url: 'https://on.example/api/paddle', tokenEnv: 'T' }, { name: 'off', url: 'https://off.example/api/paddle', tokenEnv: 'T' }]);
+    const r = await run(['--apps', 'a.json', '--json'], async (url, init) => (url.includes('//on.') ? on : off)(url, init), { T: TOKEN }, { 'a.json': apps });
+    const out = JSON.parse(r.output);
+    expect(out.apps[0]).toMatchObject({ billing: 'on', checks: { price: { ok: false, detail: 'fallback: not_found' } }, problems: ['check "price" failed: fallback: not_found'] });
+    expect(out.apps[1]).toMatchObject({ billing: 'off', ok: false });
+    expect(r.code).toBe(1);
+  });
+});
+

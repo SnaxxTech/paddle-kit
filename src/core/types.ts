@@ -5,6 +5,8 @@ export type ReasonCode =
   | 'bad_signature_header'
   | 'signature_mismatch'
   | 'stale_timestamp'
+  /** The signature's timestamp is more than `clockSkewSeconds` (default 60) ahead of the server clock. Since v0.7.0. */
+  | 'future_timestamp'
   | 'bad_json'
   | 'bad_payload'
   | 'unknown_event'
@@ -23,7 +25,12 @@ export type ReasonCode =
    * Processed only because its subscription is already in the mirror; `owns` did not match it (a retired price, or a
    * subscription mirrored before `owns` was set). The hook ran; no warn line. Not counted in `Health.lastOwnedAt`.
    */
-  | 'mirrored';
+  | 'mirrored'
+  /**
+   * The app's price ids could not be found at run time (`owns` resolver threw: Paddle down, a wrong PADDLE_API_KEY, a
+   * missing label). Answered 503 so Paddle retries; nothing is marked `not_ours`. Since v0.7.0.
+   */
+  | 'prices_unavailable';
 
 export type SubscriptionStatus = 'active' | 'trialing' | 'past_due' | 'paused' | 'canceled';
 export type EventStatus = 'received' | 'processed' | 'ignored' | 'stale' | 'failed';
@@ -112,7 +119,16 @@ export interface OwnedIds {
   productIds?: readonly string[];
 }
 export type OwnsPredicate = (x: { kind: 'subscription' | 'transaction'; items: LineItem[]; customData: Record<string, unknown> | null }) => boolean;
-export type Owns = OwnedIds | OwnsPredicate;
+/**
+ * Owned ids found at run time (`readBillingEnv` with `resolvePrices`, since v0.7.0). Awaited for each event whose
+ * ownership it decides (subscription and transaction events, and adjustments of a mirrored subscription); a throw (or
+ * no id) answers 503 `prices_unavailable`, so Paddle retries and no event is marked `not_ours` because a lookup failed.
+ * Cache inside `resolve`: it runs once per such event.
+ */
+export interface OwnsResolver {
+  resolve(): Promise<OwnedIds>;
+}
+export type Owns = OwnedIds | OwnsPredicate | OwnsResolver;
 
 /** A transaction this app has seen, and whether it was this app's. */
 export interface SeenTransaction {
@@ -120,7 +136,7 @@ export interface SeenTransaction {
   owned: boolean;
 }
 
-/** @deprecated since v0.5.0: the kit no longer writes customers. Removed in v0.6.0. */
+/** @deprecated since v0.5.0: the kit no longer writes customers. Kept until a release marked BREAKING removes it. */
 export interface Customer {
   customerId: string;
   email: string | null;
@@ -154,7 +170,10 @@ export interface Store {
   recordEvent(e: { eventId: string; eventType: string; occurredAt: string; receivedAt: string; leaseExpiredBefore?: string }): Promise<{ alreadyDone: boolean; inProgress?: boolean }>;
   markEvent(eventId: string, status: EventStatus, reason: ReasonCode | null): Promise<void>;
   recordFailure(reason: ReasonCode, at: Date): Promise<void>;
-  /** @deprecated since v0.5.0: the kit no longer calls it (customer.* events are ignored). Removed from the interface in v0.6.0. */
+  /**
+   * @deprecated since v0.5.0: the kit no longer calls it (customer.* events are ignored). Still required, so custom
+   * stores and the kit's three stores stay interchangeable; a release marked BREAKING will remove it. A no-op is fine.
+   */
   upsertCustomer(c: Customer): Promise<{ applied: boolean }>;
   upsertSubscription(s: Subscription): Promise<{ applied: boolean }>;
   getSubscription(subscriptionId: string): Promise<Subscription | null>;
@@ -173,5 +192,47 @@ export interface LogEntry {
   reason: ReasonCode;
   eventId?: string;
   eventType?: string;
+  /** Requests refused before the signature was verified since the previous such line (at most one line a minute). */
+  count?: number;
 }
 export type Logger = (entry: LogEntry) => void;
+
+/**
+ * Requests refused before their signature was verified (no or oversized body, bad or missing signature, a timestamp out
+ * of the window). Counted in this server instance's memory only, never in the store, so a bot hitting the URL cannot
+ * keep a serverless database awake. Resets when the instance restarts; another instance has its own count.
+ */
+export interface UnverifiedStats {
+  /** When this instance started counting. */
+  since: string;
+  count: number;
+  byReason: Partial<Record<ReasonCode, number>>;
+  lastAt: string | null;
+  lastReason: ReasonCode | null;
+}
+
+/** What an app-defined health check returns. `detail` is shown as is: never put a secret in it. */
+export interface CheckResult {
+  ok: boolean;
+  detail?: string;
+}
+
+/** The authenticated health route's JSON (`billing.handleHealth`). */
+export interface HealthReport extends Health {
+  kitVersion: string;
+  environment: 'sandbox' | 'production';
+  /** Since v0.7.0. */
+  unverified: UnverifiedStats;
+  /** Since v0.7.0, only when `createBilling({ healthChecks })` is set: each check by name. A timeout or a throw is `ok: false`. */
+  checks?: Record<string, CheckResult>;
+}
+
+/** What `createBilling({ onError })` gets with the error. */
+export interface ErrorContext {
+  /** `hook_error`, `store_error` or `prices_unavailable` for a webhook or health failure; `health_check` for an app-defined check. */
+  reason: ReasonCode | 'health_check';
+  eventId?: string;
+  eventType?: string;
+  /** The check's name, for `health_check`. */
+  check?: string;
+}
