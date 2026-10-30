@@ -145,6 +145,7 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 export const { config, problems } = readBillingEnv(process.env, { requiredPrices: ['pro'] });
 if (problems.length > 0) console.error('billing misconfigured:', problems.join('; ')); // names only, never values
+// The one-call form (since v0.7.0) does the same in one line: see "The one-call setup" below.
 
 // Built only from a valid config: a CI or preview build without the secrets still builds. null = billing off.
 export const billing = config
@@ -162,6 +163,21 @@ export const billing = config
     })
   : null;
 ```
+
+**The one-call setup (`billingFromEnv`, since v0.7.0).** The same as above, with the secrets (all of them, for a rotation), the health token and `owns` filled in from the env:
+
+```ts
+import { billingFromEnv } from 'paddle-kit/config';
+
+export const { billing, config, problems } = billingFromEnv(process.env, {
+  requiredPrices: ['pro'],
+  store: postgresStore({ query: (text, params) => pool.query(text, params) }),
+  entitlements: (c) => ({ [c.prices.pro as string]: ['pro'] }), // built from the env's price ids
+  onError: (error, ctx) => console.error('paddle-kit failure', ctx, error),
+});
+```
+
+`billing` is null while billing is off or misconfigured, so this is safe at module scope in a build without secrets. Every `createBilling` option (hooks, timeouts, `healthChecks`) can be passed too.
 
 `app/api/paddle/route.ts`
 
@@ -454,13 +470,13 @@ The kit calls a hook after it records the event and before it marks the event `p
 ### Example
 
 ```ts
-import type { BillingConfig } from 'paddle-kit/core';
+import { adjustmentEffect, type BillingConfig } from 'paddle-kit/core';
 
 type Tx = { query(text: string, params?: unknown[]): Promise<{ rows: any[] }> };
 declare const db: { transaction<T>(fn: (q: Tx) => Promise<T>): Promise<T> };
 
 // `db` is your Postgres client with real transactions (pg, @neondatabase/serverless Pool, PGlite, ...).
-// Tables: orders(id PRIMARY KEY, user_id, credits, currency, total), refunds(id PRIMARY KEY, order_id UNIQUE),
+// Tables: orders(id PRIMARY KEY, user_id, credits, currency, total), applied(id PRIMARY KEY, order_id, effect),
 //         reviews(id PRIMARY KEY, kind, detail), accounts(user_id PRIMARY KEY, credits CHECK (credits >= 0)).
 const review = (q: Tx, id: string, kind: string, detail: string) =>
   q.query('INSERT INTO reviews (id, kind, detail) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [id, kind, detail]);
@@ -493,17 +509,30 @@ export function packHooks(packPriceId: string, creditsPerUnit = 5): Pick<Billing
       });
     },
     onAdjustment: async (adj) => {
-      if (adj.action !== 'refund' || adj.status !== 'approved') return; // pending_approval, rejected, reversed: nothing to do yet
+      // revoke (approved full refund, chargeback) · restore (chargeback won, refund or chargeback reversed)
+      // review (partial refund, chargeback warning, unknown action) · none (pending, rejected, credits)
+      const effect = adjustmentEffect(adj);
+      if (effect === 'none') return;
       await db.transaction(async (q) => {
         const order = (await q.query('SELECT id, user_id, credits FROM orders WHERE id = $1', [adj.transactionId])).rows[0];
-        if (!order || adj.type !== 'full') {
-          // A partial refund (or one for an order we do not know) does not say which credits to take back: a human decides.
-          await review(q, `adj:${adj.adjustmentId}`, order ? 'partial_refund' : 'refund_unknown_order', `${adj.currency} ${adj.total}`);
+        if (effect === 'review' || !order) {
+          // A partial refund does not say which credits to take back; a warning may still turn into a refund: a human decides.
+          await review(q, `adj:${adj.adjustmentId}:${adj.status}`, `${adj.action}${order ? '' : '_unknown_order'}`, `${adj.currency} ${adj.total}`);
           return;
         }
-        const ins = await q.query('INSERT INTO refunds (id, order_id) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING id', [adj.adjustmentId, order.id]);
-        if (ins.rows.length === 0) return; // replay
-        await q.query('UPDATE accounts SET credits = GREATEST(credits - $1, 0) WHERE user_id = $2', [order.credits, order.user_id]);
+        if (effect === 'restore') {
+          // Give back only what was taken back: a reversed partial refund, reviewed by hand, restores nothing here.
+          const open = (await q.query(
+            "SELECT count(*) FILTER (WHERE effect = 'revoke') - count(*) FILTER (WHERE effect = 'restore') AS n FROM applied WHERE order_id = $1",
+            [order.id],
+          )).rows[0];
+          if (Number(open?.n ?? 0) <= 0) return;
+        }
+        // One row per adjustment and status: a redelivery or a reconcilePayments replay changes nothing.
+        const ins = await q.query('INSERT INTO applied (id, order_id, effect) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING RETURNING id', [`${adj.adjustmentId}:${adj.status}`, order.id, effect]);
+        if (ins.rows.length === 0) return;
+        const delta = effect === 'revoke' ? -order.credits : order.credits;
+        await q.query('UPDATE accounts SET credits = GREATEST(credits + $1, 0) WHERE user_id = $2', [delta, order.user_id]);
       });
     },
   };
@@ -525,6 +554,49 @@ We ran this example against a real SQL database (PGlite), through the built pack
 - A EUR order with quantity 2 gave 10 credits.
 - Two partial refunds did not change the balance.
 - An approved full refund took the credits back one time, and never below zero.
+
+Since v0.7.0 the example itself is a test (`tests/readme-hooks.test.ts`, on PGlite): a chargeback took the credits and a won dispute gave them back one time; a refund that was approved and then reversed took them and gave them back; a give-back with nothing taken back gave nothing; redeliveries changed nothing; a partial refund, a chargeback warning and an unknown order became review rows. Not yet seen from real Paddle: a chargeback, its reversal, or a reversed refund.
+
+### Refunds, chargebacks and reversals (`adjustmentEffect`, since v0.7.0)
+
+Every change to a payment arrives as an adjustment, and the same adjustment comes again when its status moves (`pending_approval` → `approved` / `rejected` → maybe `reversed`). `adjustmentEffect(adj)` turns Paddle's actions and statuses into what the app should do:
+
+| Action (status `approved`) | Effect | Why |
+|---|---|---|
+| `refund`, `type: 'full'` | `revoke` | The customer got all the money back. |
+| `refund`, `type: 'partial'` (or unknown) | `review` | It does not say which items were refunded. |
+| `chargeback` | `revoke` | The card holder disputed the charge; the money is gone. Paddle, as merchant of record, fights the dispute. |
+| `chargeback_reverse` | `restore` | The dispute was won; the money is back. |
+| `chargeback_warning` | `review` | An early fraud warning. Paddle may refund it to avoid the chargeback; watch the transaction. |
+| `chargeback_warning_reverse`, `credit`, `credit_reverse` | `none` | No money left the seller for this purchase. |
+| any action with status `reversed` (refund, chargeback) | `restore` | The adjustment was undone. |
+| any action `pending_approval` or `rejected` | `none` | Nothing happened yet, or never will. |
+| an action or status Paddle adds later | `review` | Never guessed. |
+
+Source: Paddle, [List adjustments](https://developer.paddle.com/api-reference/adjustments/list-adjustments), read 2026-10-30. Refunds are made in the Paddle dashboard (or with Paddle's API); the kit only receives them.
+
+## Patterns for the app's own code
+
+**Outbox for side effects.** A hook runs inside the webhook request, and a failure anywhere makes Paddle send the event again. So a hook should only write to your database, in one transaction: the order, the grant, and a row in an `outbox` table for each side effect (an email, starting a job). A worker (a cron, a queue) sends what is in the outbox and marks it sent. Then a slow or failed email never fails the payment, and a retried event never sends the email twice (key the outbox row on `transactionId` + kind, `ON CONFLICT DO NOTHING`).
+
+**A ledger for credits.** An app that sells credits (packs, scans) should keep an append-only ledger in its own database instead of only a balance: one row per change (`grant` keyed on `transactionId`, `use` on your usage id, `revoke` / `restore` keyed on `adjustmentId:status`), the balance being the sum. Each Paddle event then maps to at most one row (the key makes it idempotent), and a support question ("where did my credits go?") is a query. Paddle keeps the books of the money as merchant of record; the app keeps the books of what it granted.
+
+## Payment concepts: what the kit does, and what Paddle does
+
+Paddle is the **merchant of record**: it charges the card, holds the money, handles disputes and pays out. The kit receives Paddle's events safely and tells the app what they mean.
+
+| Concept | Where it lives |
+|---|---|
+| Webhook retries and dedup | The kit: `paddle_events` ledger keyed on `event_id`, claims (409 `in_progress`), a 60 s lease for a crashed attempt, `occurred_at` ordering. Paddle retries any non-2xx (live: up to 60 times in about two days). |
+| Idempotency keys | The kit for events (`event_id`); the app for its writes (key them on `transactionId`, `adjustmentId` + `status`). |
+| Exactly-once vs effectively-once | Effectively-once: hooks run at least once; claims stop concurrent copies; the app's keyed write in one DB transaction makes the effect happen once. |
+| Refunds, chargebacks, reversals | Received through `onAdjustment`; `adjustmentEffect` says revoke / restore / review / none. Issued in the Paddle dashboard. |
+| Reconciliation | `reconcile` (subscriptions) and `reconcilePayments` (transactions and adjustments) replay the API through the webhook path. |
+| Authorisation vs capture | Paddle: checkout authorises and captures together. The kit grants on `transaction.completed` only (`transaction.paid` is recorded, no hook). |
+| Pending states | Refunds `pending_approval` → `none`; `past_due` keeps access for `pastDueGraceDays`; trials in `planOf`. The money itself is held by Paddle. |
+| Settlement cycles | Paddle pays out on its schedule; see Paddle's payout reports. `payout.*` events are recorded and ignored. |
+| Double-entry ledger | Paddle keeps the books of the money. The app keeps an append-only ledger of what it granted (above). |
+| Outbox | The app's code (above): side effects go through an outbox written in the hook's transaction. |
 
 ## Plan state
 
@@ -796,6 +868,20 @@ import { reconcile } from 'paddle-kit/reconcile';
 await reconcile(billing, { apiKey: process.env.PADDLE_API_KEY! }); // { scanned, applied, notOurs, invalid }
 ```
 
+**Payments and refunds too (`reconcilePayments`, since v0.7.0).** `reconcile` repairs subscriptions only. A lost one-time payment or refund (Paddle gave up after its retries) is repaired by:
+
+```ts
+import { reconcilePayments } from 'paddle-kit/reconcile';
+await reconcilePayments(billing, { apiKey: process.env.PADDLE_API_KEY!, since: new Date(Date.now() - 7 * 86_400_000) });
+// { transactions: { scanned, applied, duplicates, notOurs, failed }, adjustments: { … } }
+```
+
+- It reads completed transactions updated since `since` (`GET /transactions`, 30 a page) and the adjustments updated since then (`GET /adjustments`, 50 a page; up to 10,000).
+- Each one goes through the **webhook's own ledger path** as a delivery with its own event id (`reconcile_txn_<id>`, `reconcile_adj_<id>_<status>`): `owns`, the hooks, the claims and the dedup apply as for a webhook. A second run with the same window is a no-op (`duplicates`).
+- A payment the webhook already processed runs `onTransaction` once more (hooks run at least once and must be idempotent). An adjustment status that changed replays again, as the webhook would.
+- Adjustments run after transactions. If the store never saw an adjustment's transaction (a payment older than `since`), that transaction is read and replayed first, so a refund is never judged without its payment. On a shared seller account, other apps' refunds come out `notOurs`, with no hook.
+- `failed` counts replays whose hook or store failed: run it again later. Run it daily from a cron with a window longer than the gap between runs (for example 7 days). Edge-safe.
+
 How `reconcile` works:
 
 - It reads `GET /subscriptions` with `fetch`, 200 per page. It follows Paddle's pages and never goes to a different host.
@@ -858,7 +944,7 @@ Do these steps one time for each app: first in sandbox, then again for live.
 | 2026-10-16 | v0.3 | A real full refund through the API | `onAdjustment` ran two times: `adjustment.created` (`pending_approval`, `type: full`), then about 7 minutes later `adjustment.updated` (`approved`, `type: full`). |
 | 2026-10-16 | v0.3 | Catalog CLI on the real sandbox | It made a catalog, did nothing on a second run, and its teardown removed only its own resources. It also moved Offday's old catalog. |
 | 2026-10-17 | v0.4 | Test suite on a real Postgres 17.10 server (`embedded-postgres`) | 305 of 305 tests pass. 50 parallel copies of one event run the hook one time. A load of 1,000 events gave 0 errors. |
-| 2026-10-29 | v0.7 | Test suite, plus the real-Postgres suite on Postgres 17.10 (`embedded-postgres`) | 405 of 405 tests, and 5 of 5 on real Postgres (1,000 events: 0 errors, 1,000 of 1,000 samples counted). 500 unsigned and forged POSTs made 0 store calls (v0.6.0 made one `recordFailure` per request). |
+| 2026-10-29 | v0.7 | Test suite, plus the real-Postgres suite on Postgres 17.10 (`embedded-postgres`) | 433 of 433 tests, and 5 of 5 on real Postgres (1,000 events: 0 errors, 1,000 of 1,000 samples counted). 500 unsigned and forged POSTs made 0 store calls (v0.6.0 made one `recordFailure` per request). |
 | 2026-10-29 | v0.7 | The packed tarball in a scratch app (`npm run smoke`), and the built `paddle-kit-doctor --apps` against two local health routes (real `fetch`, a real apps file) | Smoke passed. The doctor printed the table and the JSON, exited 1 for the misconfigured app and 0 for the healthy one in single-app mode, and printed no token. |
 
 Test fixtures are the real payloads that we captured (see `tests/fixtures/SOURCES.md`).

@@ -136,7 +136,16 @@ const QUIET: ReadonlySet<ReasonCode> = new Set(['unknown_event', 'not_ours', 'un
 const json = (body: unknown, status: number) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
-export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<Response> {
+export interface ProcessResult {
+  http: number;
+  body: Record<string, unknown>;
+  outcome: EventStatus | 'duplicate' | 'in_progress';
+  reason: ReasonCode | null;
+}
+
+export type WebhookHandler = ((req: Request) => Promise<Response>) & { process(ev: NormalisedEvent): Promise<ProcessResult> };
+
+export function createWebhookHandler(d: HandlerDeps): WebhookHandler {
   const unverified = d.unverified ?? unverifiedCounter(d.log, d.now);
 
   /** Refused before the signature is verified: counted in memory only. Anyone can send these; none may touch the store. */
@@ -247,7 +256,46 @@ export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<
     }
   }
 
-  return async function handle(req: Request): Promise<Response> {
+  /**
+   * Claims, applies and marks one parsed event: the ledger path every verified webhook takes. `reconcilePayments`
+   * replays API entities through it too, so a replay is deduplicated and filtered exactly like a delivery.
+   */
+  async function process(ev: NormalisedEvent): Promise<ProcessResult> {
+    const tag = { eventId: ev.eventId, eventType: ev.eventType };
+    let recorded = false;
+    try {
+      const at = d.now();
+      const leaseExpiredBefore = new Date(at.getTime() - (d.leaseSeconds ?? 60) * 1000).toISOString();
+      const claim = await d.store.recordEvent({ ...tag, occurredAt: ev.occurredAt, receivedAt: at.toISOString(), leaseExpiredBefore });
+      if (claim.alreadyDone) return { http: 200, body: { received: true, duplicate: true }, outcome: 'duplicate', reason: null };
+      // Another delivery of this event is running its hooks. Not a 2xx: if that attempt fails, this retry must come back.
+      if (claim.inProgress) return { http: 409, body: { error: 'in_progress' }, outcome: 'in_progress', reason: null };
+      recorded = true;
+      const outcome = await apply(ev);
+      await d.store.markEvent(ev.eventId, outcome.status, outcome.reason);
+      if (outcome.reason && !QUIET.has(outcome.reason)) d.log({ level: 'warn', reason: outcome.reason, ...tag });
+      return { http: 200, body: { received: true }, outcome: outcome.status, reason: outcome.reason };
+    } catch (err) {
+      const reason: ReasonCode = err instanceof Failure ? err.reason : 'store_error';
+      d.log({ level: 'error', reason, ...tag });
+      report(d.onError, err instanceof Failure ? err.original : err, { reason, ...tag });
+      try {
+        if (!recorded) throw new Error('event row never written');
+        await d.store.markEvent(ev.eventId, 'failed', reason);
+      } catch {
+        if (reason !== 'store_error') d.log({ level: 'error', reason: 'store_error', ...tag });
+        try {
+          await d.store.recordFailure(reason, d.now());
+        } catch {
+          /* store fully down: the log line above is the only record */
+        }
+      }
+      // 503 for a price lookup that failed: the app is up but cannot tell yet whether the event is its own.
+      return { http: reason === 'prices_unavailable' ? 503 : 500, body: { error: reason }, outcome: 'failed', reason };
+    }
+  }
+
+  async function handle(req: Request): Promise<Response> {
     if (req.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
     let rawBody: string | null;
     try {
@@ -276,38 +324,9 @@ export function createWebhookHandler(d: HandlerDeps): (req: Request) => Promise<
     }
     const ev = parseEvent(parsed);
     if (!ev) return reject('bad_payload', 400);
+    const result = await process(ev);
+    return json(result.body, result.http);
+  }
 
-    const tag = { eventId: ev.eventId, eventType: ev.eventType };
-    let recorded = false;
-    try {
-      const at = d.now();
-      const leaseExpiredBefore = new Date(at.getTime() - (d.leaseSeconds ?? 60) * 1000).toISOString();
-      const claim = await d.store.recordEvent({ ...tag, occurredAt: ev.occurredAt, receivedAt: at.toISOString(), leaseExpiredBefore });
-      if (claim.alreadyDone) return json({ received: true, duplicate: true }, 200);
-      // Another delivery of this event is running its hooks. Not a 2xx: if that attempt fails, this retry must come back.
-      if (claim.inProgress) return json({ error: 'in_progress' }, 409);
-      recorded = true;
-      const outcome = await apply(ev);
-      await d.store.markEvent(ev.eventId, outcome.status, outcome.reason);
-      if (outcome.reason && !QUIET.has(outcome.reason)) d.log({ level: 'warn', reason: outcome.reason, ...tag });
-      return json({ received: true }, 200);
-    } catch (err) {
-      const reason: ReasonCode = err instanceof Failure ? err.reason : 'store_error';
-      d.log({ level: 'error', reason, ...tag });
-      report(d.onError, err instanceof Failure ? err.original : err, { reason, ...tag });
-      try {
-        if (!recorded) throw new Error('event row never written');
-        await d.store.markEvent(ev.eventId, 'failed', reason);
-      } catch {
-        if (reason !== 'store_error') d.log({ level: 'error', reason: 'store_error', ...tag });
-        try {
-          await d.store.recordFailure(reason, d.now());
-        } catch {
-          /* store fully down: the log line above is the only record */
-        }
-      }
-      // 503 for a price lookup that failed: the app is up but cannot tell yet whether the event is its own.
-      return json({ error: reason }, reason === 'prices_unavailable' ? 503 : 500);
-    }
-  };
+  return Object.assign(handle, { process });
 }

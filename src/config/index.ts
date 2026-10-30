@@ -1,6 +1,7 @@
 // Billing environment validation. Pure and edge-safe (no node: imports, no runtime deps).
 // Problem strings name variables (and caller-supplied price keys) only, never values.
 import { PriceError, findPriceMap, type FetchLike } from '../price';
+import { createBilling, type Billing, type BillingConfig } from '../core/billing';
 import type { OwnsResolver } from '../core/types';
 
 /** key -> price id, or key -> { billing cycle -> price id }. */
@@ -257,4 +258,39 @@ function memo<T>(fn: () => Promise<T>, ms: number): () => Promise<T> {
     });
     return value;
   };
+}
+
+export type BillingFromEnvOptions = ReadBillingEnvOptions &
+  Omit<BillingConfig, 'environment' | 'webhookSecret' | 'healthToken' | 'owns' | 'entitlements'> & {
+    /** Price id → features, or a function of the config that builds it from the price ids. Default `{}` (one-time sales only). */
+    entitlements?: BillingConfig['entitlements'] | ((config: BillingEnv | BillingEnvWithLookup) => BillingConfig['entitlements']);
+    /** Default `config.owns` (every id in PADDLE_PRICES, or the resolver with `resolvePrices`). */
+    owns?: BillingConfig['owns'];
+  };
+
+/**
+ * The whole setup in one call: `readBillingEnv`, then `createBilling` only when the env is valid, with the env's
+ * environment, every webhook secret, the health token and `owns` filled in. `billing` is null while billing is off or
+ * misconfigured (then `problems` names the variables), so it is safe at module scope in a build without secrets:
+ * `export const { billing, config, problems } = billingFromEnv(process.env, { requiredPrices: ['pro'], store, … })`.
+ */
+export function billingFromEnv(
+  env: Record<string, string | undefined>,
+  opts: BillingFromEnvOptions,
+): { billing: Billing | null; config: BillingEnv | BillingEnvWithLookup | null; problems: string[] } {
+  const { requiredPrices, requiredCycles, requireLaunchAt, resolvePrices, entitlements, owns, ...rest } = opts;
+  const { config, problems } = readBillingEnv(env, { requiredPrices, requiredCycles, requireLaunchAt, resolvePrices }) as {
+    config: BillingEnv | BillingEnvWithLookup | null;
+    problems: string[];
+  };
+  if (!config) return { billing: null, config: null, problems };
+  const billing = createBilling({
+    ...rest,
+    environment: config.environment,
+    webhookSecret: config.webhookSecrets ?? config.webhookSecret,
+    healthToken: config.healthToken,
+    owns: owns ?? config.owns,
+    entitlements: typeof entitlements === 'function' ? entitlements(config) : (entitlements ?? {}),
+  });
+  return { billing, config, problems };
 }

@@ -43,7 +43,7 @@ Do them in this order. Each step says how to check that it is done. Steps 2–7 
 | 1 | ~~Turn on paddle-kit CI~~ Done in v0.5.0 | Tests run on each push and pull request. | Done |
 | 2 | Sandbox end-to-end test of v0.4.0 in Offday and AppCare: real checkout, real refund, a second product's sale | The v0.4.0 tests used signed test events, not events from Paddle. | Medium |
 | 3 | LeakScan: run its two-connection tests on a real Postgres | Locks between two connections are only tested in the kit, not in LeakScan. | Small |
-| 4 | LeakScan: let `billing:reconcile` read refunds from Paddle | If both the payment event and the refund event are lost, reconcile pays the order. The customer then gets one free scan. | Medium |
+| 4 | LeakScan: call the kit's `reconcilePayments` (v0.7.0) from `billing:reconcile` | If both the payment event and the refund event are lost, reconcile pays the order. The customer then gets one free scan. The kit now replays payments and refunds. | Small |
 | 9 | Build `SnaxxTech/billing-watch` on kit v0.7.0 | The owner never has to check billing by hand. | Small |
 | 10 | Kit README: postgres-js stores jsonb double-encoded unless its json serializers are pass-through (QR Lab finding, 2026-10-29) | `hasAccess` throws on such rows. LeakScan is safe through drizzle. | Small |
 | 5 | Offday: fix the shifts test (`tests/shifts.spec.ts:741`, expects 5 shifts, gets 4) | Not billing. It fails before and after the upgrade. It is possibly a date problem (it failed on a Saturday). | Small |

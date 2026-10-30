@@ -22,18 +22,18 @@ execFileSync('node', ['resolve.cjs'], { cwd: dir, stdio: 'inherit' });
 
 // Prove the published types resolve for NodeNext consumers.
 writeFileSync(join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { module: 'NodeNext', moduleResolution: 'NodeNext', strict: true, noEmit: true, skipLibCheck: false, types: [] }, files: ['check.mts'] }));
-writeFileSync(join(dir, 'check.mts'), `import type { Billing, HealthReport, OwnsResolver } from 'paddle-kit/core';
+writeFileSync(join(dir, 'check.mts'), `import { adjustmentEffect, type Billing, type HealthReport, type OwnsResolver } from 'paddle-kit/core';
 import { memoryStore } from 'paddle-kit/memory';
 import { postgresStore } from 'paddle-kit/postgres';
 import { sqliteStore } from 'paddle-kit/sqlite';
 import { createNextRoute, createWebhookRoute } from 'paddle-kit/next';
 import { getPrice, findPrice, findPriceMap, formatPrice, PriceError, type Price } from 'paddle-kit/price';
 import { createCheckout } from 'paddle-kit/client';
-import { reconcile } from 'paddle-kit/reconcile';
+import { reconcile, reconcilePayments } from 'paddle-kit/reconcile';
 import { planOf, type Plan } from 'paddle-kit/plan';
-import { readBillingEnv, type BillingEnv, type PriceMap } from 'paddle-kit/config';
+import { billingFromEnv, readBillingEnv, type BillingEnv, type PriceMap } from 'paddle-kit/config';
 import { syncCatalog, validateCatalog, type Catalog } from 'paddle-kit/catalog';
-export type T = [Billing, typeof memoryStore, typeof postgresStore, typeof sqliteStore, typeof createNextRoute, typeof createWebhookRoute, typeof createCheckout, typeof reconcile, typeof planOf, Plan, typeof readBillingEnv, BillingEnv, PriceMap, typeof syncCatalog, typeof validateCatalog, Catalog, typeof getPrice, typeof formatPrice, PriceError, Price, typeof findPrice, typeof findPriceMap, HealthReport, OwnsResolver];
+export type T = [Billing, typeof memoryStore, typeof postgresStore, typeof sqliteStore, typeof createNextRoute, typeof createWebhookRoute, typeof createCheckout, typeof reconcile, typeof planOf, Plan, typeof readBillingEnv, BillingEnv, PriceMap, typeof syncCatalog, typeof validateCatalog, Catalog, typeof getPrice, typeof formatPrice, PriceError, Price, typeof findPrice, typeof findPriceMap, HealthReport, OwnsResolver, typeof reconcilePayments, typeof billingFromEnv, typeof adjustmentEffect];
 `);
 execFileSync('npx', ['tsc', '-p', '.'], { cwd: dir, stdio: 'inherit' });
 console.log('types resolve under NodeNext');

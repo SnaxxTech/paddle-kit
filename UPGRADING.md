@@ -44,7 +44,10 @@ No migration. Steps 1–3 are for every app; 4–7 are optional.
    3. Read ids with `await config.resolvePrices()` (in hooks, in the checkout page), never from `config.prices` (it is `{}` without `PADDLE_PRICES`). Show the price with `findPrice` instead of `getPrice`.
    4. Put `PADDLE_API_KEY` on the host. Deploy, check with `paddle-kit-doctor`, send a sandbox checkout, and only then remove `PADDLE_PRICES` from the host (while it is set, it wins).
 7. **Rotate the webhook secret without downtime** when needed: `PADDLE_NOTIFICATION_WEBHOOK_SECRET=old,new` and `webhookSecret: config.webhookSecrets ?? config.webhookSecret` (README, Monitoring).
-8. **Watch every app:** list the apps in an `apps.json` (`name`, `url`, `tokenEnv`, `staleHours`) and run `paddle-kit-doctor --apps apps.json --json` on a schedule; exit 2 means the file is wrong, not that the apps are fine.
+8. **Chargebacks and reversals.** Handle every adjustment through `adjustmentEffect(adj)` (README, Refunds, chargebacks and reversals): `revoke`, `restore` (only what you revoked for that transaction), `review`, `none`. Before, the README example acted on approved refunds only, so a chargeback kept access and a won dispute never gave it back.
+9. **Reconcile payments.** Call `reconcilePayments(billing, { apiKey, since: <7 days ago> })` from the cron that runs `reconcile`. It needs `PADDLE_API_KEY`; your hooks must be idempotent (they already must be).
+10. **Optional: `billingFromEnv`** replaces the `readBillingEnv` + `createBilling` pair (README, Next.js example).
+11. **Watch every app:** list the apps in an `apps.json` (`name`, `url`, `tokenEnv`, `staleHours`) and run `paddle-kit-doctor --apps apps.json --json` on a schedule; exit 2 means the file is wrong, not that the apps are fine.
 
 A custom `Store` needs no change. `Health` is unchanged; the route adds `unverified` (and `checks`).
 

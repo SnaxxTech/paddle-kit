@@ -1,5 +1,5 @@
 import { decideAccess } from './access';
-import { createWebhookHandler, report, timedStore, unverifiedCounter, within } from './handler';
+import { createWebhookHandler, report, timedStore, unverifiedCounter, within, type WebhookHandler } from './handler';
 import { isOwnsResolver, ownershipPredicate } from './owns';
 import { safeEqual } from './signature';
 import { version as kitVersion } from '../../package.json';
@@ -100,6 +100,11 @@ export interface Billing {
   hasAccess(userId: string, feature: string): Promise<boolean>;
 }
 
+// The ledger path of each Billing, for reconcilePayments (internal: not on the public Billing type).
+const processors = new WeakMap<Billing, WebhookHandler['process']>();
+/** @internal */
+export const processorOf = (billing: Billing) => processors.get(billing);
+
 const defaultLog: Logger = (entry) => console[entry.level](JSON.stringify({ source: 'paddle-kit', ...entry }));
 
 export function createBilling(config: BillingConfig): Billing {
@@ -145,7 +150,7 @@ export function createBilling(config: BillingConfig): Billing {
   }
 
   const { webhookSecret: _omitted, ...publicConfig } = config;
-  return {
+  const billing: Billing = {
     config: publicConfig,
     store: config.store,
     handleWebhook,
@@ -170,4 +175,6 @@ export function createBilling(config: BillingConfig): Billing {
       return decideAccess(await store.getSubscriptionsByUser(userId), feature, policy, now());
     },
   };
+  processors.set(billing, handleWebhook.process);
+  return billing;
 }

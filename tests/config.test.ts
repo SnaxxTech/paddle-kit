@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { vi } from 'vitest';
-import { readBillingEnv, type ReadBillingEnvOptions } from '../src/config';
+import { billingFromEnv, readBillingEnv, type ReadBillingEnvOptions } from '../src/config';
+import { memoryStore } from '../src/memory';
+import { sign } from './helpers/sign';
+import { subscriptionEvent } from './helpers/fixtures';
 import { PriceError, type FetchLike } from '../src/price';
 import { resolveOwnership } from '../src/core/owns';
 
@@ -367,4 +370,41 @@ describe('readBillingEnv', () => {
       expect(api.calls).toEqual([]);
     });
   });
+
+  describe('billingFromEnv (one-call setup, since v0.7.0)', () => {
+    it('billing off and misconfigured give billing: null, never a throw (safe at module scope in a build)', () => {
+      expect(billingFromEnv({}, { ...OPTS, store: memoryStore() })).toEqual({ billing: null, config: null, problems: [] });
+      const bad = billingFromEnv({ PADDLE_ENV: 'sandbox' }, { ...OPTS, store: memoryStore() });
+      expect(bad.billing).toBeNull();
+      expect(bad.problems.length).toBeGreaterThan(0);
+    });
+
+    it('valid env: every secret, the health token, owns and entitlements built from the price ids', async () => {
+      const store = memoryStore();
+      const env = { ...valid, PADDLE_NOTIFICATION_WEBHOOK_SECRET: `pdl_ntfset_old,${SECRET}`, PADDLE_HEALTH_TOKEN: 'tok', PADDLE_PRICES: JSON.stringify({ team: { monthly: 'pri_01gsz8x8sawmvhz1pv30nge1ke', yearly: 'pri_y' }, pack: 'pri_p' }) };
+      const now = new Date('2026-10-30T12:00:00Z');
+      const { billing, config } = billingFromEnv(env, {
+        ...OPTS, store, now: () => now, log: () => {},
+        entitlements: (c) => ({ [(c.prices.team as Record<string, string>).monthly!]: ['team'] }),
+      });
+      expect(config?.webhookSecrets).toEqual(['pdl_ntfset_old', SECRET]);
+      expect(billing!.config.owns).toEqual({ priceIds: ['pri_01gsz8x8sawmvhz1pv30nge1ke', 'pri_y', 'pri_p'] });
+      const body = JSON.stringify(subscriptionEvent({ data: { status: 'active' } }));
+      const at = Math.floor(now.getTime() / 1000);
+      for (const secret of ['pdl_ntfset_old', SECRET]) {
+        const res = await billing!.handleWebhook(new Request('https://x/', { method: 'POST', headers: { 'paddle-signature': sign(body, secret, at) }, body }));
+        expect(res.status).toBe(200);
+      }
+      expect(await billing!.hasAccess('user_1', 'team')).toBe(true);
+      expect((await billing!.handleHealth(new Request('https://x/', { headers: { authorization: 'Bearer tok' } }))).status).toBe(200);
+    });
+
+    it('a static entitlements map and an explicit owns are passed through; default entitlements is {}', () => {
+      const own = ({ items }: { items: { priceId: string }[] }) => items.length > 0;
+      const a = billingFromEnv(valid, { ...OPTS, store: memoryStore(), entitlements: { pri_x: ['x'] }, owns: own });
+      expect([a.billing!.config.entitlements, a.billing!.config.owns]).toEqual([{ pri_x: ['x'] }, own]);
+      expect(billingFromEnv(valid, { ...OPTS, store: memoryStore() }).billing!.config.entitlements).toEqual({});
+    });
+  });
 });
+
