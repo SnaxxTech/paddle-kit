@@ -22,18 +22,18 @@ execFileSync('node', ['resolve.cjs'], { cwd: dir, stdio: 'inherit' });
 
 // Prove the published types resolve for NodeNext consumers.
 writeFileSync(join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { module: 'NodeNext', moduleResolution: 'NodeNext', strict: true, noEmit: true, skipLibCheck: false, types: [] }, files: ['check.mts'] }));
-writeFileSync(join(dir, 'check.mts'), `import type { Billing } from 'paddle-kit/core';
+writeFileSync(join(dir, 'check.mts'), `import { adjustmentEffect, type Billing, type HealthReport, type OwnsResolver } from 'paddle-kit/core';
 import { memoryStore } from 'paddle-kit/memory';
 import { postgresStore } from 'paddle-kit/postgres';
 import { sqliteStore } from 'paddle-kit/sqlite';
 import { createNextRoute, createWebhookRoute } from 'paddle-kit/next';
-import { getPrice, formatPrice, PriceError, type Price } from 'paddle-kit/price';
+import { getPrice, findPrice, findPriceMap, formatPrice, PriceError, type Price } from 'paddle-kit/price';
 import { createCheckout } from 'paddle-kit/client';
-import { reconcile } from 'paddle-kit/reconcile';
+import { reconcile, reconcilePayments } from 'paddle-kit/reconcile';
 import { planOf, type Plan } from 'paddle-kit/plan';
-import { readBillingEnv, type BillingEnv, type PriceMap } from 'paddle-kit/config';
+import { billingFromEnv, readBillingEnv, type BillingEnv, type PriceMap } from 'paddle-kit/config';
 import { syncCatalog, validateCatalog, type Catalog } from 'paddle-kit/catalog';
-export type T = [Billing, typeof memoryStore, typeof postgresStore, typeof sqliteStore, typeof createNextRoute, typeof createWebhookRoute, typeof createCheckout, typeof reconcile, typeof planOf, Plan, typeof readBillingEnv, BillingEnv, PriceMap, typeof syncCatalog, typeof validateCatalog, Catalog, typeof getPrice, typeof formatPrice, PriceError, Price];
+export type T = [Billing, typeof memoryStore, typeof postgresStore, typeof sqliteStore, typeof createNextRoute, typeof createWebhookRoute, typeof createCheckout, typeof reconcile, typeof planOf, Plan, typeof readBillingEnv, BillingEnv, PriceMap, typeof syncCatalog, typeof validateCatalog, Catalog, typeof getPrice, typeof formatPrice, PriceError, Price, typeof findPrice, typeof findPriceMap, HealthReport, OwnsResolver, typeof reconcilePayments, typeof billingFromEnv, typeof adjustmentEffect];
 `);
 execFileSync('npx', ['tsc', '-p', '.'], { cwd: dir, stdio: 'inherit' });
 console.log('types resolve under NodeNext');
@@ -47,7 +47,8 @@ if (!help.includes('--webhook-url')) throw new Error('paddle-kit-catalog --help 
 console.log('paddle-kit-catalog bin runs');
 const doctorBin = join(dir, 'node_modules', '.bin', 'paddle-kit-doctor');
 if (!existsSync(doctorBin)) throw new Error('paddle-kit-doctor bin missing after install');
-if (!execFileSync(doctorBin, ['--help'], { cwd: dir, encoding: 'utf8' }).includes('--url')) throw new Error('paddle-kit-doctor --help printed no usage');
+const doctorHelp = execFileSync(doctorBin, ['--help'], { cwd: dir, encoding: 'utf8' });
+if (!doctorHelp.includes('--url') || !doctorHelp.includes('--apps')) throw new Error('paddle-kit-doctor --help printed no usage');
 console.log('paddle-kit-doctor bin runs');
 
 // Behaviour through the installed package: signed webhooks with shared-seller filtering and the known flag.
@@ -60,7 +61,8 @@ const at = new Date().toISOString();
 const txs = [];
 const adjs = [];
 const billing = createBilling({
-  environment: 'sandbox', webhookSecret: secret, store: memoryStore(), entitlements: {}, log: () => {},
+  environment: 'sandbox', webhookSecret: secret, store: memoryStore(), entitlements: {}, log: () => {}, healthToken: 'smoke-token',
+  healthChecks: { smoke: async () => ({ ok: true, detail: 'from the tarball' }) },
   owns: { priceIds: ['pri_ours'] },
   onTransaction: (tx) => { txs.push(tx.transactionId); },
   onAdjustment: (a, ctx) => { adjs.push([a.transactionId, ctx.known]); },
@@ -77,9 +79,13 @@ const statuses = [];
 for (const e of [txn('txn_ours', 'pri_ours', 'e1'), txn('txn_theirs', 'pri_theirs', 'e2'), adj('txn_theirs', 'e3'), adj('txn_unseen', 'e4'), adj('txn_ours', 'e5')]) {
   statuses.push((await send(e)).status);
 }
+// A forged POST is refused and counted in memory only; the health route shows it next to the app's check.
+statuses.push((await billing.handleWebhook(new Request('https://smoke.test/', { method: 'POST', headers: { 'paddle-signature': 'ts=1;h1=' + 'ab'.repeat(32) }, body: '{}' }))).status);
+const health = await (await billing.handleHealth(new Request('https://smoke.test/', { headers: { authorization: 'Bearer smoke-token' } }))).json();
+statuses.push(health.unverified.count, health.failedLast24h, health.checks.smoke.ok);
 const got = JSON.stringify({ statuses, txs, adjs });
-const want = JSON.stringify({ statuses: [200, 200, 200, 200, 200], txs: ['txn_ours'], adjs: [['txn_unseen', false], ['txn_ours', true]] });
+const want = JSON.stringify({ statuses: [200, 200, 200, 200, 200, 401, 1, 0, true], txs: ['txn_ours'], adjs: [['txn_unseen', false], ['txn_ours', true]] });
 if (got !== want) { console.error('webhook smoke failed: got ' + got + ', want ' + want); process.exit(1); }
-console.log('signed webhooks through the tarball: other products filtered, unseen refund passed with known: false');
+console.log('signed webhooks through the tarball: other products filtered, unseen refund passed with known: false, a forged POST counted in memory only');
 `);
 execFileSync('node', ['webhook.mjs'], { cwd: dir, stdio: 'inherit' });

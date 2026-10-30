@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { readBillingEnv, type ReadBillingEnvOptions } from '../src/config';
+import { vi } from 'vitest';
+import { billingFromEnv, readBillingEnv, type ReadBillingEnvOptions } from '../src/config';
+import { memoryStore } from '../src/memory';
+import { sign } from './helpers/sign';
+import { subscriptionEvent } from './helpers/fixtures';
+import { PriceError, type FetchLike } from '../src/price';
+import { resolveOwnership } from '../src/core/owns';
 
 const SECRET = 'pdl_ntfset_DISTINCTIVE_secret_9f3a';
 const OPTS: ReadBillingEnvOptions = { requiredPrices: ['team', 'pack'] };
@@ -26,6 +32,7 @@ describe('readBillingEnv', () => {
     expect(r.config).toEqual({
       environment: 'sandbox',
       webhookSecret: SECRET,
+      webhookSecrets: [SECRET],
       prices: nested,
       clientToken: 'test_TOKEN_distinct_55',
       launchAt: Date.UTC(2026, 9, 20),
@@ -257,4 +264,147 @@ describe('readBillingEnv', () => {
     const { problems } = readBillingEnv({ ...valid, PADDLE_ENV: 'prod', NEXT_PUBLIC_PADDLE_CLIENT_TOKEN: 'live_t', PADDLE_API_KEY: 'pdl_live_k' }, OPTS);
     expect(problems).toEqual(['PADDLE_ENV must be "sandbox" or "production"']);
   });
+
+  describe('several webhook secrets (rotation)', () => {
+    it('comma-separated: webhookSecrets lists each, webhookSecret is the first', () => {
+      const r = readBillingEnv({ ...valid, PADDLE_NOTIFICATION_WEBHOOK_SECRET: `pdl_ntfset_old,${SECRET}` }, OPTS);
+      expect(r.problems).toEqual([]);
+      expect([r.config?.webhookSecret, r.config?.webhookSecrets]).toEqual(['pdl_ntfset_old', ['pdl_ntfset_old', SECRET]]);
+    });
+    it('an empty entry or a space around a comma is a problem, never echoed', () => {
+      for (const v of [`${SECRET},`, `,${SECRET}`, `a,,${SECRET}`]) expect(problemsOf({ ...valid, PADDLE_NOTIFICATION_WEBHOOK_SECRET: v })).toBe('PADDLE_NOTIFICATION_WEBHOOK_SECRET has an empty entry between commas');
+      const p = problemsOf({ ...valid, PADDLE_NOTIFICATION_WEBHOOK_SECRET: `pdl_ntfset_old, ${SECRET}` });
+      expect(p).toBe('PADDLE_NOTIFICATION_WEBHOOK_SECRET has leading or trailing whitespace');
+      expect(p).not.toContain(SECRET);
+    });
+  });
+
+  describe('resolvePrices (since v0.7.0)', () => {
+    const KEY = 'pdl_sdbx_apikey_SECRET_VALUE';
+    const noPrices = { ...valid, PADDLE_PRICES: undefined, PADDLE_API_KEY: KEY };
+    const product = (app: string) => ({ id: `pro_${app}`, status: 'active', custom_data: { paddle_kit: app } });
+    const price = (id: string, label: string, app = 'demo') => ({
+      id, status: 'active', name: label, billing_cycle: null, unit_price: { amount: '1500', currency_code: 'USD' }, custom_data: { paddle_kit_price: label }, product: product(app),
+    });
+    const listing = (data: unknown[]) => {
+      const calls: string[] = [];
+      const fetch: FetchLike = async (url) => (calls.push(url), { ok: true, status: 200, json: async () => ({ data, meta: { pagination: { has_more: false } } }) });
+      return { fetch, calls };
+    };
+    const resolveOpts = (fetch: FetchLike) => ({ ...OPTS, resolvePrices: { app: 'demo', fetch } });
+
+    it('without the option the types are unchanged: the README pattern config.owns!.priceIds still compiles (tsc runs on tests)', () => {
+      const { config } = readBillingEnv(valid, OPTS);
+      expect([...config!.owns!.priceIds, 'pri_legacy']).toHaveLength(4);
+    });
+
+    it('PADDLE_PRICES may be unset; PADDLE_API_KEY is then required', () => {
+      const { fetch } = listing([]);
+      expect(readBillingEnv(noPrices, resolveOpts(fetch)).problems).toEqual([]);
+      expect(problemsOf({ ...noPrices, PADDLE_API_KEY: undefined }, resolveOpts(fetch))).toBe('PADDLE_API_KEY is missing (needed to find the prices in Paddle while PADDLE_PRICES is unset)');
+      expect(problemsOf(noPrices)).toContain('PADDLE_PRICES is missing'); // without the option nothing changes
+    });
+
+    it('resolvePrices() finds the map by label (other apps and unlabelled prices ignored); owns resolves to its ids', async () => {
+      const api = listing([
+        price('pri_tm', 'team-monthly'), price('pri_ty', 'team-yearly'), price('pri_pk', 'pack-once'),
+        price('pri_other', 'team-monthly', 'other-app'), { ...price('pri_nolabel', 'x'), custom_data: null },
+      ]);
+      const { config } = readBillingEnv(noPrices, resolveOpts(api.fetch));
+      expect(config!.prices).toEqual({});
+      expect(await config!.resolvePrices!()).toEqual({ pack: 'pri_pk', team: { monthly: 'pri_tm', yearly: 'pri_ty' } });
+      expect(api.calls).toEqual(['https://sandbox-api.paddle.com/prices?status=active&include=product&per_page=200']);
+      const owns = await resolveOwnership(config!.owns);
+      expect(owns!({ kind: 'transaction', items: [{ priceId: 'pri_pk', productId: null, quantity: 1 }], customData: null })).toBe(true);
+      expect(owns!({ kind: 'transaction', items: [{ priceId: 'pri_other', productId: null, quantity: 1 }], customData: null })).toBe(false);
+    });
+
+    it('a found map is kept (one lookup for many calls); a failure is not kept, so the next call asks again', async () => {
+      let fail = true;
+      const calls: string[] = [];
+      const fetch: FetchLike = async (url) => {
+        calls.push(url);
+        if (fail) return { ok: false, status: 503, json: async () => ({ error: { code: 'unavailable', detail: 'down' } }) };
+        return { ok: true, status: 200, json: async () => ({ data: [price('pri_tm', 'team-monthly'), price('pri_pk', 'pack-once')], meta: { pagination: { has_more: false } } }) };
+      };
+      const { config } = readBillingEnv(noPrices, resolveOpts(fetch));
+      await expect(config!.resolvePrices!()).rejects.toMatchObject({ code: 'http', status: 503 });
+      fail = false;
+      await Promise.all([config!.resolvePrices!(), config!.resolvePrices!(), resolveOwnership(config!.owns)]);
+      expect(calls).toHaveLength(2);
+    });
+
+    it('cacheSeconds bounds how long a found map is kept', async () => {
+      vi.useFakeTimers();
+      try {
+        const api = listing([price('pri_tm', 'team-monthly'), price('pri_pk', 'pack-once')]);
+        const { config } = readBillingEnv(noPrices, { ...OPTS, resolvePrices: { app: 'demo', fetch: api.fetch, cacheSeconds: 60 } });
+        await config!.resolvePrices!();
+        vi.advanceTimersByTime(59_000);
+        await config!.resolvePrices!();
+        vi.advanceTimersByTime(2_000);
+        await config!.resolvePrices!();
+        expect(api.calls).toHaveLength(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('a missing required price or cycle throws not_found; owns then fails (never "owns everything")', async () => {
+      const api = listing([price('pri_tm', 'team-monthly')]);
+      const { config } = readBillingEnv(noPrices, { ...resolveOpts(api.fetch), requiredCycles: ['monthly', 'yearly'] });
+      const err = await config!.resolvePrices!().catch((e) => e);
+      expect(err).toBeInstanceOf(PriceError);
+      expect([err.code, err.message]).toEqual(['not_found', 'app "demo" has no active price labelled "team-yearly" in Paddle']);
+      await expect(resolveOwnership(config!.owns)).rejects.toBeInstanceOf(PriceError);
+      const none = readBillingEnv(noPrices, resolveOpts(listing([]).fetch)).config!;
+      await expect(none.resolvePrices!()).rejects.toThrow('app "demo" has no active price labelled "team-…" in Paddle (run paddle-kit-catalog)');
+    });
+
+    it('a set PADDLE_PRICES is the override: no request, the static owns, resolvePrices() returns it', async () => {
+      const api = listing([price('pri_tm', 'team-monthly')]);
+      const { config } = readBillingEnv({ ...valid, PADDLE_API_KEY: KEY }, resolveOpts(api.fetch));
+      expect(config!.prices).toEqual(nested);
+      expect(config!.owns).toEqual({ priceIds: ['pri_PRICE_team_m_77', 'pri_PRICE_team_y_78', 'pri_PRICE_pack_79'] });
+      expect(await config!.resolvePrices!()).toEqual(nested);
+      expect(api.calls).toEqual([]);
+    });
+  });
+
+  describe('billingFromEnv (one-call setup, since v0.7.0)', () => {
+    it('billing off and misconfigured give billing: null, never a throw (safe at module scope in a build)', () => {
+      expect(billingFromEnv({}, { ...OPTS, store: memoryStore() })).toEqual({ billing: null, config: null, problems: [] });
+      const bad = billingFromEnv({ PADDLE_ENV: 'sandbox' }, { ...OPTS, store: memoryStore() });
+      expect(bad.billing).toBeNull();
+      expect(bad.problems.length).toBeGreaterThan(0);
+    });
+
+    it('valid env: every secret, the health token, owns and entitlements built from the price ids', async () => {
+      const store = memoryStore();
+      const env = { ...valid, PADDLE_NOTIFICATION_WEBHOOK_SECRET: `pdl_ntfset_old,${SECRET}`, PADDLE_HEALTH_TOKEN: 'tok', PADDLE_PRICES: JSON.stringify({ team: { monthly: 'pri_01gsz8x8sawmvhz1pv30nge1ke', yearly: 'pri_y' }, pack: 'pri_p' }) };
+      const now = new Date('2026-10-30T12:00:00Z');
+      const { billing, config } = billingFromEnv(env, {
+        ...OPTS, store, now: () => now, log: () => {},
+        entitlements: (c) => ({ [(c.prices.team as Record<string, string>).monthly!]: ['team'] }),
+      });
+      expect(config?.webhookSecrets).toEqual(['pdl_ntfset_old', SECRET]);
+      expect(billing!.config.owns).toEqual({ priceIds: ['pri_01gsz8x8sawmvhz1pv30nge1ke', 'pri_y', 'pri_p'] });
+      const body = JSON.stringify(subscriptionEvent({ data: { status: 'active' } }));
+      const at = Math.floor(now.getTime() / 1000);
+      for (const secret of ['pdl_ntfset_old', SECRET]) {
+        const res = await billing!.handleWebhook(new Request('https://x/', { method: 'POST', headers: { 'paddle-signature': sign(body, secret, at) }, body }));
+        expect(res.status).toBe(200);
+      }
+      expect(await billing!.hasAccess('user_1', 'team')).toBe(true);
+      expect((await billing!.handleHealth(new Request('https://x/', { headers: { authorization: 'Bearer tok' } }))).status).toBe(200);
+    });
+
+    it('a static entitlements map and an explicit owns are passed through; default entitlements is {}', () => {
+      const own = ({ items }: { items: { priceId: string }[] }) => items.length > 0;
+      const a = billingFromEnv(valid, { ...OPTS, store: memoryStore(), entitlements: { pri_x: ['x'] }, owns: own });
+      expect([a.billing!.config.entitlements, a.billing!.config.owns]).toEqual([{ pri_x: ['x'] }, own]);
+      expect(billingFromEnv(valid, { ...OPTS, store: memoryStore() }).billing!.config.entitlements).toEqual({});
+    });
+  });
 });
+

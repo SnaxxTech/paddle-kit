@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Paddle, Environment } from '@paddle/paddle-node-sdk';
-import { parseSignatureHeader, verifySignature } from '../src/core/signature';
+import { parseSignatureHeader, safeEqual, verifySignature } from '../src/core/signature';
 import { sign } from './helpers/sign';
 
 const SECRET = 'pdl_ntfset_test_secret';
@@ -46,16 +46,38 @@ describe('verifySignature', () => {
     expect(await verifySignature({ rawBody: BODY, header, secret: SECRET, now: (ts + 6) * 1000 })).toEqual({ ok: false, reason: 'stale_timestamp' });
     expect(await verifySignature({ rawBody: BODY, header, secret: SECRET, now: (ts + 5) * 1000 })).toEqual({ ok: true });
   });
-  it('does not reject a future timestamp (one-sided, same as the SDK)', async () => {
+  it('accepts a timestamp up to 60 s ahead (default skew), refuses one further ahead as future_timestamp (the SDK accepts any; since v0.7.0)', async () => {
     const ts = 1_700_000_000;
     const header = sign(BODY, SECRET, ts);
     expect(await verifySignature({ rawBody: BODY, header, secret: SECRET, now: (ts - 60) * 1000 })).toEqual({ ok: true });
+    expect(await verifySignature({ rawBody: BODY, header, secret: SECRET, now: (ts - 61) * 1000 })).toEqual({ ok: false, reason: 'future_timestamp' });
+    expect(await verifySignature({ rawBody: BODY, header, secret: SECRET, now: (ts - 61) * 1000, futureSkewSeconds: 120 })).toEqual({ ok: true });
+  });
+  it('a forged future header is signature_mismatch, not future_timestamp (the signature is checked first)', async () => {
+    const ts = 1_700_000_000;
+    expect(await verifySignature({ rawBody: BODY, header: sign(BODY, 'other', ts), secret: SECRET, now: (ts - 600) * 1000 })).toEqual({ ok: false, reason: 'signature_mismatch' });
+  });
+  it('several secrets: a signature made with any of them is verified', async () => {
+    const header = sign(BODY, SECRET);
+    expect(await verifySignature({ rawBody: BODY, header, secret: ['old_secret', SECRET] })).toEqual({ ok: true });
+    expect(await verifySignature({ rawBody: BODY, header, secret: ['old_secret', 'other'] })).toEqual({ ok: false, reason: 'signature_mismatch' });
+    expect(await verifySignature({ rawBody: BODY, header, secret: [] })).toEqual({ ok: false, reason: 'signature_mismatch' });
   });
   it('accepts when any of several h1 values matches (secret rotation)', async () => {
     const ts = Math.floor(Date.now() / 1000);
     const good = sign(BODY, SECRET, ts).split(';')[1];
     const bad = sign(BODY, 'old_secret', ts).split(';')[1];
     expect(await verifySignature({ rawBody: BODY, header: `ts=${ts};${good};${bad}`, secret: SECRET })).toEqual({ ok: true });
+  });
+});
+
+describe('safeEqual', () => {
+  it('true only for equal strings, whatever the lengths', async () => {
+    expect(await safeEqual('Bearer tok', 'Bearer tok')).toBe(true);
+    for (const [a, b] of [['Bearer tok', 'Bearer tox'], ['Bearer to', 'Bearer tok'], ['', 'Bearer tok'], ['Bearer tok', 'Bearer tok '], ['x'.repeat(10_000), 'Bearer tok']]) {
+      expect(await safeEqual(a!, b!)).toBe(false);
+    }
+    expect(await safeEqual('', '')).toBe(true);
   });
 });
 
