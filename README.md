@@ -834,6 +834,48 @@ Result: PROBLEM in offday (exit 1)
 - **Exit codes:** 0 every app green; 1 one or more apps red; **2 the apps file or the flags are wrong, and nothing was checked**: a job must not close issues on exit 2.
 - A token is never printed, in the table or the JSON. `--apps` takes no `--url`, `--token` or `--stale-hours`.
 
+**The dashboard: `--html <file>` (since v0.7.0).** The same run also writes one status page: a summary (apps, OK, needing attention, bot requests turned away), then a card per app, red first, each with what to fix in plain words. The page is one self-contained HTML file: no script, no external file, no token, every value escaped. It follows the viewer's light or dark mode and works at phone width.
+
+```bash
+LEAKSCAN_HEALTH_TOKEN=… QRLAB_HEALTH_TOKEN=… OFFDAY_HEALTH_TOKEN=… \
+  npx paddle-kit-doctor --apps apps.json --json --html site/index.html > results.json
+```
+
+Publish it from `SnaxxTech/billing-watch` every 6 hours: the tokens stay in GitHub secrets, and only the finished page goes to Vercel, behind Vercel's login (Project > Settings > Deployment Protection > Vercel Authentication). A sketch of the workflow (**UNVERIFIED**: not run yet; pin `vercel` to a version):
+
+```yaml
+# .github/workflows/billing-watch.yml
+on:
+  schedule: [{ cron: '17 */6 * * *' }]
+  workflow_dispatch: {}
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Check every app
+        env:
+          LEAKSCAN_HEALTH_TOKEN: ${{ secrets.LEAKSCAN_HEALTH_TOKEN }}
+          QRLAB_HEALTH_TOKEN: ${{ secrets.QRLAB_HEALTH_TOKEN }}
+          OFFDAY_HEALTH_TOKEN: ${{ secrets.OFFDAY_HEALTH_TOKEN }}
+        run: |
+          mkdir -p site
+          set +e
+          npx --yes --package=github:SnaxxTech/paddle-kit#v0.7.0 paddle-kit-doctor --apps apps.json --json --html site/index.html > results.json
+          code=$?
+          [ "$code" -eq 2 ] && exit 2   # the file or flags are wrong: fail loudly, publish nothing
+          exit 0                        # red apps are shown on the page (and, later, as issues)
+      - name: Publish the page
+        env: { VERCEL_TOKEN: '${{ secrets.VERCEL_TOKEN }}', VERCEL_ORG_ID: '${{ secrets.VERCEL_ORG_ID }}', VERCEL_PROJECT_ID: '${{ secrets.VERCEL_PROJECT_ID }}' }
+        run: npx --yes vercel deploy site --prod --token "$VERCEL_TOKEN" --yes
+```
+
+Put a `site/vercel.json` next to the page so browsers always ask for the newest copy and search engines skip it: `{ "headers": [{ "source": "/(.*)", "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }, { "key": "X-Robots-Tag", "value": "noindex" }] }] }`. One static file per run costs one deployment and a few edge requests per view.
+
+**Adding an app later** is one line in `apps.json` (`name`, `url`, `tokenEnv`, optional `staleHours`) plus its token as a GitHub secret named like `tokenEnv`. The page, the table and the JSON grow with it; nothing else changes.
+
 **Rotate the webhook secret without downtime (since v0.7.0).** Paddle gives each destination its own secret. To change it, make a second destination for the same URL (its secret is new), and put both secrets in `PADDLE_NOTIFICATION_WEBHOOK_SECRET`, separated by a comma: `pdl_ntfset_old,pdl_ntfset_new`. Pass `webhookSecret: config.webhookSecrets ?? config.webhookSecret` (`createBilling` takes an array). Deploy. Both destinations now deliver each event, and the ledger keeps one (same `event_id`). Turn off the old destination, remove the old secret, deploy again. **UNVERIFIED** against real Paddle: that two destinations send the same `event_id`.
 
 **Reason codes:** `missing_body`, `body_too_large`, `bad_signature_header`, `signature_mismatch`, `stale_timestamp`, `future_timestamp`, `bad_json`, `bad_payload`, `unknown_event`, `no_user_id`, `out_of_order`, `store_error`, `hook_error`, `not_ours`, `unmatched`, `mirrored`, `prices_unavailable`.
@@ -944,7 +986,7 @@ Do these steps one time for each app: first in sandbox, then again for live.
 | 2026-10-16 | v0.3 | A real full refund through the API | `onAdjustment` ran two times: `adjustment.created` (`pending_approval`, `type: full`), then about 7 minutes later `adjustment.updated` (`approved`, `type: full`). |
 | 2026-10-16 | v0.3 | Catalog CLI on the real sandbox | It made a catalog, did nothing on a second run, and its teardown removed only its own resources. It also moved Offday's old catalog. |
 | 2026-10-17 | v0.4 | Test suite on a real Postgres 17.10 server (`embedded-postgres`) | 305 of 305 tests pass. 50 parallel copies of one event run the hook one time. A load of 1,000 events gave 0 errors. |
-| 2026-10-29 | v0.7 | Test suite, plus the real-Postgres suite on Postgres 17.10 (`embedded-postgres`) | 433 of 433 tests, and 5 of 5 on real Postgres (1,000 events: 0 errors, 1,000 of 1,000 samples counted). 500 unsigned and forged POSTs made 0 store calls (v0.6.0 made one `recordFailure` per request). |
+| 2026-10-29 | v0.7 | Test suite, plus the real-Postgres suite on Postgres 17.10 (`embedded-postgres`) | 436 of 436 tests, and 5 of 5 on real Postgres (1,000 events: 0 errors, 1,000 of 1,000 samples counted). 500 unsigned and forged POSTs made 0 store calls (v0.6.0 made one `recordFailure` per request). |
 | 2026-10-29 | v0.7 | The packed tarball in a scratch app (`npm run smoke`), and the built `paddle-kit-doctor --apps` against two local health routes (real `fetch`, a real apps file) | Smoke passed. The doctor printed the table and the JSON, exited 1 for the misconfigured app and 0 for the healthy one in single-app mode, and printed no token. |
 
 Test fixtures are the real payloads that we captured (see `tests/fixtures/SOURCES.md`).

@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { createBilling } from '../src/core/billing';
 import { memoryStore } from '../src/memory';
 import { createWebhookRoute } from '../src/next';
-import { diagnose, main, parseArgs, type DoctorFetch } from '../src/doctor/cli';
+import { diagnose, main, parseArgs, renderDashboard, type DoctorFetch } from '../src/doctor/cli';
+import { mkdtempSync, readFileSync as readFile } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const NOW = Date.parse('2026-10-29T12:00:00Z');
 const URL_ = 'https://app.example.com/api/paddle';
@@ -356,6 +359,47 @@ describe('paddle-kit-doctor --apps', () => {
     expect(out.apps[0]).toMatchObject({ billing: 'on', checks: { price: { ok: false, detail: 'fallback: not_found' } }, problems: ['check "price" failed: fallback: not_found'] });
     expect(out.apps[1]).toMatchObject({ billing: 'off', ok: false });
     expect(r.code).toBe(1);
+  });
+});
+
+describe('paddle-kit-doctor --html (dashboard)', () => {
+  const apps = JSON.stringify([
+    { name: 'green', url: 'https://green.example/api/paddle', tokenEnv: 'G' },
+    { name: 'red', url: 'https://red.example/api/paddle', tokenEnv: 'R' },
+  ]);
+  const hostile = '<script>alert(1)</script>';
+  const fleet: DoctorFetch = async (url) =>
+    url.includes('//green.')
+      ? answer(200, health({ checks: { price: { ok: true, detail: `paddle ${hostile}` } }, unverified: { since: 'x', count: 7, byReason: {}, lastAt: null, lastReason: null } }))()
+      : answer(503, JSON.stringify({ error: 'misconfigured', problems: [`PADDLE_PRICES is missing ${hostile}`] }))();
+
+  it('writes one self-contained page: red first, escaped, no token, no script or external file; exit code unchanged', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'doctor-html-'));
+    const file = join(dir, 'index.html');
+    let written = '';
+    const r = await run(['--apps', 'apps.json', '--html', file], fleet, { G: 'tok-green-secret', R: 'tok-red-secret' }, { 'apps.json': apps });
+    written = readFile(file, 'utf8');
+    expect(r.code).toBe(1);
+    expect(written).toContain('1 of 2 apps need attention');
+    expect(written.indexOf('<h2>red</h2>')).toBeLessThan(written.indexOf('<h2>green</h2>'));
+    expect(written).not.toContain(hostile);
+    expect(written).toContain('&lt;script&gt;');
+    expect(written).not.toMatch(/<script|<link|src=|https?:\/\/(?!green\.|red\.)/);
+    expect(written).not.toContain('tok-');
+    expect(written).toContain('<code>PADDLE_PRICES is missing &lt;script&gt;alert(1)&lt;/script&gt;</code>');
+    expect(written).toMatch(/<span class="n">7<\/span><span class="l">bot requests turned away/);
+  });
+
+  it('all green says so; status is in words, not colour alone', () => {
+    const html = renderDashboard([{ name: 'a', url: 'https://a/x', tokenEnv: 'A', ok: true, reachable: true, httpStatus: 200, billing: 'on', environment: 'sandbox', kitVersion: '0.7.0', envProblems: [], lastEventAt: '2026-10-29T11:00:00.000Z', lastEventAgeHours: 1, staleHours: null, stale: null, lastOwnedAt: null, failedLast24h: 0, lastFailureReason: null, lastFailureAt: null, unverifiedCount: 0, checks: {}, problems: [], lines: [] }], NOW);
+    expect(html).toContain('All 1 app OK');
+    expect(html).toMatch(/<\/svg>OK<\/span>/);
+  });
+
+  it('an unwritable --html path exits 2 after checking', async () => {
+    const r = await run(['--apps', 'apps.json', '--html', '/nonexistent-dir/x/index.html'], fleet, { G: 'g', R: 'r' }, { 'apps.json': apps });
+    expect(r.code).toBe(2);
+    expect(r.output).toContain('cannot write');
   });
 });
 

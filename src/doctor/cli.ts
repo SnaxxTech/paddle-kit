@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 // paddle-kit-doctor --url https://app.example.com/api/paddle [--token <PADDLE_HEALTH_TOKEN>]
-// paddle-kit-doctor --apps apps.json [--json]
+// paddle-kit-doctor --apps apps.json [--json] [--html dashboard.html]
 // Calls deployed apps' health routes (GET, Authorization: Bearer) and says in plain words what is wrong.
 // Exit 0: no problem (warnings allowed). Exit 1: a problem (single-app mode: also a usage error). Exit 2: with --apps,
 // the file or the flags are wrong and nothing was checked. Never prints a token.
-import { readFileSync, realpathSync } from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { HealthReport } from '../core/types';
+import { version as kitVersion } from '../../package.json';
 
 export const USAGE = `Usage: paddle-kit-doctor --url <health route URL> [--token <token>]
-       paddle-kit-doctor --apps <apps.json> [--json]
+       paddle-kit-doctor --apps <apps.json> [--json] [--html <file>]
 
   --url <url>          the app's webhook route, e.g. https://app.example.com/api/paddle (https; http only for localhost)
   --token <token>      the app's PADDLE_HEALTH_TOKEN (default: the PADDLE_HEALTH_TOKEN environment variable)
@@ -18,6 +19,7 @@ export const USAGE = `Usage: paddle-kit-doctor --url <health route URL> [--token
   --apps <file>        check several apps: a JSON array of { "name", "url", "tokenEnv", "staleHours"? }. Each token
                        is read from the environment variable that tokenEnv names, never from the file.
   --json               print one JSON result (for a scheduled job), not the table
+  --html <file>        also write a self-contained status page (one card per app) to <file>
   --timeout <ms>       give up on an app after this long (default: 10000)
   --help               show this text
 `;
@@ -269,11 +271,114 @@ function table(results: AppResult[], now: number): string[] {
   return rows.map((row) => row.map((cell, i) => cell.padEnd(widths[i]!)).join('  ').trimEnd());
 }
 
+const esc = (v: unknown) =>
+  String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+
+// Lucide icons (ISC), inline so the page needs no other file.
+const ICON_OK = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>';
+const ICON_BAD = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>';
+
+/**
+ * One self-contained HTML page: a summary strip, then a card per app, red first. Every value is escaped (problems and
+ * check details come from the apps). No script, no external file, no token: safe to publish behind a login.
+ * Light and dark follow the viewer; status is shown by icon and words, never by colour alone.
+ */
+export function renderDashboard(results: AppResult[], now: number): string {
+  const red = results.filter((r) => !r.ok);
+  const sorted = [...red, ...results.filter((r) => r.ok)];
+  const checkedAt = new Date(now).toISOString();
+  const refused = results.reduce((n, r) => n + (r.unverifiedCount ?? 0), 0);
+  const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  const row = (label: string, value: string, tone: '' | 'warn' | 'bad' = '') =>
+    `<div class="row${tone ? ` ${tone}` : ''}"><dt>${esc(label)}</dt><dd>${value}</dd></div>`;
+  const card = (r: AppResult, i: number) => {
+    const rows: string[] = [];
+    if (!r.reachable) rows.push(row('Reachable', 'no', 'bad'));
+    const billing = r.billing === 'on' ? `on <span class="muted">${esc(r.environment ?? '')}</span>` : r.billing === null ? '—' : esc(r.billing.replace('_', ' '));
+    rows.push(row('Billing', billing, r.billing !== null && r.billing !== 'on' ? 'bad' : ''));
+    if (r.kitVersion) rows.push(row('paddle-kit', `<span class="num">${esc(r.kitVersion)}</span>`));
+    if (r.billing === 'on') {
+      const age = r.lastEventAt ? `${esc(span(r.lastEventAt, now) ?? '?')} ago` : 'none yet';
+      rows.push(row('Last verified event', `<span class="num">${age}</span>${r.stale ? `<span class="tag">over ${esc(r.staleHours)} h</span>` : ''}`, r.stale ? 'warn' : ''));
+      const failed = r.failedLast24h ?? 0;
+      rows.push(row('Failed in 24 h', `<span class="num">${esc(failed)}</span>${r.lastFailureReason ? `<span class="muted"> · ${esc(r.lastFailureReason)}</span>` : ''}`, failed > 0 ? 'warn' : ''));
+      if (r.unverifiedCount) rows.push(row('Refused unsigned', `<span class="num">${esc(r.unverifiedCount)}</span><span class="muted"> · no DB write</span>`));
+    }
+    for (const [name, c] of Object.entries(r.checks)) {
+      rows.push(row(`Check · ${name}`, `${c.ok ? 'ok' : 'failed'}${c.detail ? `<span class="detail">${esc(c.detail)}</span>` : ''}`, c.ok ? '' : 'bad'));
+    }
+    // A problem line indented by two spaces belongs to the line above it (the variables of "misconfigured on the host:").
+    const items: { text: string; sub: string[] }[] = [];
+    for (const p of r.problems) {
+      if (p.startsWith('  ') && items.length) items.at(-1)!.sub.push(p.trim());
+      else items.push({ text: p, sub: [] });
+    }
+    const problems = items.length
+      ? `<section class="fix"><h3>What to fix</h3><ul>${items
+          .map((it) => `<li>${esc(it.text.replace(/:$/, ''))}${it.sub.length ? `<ul>${it.sub.map((x) => `<li><code>${esc(x)}</code></li>`).join('')}</ul>` : ''}</li>`)
+          .join('')}</ul></section>`
+      : '';
+    return `<article class="card ${r.ok ? 'ok' : 'bad'}" style="--i:${i}">
+<header><h2>${esc(r.name)}</h2><span class="status">${r.ok ? ICON_OK : ICON_BAD}${r.ok ? 'OK' : 'Needs attention'}</span></header>
+<p class="url">${esc(r.url)}</p><dl>${rows.join('')}</dl>${problems}</article>`;
+  };
+  const headline = red.length === 0 ? `All ${plural(results.length, 'app')} OK` : `${red.length} of ${plural(results.length, 'app')} need attention`;
+  const stat = (n: number, label: string, tone = '') => `<div class="stat${tone ? ` ${tone}` : ''}"><span class="n">${n}</span><span class="l">${esc(label)}</span></div>`;
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex"><meta name="color-scheme" content="light dark"><title>Billing status</title>
+<style>
+:root{--bg:#f8fafc;--card:#fff;--text:#0f172a;--muted:#475569;--line:#e2e8f0;--ok:#15803d;--ok-bg:#dcfce7;--bad:#b91c1c;--bad-bg:#fee2e2;--warn:#a16207;--warn-bg:#fef3c7;--bad-line:#fecaca;--shadow:0 1px 2px rgb(15 23 42/.06),0 1px 1px rgb(15 23 42/.04)}
+@media (prefers-color-scheme:dark){:root{--bg:#0b1120;--card:#141c2f;--text:#f1f5f9;--muted:#94a3b8;--line:#243047;--ok:#4ade80;--ok-bg:rgb(34 197 94/.14);--bad:#f87171;--bad-bg:rgb(239 68 68/.14);--warn:#fbbf24;--warn-bg:rgb(245 158 11/.14);--bad-line:rgb(248 113 113/.35);--shadow:none}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+main{max-width:1120px;margin:0 auto;padding:32px 16px 56px}
+.top{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:12px 24px;margin-bottom:20px}
+h1{font-size:13px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:0 0 4px}
+.headline{font-size:24px;font-weight:650;letter-spacing:-.01em;margin:0}
+.meta{color:var(--muted);font-size:13px;margin:0}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:24px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 16px;box-shadow:var(--shadow)}
+.stat .n{display:block;font-size:24px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.2}
+.stat .l{color:var(--muted);font-size:13px}.stat.bad .n{color:var(--bad)}.stat.ok .n{color:var(--ok)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;box-shadow:var(--shadow)}
+.card.bad{border-color:var(--bad-line)}
+.card header{display:flex;align-items:center;justify-content:space-between;gap:8px}
+h2{font-size:17px;font-weight:650;margin:0}
+.status{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;padding:3px 10px 3px 8px;border-radius:999px;background:var(--ok-bg);color:var(--ok)}
+.bad .status{background:var(--bad-bg);color:var(--bad)}
+.url{color:var(--muted);font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;margin:4px 0 12px;overflow-wrap:anywhere}
+dl{margin:0}.row{display:flex;justify-content:space-between;align-items:baseline;gap:16px;padding:7px 0;border-top:1px solid var(--line)}
+dt{color:var(--muted);white-space:nowrap}dd{margin:0;text-align:right;overflow-wrap:anywhere}
+.row.warn dd{color:var(--warn);font-weight:600}.row.bad dd{color:var(--bad);font-weight:600}
+.num{font-variant-numeric:tabular-nums}.muted{color:var(--muted);font-weight:400}
+.detail{display:block;color:var(--muted);font-weight:400;font-size:13px}
+.tag{margin-left:8px;font-size:12px;font-weight:600;padding:1px 8px;border-radius:999px;background:var(--warn-bg);color:var(--warn)}
+.fix{margin-top:14px;padding:12px 14px;border-radius:10px;background:var(--bad-bg)}
+.fix h3{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--bad);margin:0 0 6px}
+.fix ul{margin:0;padding-left:18px}.fix li{overflow-wrap:anywhere}.fix li+li{margin-top:6px}.fix ul ul{margin-top:4px}
+code{font:13px ui-monospace,SFMono-Regular,Menlo,monospace}
+footer{margin-top:28px;color:var(--muted);font-size:13px}
+@media (prefers-reduced-motion:no-preference){.card{animation:in 200ms cubic-bezier(.23,1,.32,1) both;animation-delay:calc(var(--i)*40ms)}}
+@keyframes in{from{opacity:0;transform:translateY(6px)}}
+@media print{.card{animation:none;box-shadow:none;break-inside:avoid}}
+</style></head><body><main>
+<div class="top"><div><h1>Billing status</h1><p class="headline">${esc(headline)}</p></div>
+<p class="meta">Checked <time datetime="${checkedAt}">${esc(checkedAt.replace('T', ' ').slice(0, 16))} UTC</time></p></div>
+<section class="stats" aria-label="Summary">${stat(results.length, 'apps')}${stat(results.length - red.length, 'OK', 'ok')}${stat(red.length, 'need attention', red.length ? 'bad' : '')}${stat(refused, 'bot requests turned away')}</section>
+<section class="grid" aria-label="Apps">${sorted.map(card).join('\n')}</section>
+<footer>Generated by paddle-kit-doctor ${esc(kitVersion)}. Add an app with one line in apps.json. Tokens are never on this page.</footer>
+</main></body></html>
+`;
+}
+
 export interface DoctorArgs {
   url?: string;
   token?: string;
   apps?: string;
   json?: boolean;
+  html?: string;
   staleHours?: number;
   timeoutMs: number;
   help: boolean;
@@ -293,6 +398,7 @@ export function parseArgs(argv: string[]): DoctorArgs {
     else if (a === '--token') args.token = value(i++, a);
     else if (a === '--apps') args.apps = value(i++, a);
     else if (a === '--json') args.json = true;
+    else if (a === '--html') args.html = value(i++, a);
     else if (a === '--stale-hours') {
       args.staleHours = Number(value(i++, a));
       if (!(args.staleHours > 0)) throw new Error('--stale-hours needs a number of hours above 0');
@@ -342,7 +448,7 @@ export async function main(
   const fetchImpl: DoctorFetch = deps.fetch ?? ((u, init) => fetch(u, init));
   const check = { fetch: fetchImpl, timeoutMs: args.timeoutMs, now };
 
-  if (args.apps === undefined && !args.json) {
+  if (args.apps === undefined && !args.json && args.html === undefined) {
     const t = targets[0]!;
     if (!t.token) out('Note: no token (--token or PADDLE_HEALTH_TOKEN): the route can only say whether billing is on.');
     out(`Checking ${t.url.origin}${t.url.pathname}`);
@@ -357,6 +463,14 @@ export async function main(
     targets.map((t) => (t.token || t.tokenEnv === null ? checkApp(t, check) : finish(blank(t), [`PROBLEM: ${t.tokenEnv} is not set in this environment`]))),
   );
   const ok = results.every((r) => r.ok);
+  if (args.html !== undefined) {
+    try {
+      writeFileSync(path.resolve(args.html), renderDashboard(results, now));
+    } catch {
+      console.error(`paddle-kit-doctor: cannot write ${args.html}`);
+      return 2;
+    }
+  }
   if (args.json) {
     out(JSON.stringify({ ok, checkedAt: new Date(now).toISOString(), apps: results.map(({ lines: _lines, ...r }) => r) }, null, 2));
   } else {
