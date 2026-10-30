@@ -841,7 +841,7 @@ LEAKSCAN_HEALTH_TOKEN=… QRLAB_HEALTH_TOKEN=… OFFDAY_HEALTH_TOKEN=… \
   npx paddle-kit-doctor --apps apps.json --json --html site/index.html > results.json
 ```
 
-Publish it from `SnaxxTech/billing-watch` every 6 hours: the tokens stay in GitHub secrets, and only the finished page goes to Vercel, behind Vercel's login (Project > Settings > Deployment Protection > Vercel Authentication). A sketch of the workflow (**UNVERIFIED**: not run yet; pin `vercel` to a version):
+Publish it from `SnaxxTech/billing-watch` every 6 hours: the tokens stay in GitHub secrets, and only the finished page goes to Vercel, behind Vercel's login (Project > Settings > Deployment Protection > Vercel Authentication, scope **All Deployments**: Standard Protection leaves production domains public). A sketch of the workflow (**UNVERIFIED**: not run yet; pin `vercel` to a version):
 
 ```yaml
 # .github/workflows/billing-watch.yml
