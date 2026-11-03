@@ -311,6 +311,53 @@ describe.skipIf(!live)('real Postgres: concurrency', () => {
     expect(rows[0]!.n).toBe(0);
   });
 
+  it('outbox: a worker whose lease expired cannot overwrite the retry state of the worker that took the item over', async () => {
+    await pool.query(`INSERT INTO paddle_outbox (id, kind, payload, attempts) VALUES ('late', 'email', 'null', 1)`);
+    const q = (t: string, p?: unknown[]) => pool.query(t, p);
+    let releaseA!: () => void;
+    let started!: () => void;
+    const aStarted = new Promise<void>((r) => { started = r; });
+    const slowA = drainOutbox(q, { email: async () => { started(); await new Promise<void>((r) => { releaseA = r; }); throw new Error('A failed late'); } }, { leaseSeconds: 0.2 });
+    await aStarted;
+    await sleep(400); // A's lease is over: B takes the item and fails it (attempts 1 -> 2)
+    expect(await drainOutbox(q, { email: async () => { throw new Error('B failed'); } }, { leaseSeconds: 0.2 })).toMatchObject({ failed: 1 });
+    releaseA();
+    const a = await slowA;
+    const { rows } = await pool.query(`SELECT attempts, last_error FROM paddle_outbox WHERE id = 'late'`);
+    report(`outbox stale worker: A=${JSON.stringify(a)} row=${JSON.stringify(rows[0])}`);
+    expect(rows[0]).toEqual({ attempts: 3, last_error: 'Error: B failed' }); // 1 before, A's claim, B's claim
+    expect(a).toMatchObject({ failed: 0, lost: 1 });
+  });
+
+  it('outbox: a send that finished after its lease still counts as sent; each takeover counts as an attempt', async () => {
+    await pool.query(`INSERT INTO paddle_outbox (id, kind, payload) VALUES ('slow', 'email', 'null')`);
+    const q = (t: string, p?: unknown[]) => pool.query(t, p);
+    let releaseB!: () => void;
+    const a = drainOutbox(q, { email: async () => { await sleep(300); } }, { leaseSeconds: 0.1 });
+    await sleep(150); // A's lease is over: B takes the item and hangs
+    const b = drainOutbox(q, { email: async () => { await new Promise<void>((r) => { releaseB = r; }); } }, { leaseSeconds: 10 });
+    await sleep(50);
+    expect((await pool.query(`SELECT attempts FROM paddle_outbox WHERE id = 'slow'`)).rows[0]!.attempts).toBe(2);
+    expect(await a).toMatchObject({ sent: 1, lost: 0 }); // A did send it: the item is done, never re-sent every lease
+    releaseB();
+    await b;
+    const { rows } = await pool.query(`SELECT sent_at IS NOT NULL AS sent FROM paddle_outbox WHERE id = 'slow'`);
+    expect(rows[0]!.sent).toBe(true);
+  });
+
+  it('outbox: a batch does not start the lease of items it has not reached yet', async () => {
+    const q = (t: string, p?: unknown[]) => pool.query(t, p);
+    await pool.query(`INSERT INTO paddle_outbox (id, kind, payload, next_at) VALUES ('first', 'slow', 'null', now() - interval '2 s'), ('second', 'fast', 'null', now() - interval '1 s')`);
+    const sent: string[] = [];
+    const handlers = { slow: async (_: unknown, i: { id: string }) => { sent.push(i.id); await sleep(500); }, fast: async (_: unknown, i: { id: string }) => { sent.push(i.id); } };
+    const a = drainOutbox(q, handlers, { limit: 2, leaseSeconds: 0.3 });
+    await sleep(350); // 'first' is still running; had the batch leased 'second' at the start, that lease is over now
+    await drainOutbox(q, { fast: handlers.fast }, { limit: 2, leaseSeconds: 0.3 });
+    await a;
+    report(`outbox batch: sent ${JSON.stringify(sent)}`);
+    expect(sent.filter((id) => id === 'second')).toHaveLength(1);
+  });
+
   it('load: 1,000 events through handleWebhook — p95 latency and error count, samples reconciled against sent', async () => {
     let txCalls = 0;
     let adjCalls = 0;

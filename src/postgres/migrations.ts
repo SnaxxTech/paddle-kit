@@ -138,4 +138,18 @@ CREATE TABLE IF NOT EXISTS paddle_outbox (
 CREATE INDEX IF NOT EXISTS paddle_outbox_due_idx ON paddle_outbox (next_at) WHERE sent_at IS NULL;
 `,
   },
+  {
+    name: '006_recovery_progress',
+    // CREATE-only: where an interrupted recovery run stopped, so the next run continues its window (since v0.8.7).
+    sql: `CREATE TABLE IF NOT EXISTS paddle_recovery_progress (
+  name text PRIMARY KEY,
+  run_id text NOT NULL,
+  window_from timestamptz NOT NULL,
+  window_to timestamptz NOT NULL,
+  phase text NOT NULL,
+  cursor text,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+`,
+  },
 ];

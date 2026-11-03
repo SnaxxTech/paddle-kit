@@ -26,21 +26,24 @@ export interface Products {
 
 /** Throws (naming the product or price, never a value from the env) when a product has no price on sale. */
 export function defineProducts(prices: PriceMap, products: Record<string, ProductDefinition>): Products {
-  const entitlements: Record<string, readonly string[]> = {};
-  const owner = new Map<string, { key: string; cycle: string | null; retired: boolean }>();
+  // Every assignment first, then the maps: ownership must not depend on the order products are declared in.
+  const assigned: { id: string; key: string; cycle: string | null; retired: boolean }[] = [];
   for (const [key, def] of Object.entries(products)) {
     const entry = prices[key];
     if (entry === undefined) throw new Error(`paddle-kit: PADDLE_PRICES has no "${key}" for products`);
     const onSale: [string | null, string][] = typeof entry === 'string' ? [[null, entry]] : Object.entries(entry);
-    for (const [cycle, id] of onSale) {
-      entitlements[id] = def.features;
-      owner.set(id, { key, cycle, retired: false });
-    }
-    for (const id of def.retiredPriceIds ?? []) {
-      if (owner.get(id)?.retired === false) throw new Error(`paddle-kit: retired price ${id} is on sale (PADDLE_PRICES)`);
-      entitlements[id] = def.features;
-      owner.set(id, { key, cycle: null, retired: true });
-    }
+    for (const [cycle, id] of onSale) assigned.push({ id, key, cycle, retired: false });
+    for (const id of new Set(def.retiredPriceIds ?? [])) assigned.push({ id, key, cycle: null, retired: true });
+  }
+  const entitlements: Record<string, readonly string[]> = {};
+  const owner = new Map<string, { key: string; cycle: string | null; retired: boolean }>();
+  for (const { id, ...o } of assigned) {
+    const first = owner.get(id);
+    if (first && first.retired !== o.retired) throw new Error(`paddle-kit: retired price ${id} is on sale (PADDLE_PRICES)`);
+    if (first && first.key !== o.key) throw new Error(`paddle-kit: price ${id} belongs to two products ("${first.key}", "${o.key}")`);
+    if (first) continue; // the same product's price under two cycles keeps its first cycle
+    entitlements[id] = products[o.key]!.features;
+    owner.set(id, o);
   }
   return {
     entitlements,

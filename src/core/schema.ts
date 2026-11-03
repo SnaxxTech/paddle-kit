@@ -13,6 +13,7 @@ export const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   paddle_recovery: ['name', 'run_id', 'status', 'started_at', 'finished_at', 'last_succeeded_at', 'checkpoint_at', 'lease_until', 'reason'],
   paddle_event_leases: ['event_id', 'claimed_at', 'claim_token'],
   paddle_owned_ids: ['id', 'kind', 'first_seen_at'],
+  paddle_recovery_progress: ['name', 'run_id', 'window_from', 'window_to', 'phase', 'cursor', 'updated_at'],
 };
 
 /** The tables `paddle-kit/fulfil` uses (migration 005, Postgres). Checked only for apps that use the module. */
@@ -35,6 +36,7 @@ export const MIGRATION_OF_TABLE: Readonly<Record<string, string>> = {
   paddle_recovery: '003_recovery',
   paddle_event_leases: '004_claim_tokens_owned_ids',
   paddle_owned_ids: '004_claim_tokens_owned_ids',
+  paddle_recovery_progress: '006_recovery_progress',
 };
 
 /** What is missing from `found` (table → its columns): `table` for a missing table, `table.column` for a column. */

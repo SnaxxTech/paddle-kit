@@ -183,10 +183,26 @@ export interface RecoveryState {
   reason: RecoveryFailureReason | null;
 }
 
+/**
+ * Where an unfinished recovery run stopped (since v0.8.7, migration 006): its fixed window, the phase, and the path of
+ * the next page to read in that phase (`null`: the phase starts at its first page). The next run continues there.
+ */
+export interface RecoveryProgress {
+  from: string;
+  to: string;
+  phase: 'subscriptions' | 'transactions' | 'adjustments';
+  cursor: string | null;
+}
+
 export interface RecoveryStore {
   getRecovery(name: string): Promise<RecoveryState | null>;
   claimRecovery(input: { name: string; runId: string; startedAt: string; leaseUntil: string }): Promise<boolean>;
-  finishRecovery(input: { name: string; runId: string; finishedAt: string; status: 'succeeded' | 'failed'; reason: RecoveryFailureReason | null }): Promise<boolean>;
+  /** `checkpointAt` (since v0.8.7): the checkpoint a succeeded run sets; default its own `startedAt`. */
+  finishRecovery(input: { name: string; runId: string; finishedAt: string; status: 'succeeded' | 'failed'; reason: RecoveryFailureReason | null; checkpointAt?: string }): Promise<boolean>;
+  /** Since v0.8.7; without both, every run starts its window from the first page (the v0.8.6 behaviour). */
+  getRecoveryProgress?(name: string): Promise<RecoveryProgress | null>;
+  /** Saves (or with `null` clears) the progress, only while `runId` holds the recovery lease; returns whether it did. */
+  saveRecoveryProgress?(input: { name: string; runId: string; progress: RecoveryProgress | null }): Promise<boolean>;
   getPendingEvents(input: { before: string; limit: number }): Promise<Array<{ eventId: string; eventType: string; occurredAt: string }>>;
 }
 

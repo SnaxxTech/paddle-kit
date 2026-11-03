@@ -2,8 +2,14 @@
 
 ## 0.8.7 (from 0.8.6)
 
-No action for `recoverBilling` (it already needs `notification.read`). If you call `reconcile` yourself with the new
-`since`, the key needs `notification.read` too; without `since` it reads the full list as before.
+1. Run migration `006_recovery_progress` (CREATE-only; Postgres and SQLite). Readiness reports it missing until then.
+2. `importFulfilment` of a **revoked** payment now needs `adjustmentId`: the Paddle adjustment that revoked it
+   (`GET /adjustments?transaction_id=…`). Already-imported rows (`import:<id>`) are not migrated: if one of those orders
+   may still be reversed, update its `paddle_fulfilment_adjustments.adjustment_id` to the real id by hand.
+3. `drainOutbox` results have a new `lost` count, and each claim counts as an attempt (an item that keeps outliving its
+   lease now stops at `maxAttempts`). Make outbox handlers idempotent on `item.id`.
+4. `defineProducts` now refuses a price shared by two products (sold or retired): give each price one product.
+5. If you call `reconcile` yourself with the new `since`, the key needs `notification.read` (recovery already did).
 
 ## 0.8.6 (from 0.8.5)
 

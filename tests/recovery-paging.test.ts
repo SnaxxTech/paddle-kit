@@ -45,7 +45,9 @@ function setup() {
 }
 
 describe('reconcilePayments: adjustments since a recent checkpoint come from the event stream', () => {
-  it('reads only adjustment events since `since` (across pages), never the whole list, and replays each adjustment\'s latest status once', async () => {
+  // Since v0.8.7 events are read page by page (resumable, bounded memory): the newest status per adjustment wins within
+  // a page; a status on an earlier page replays too (statuses only move forward; hooks run at least once anyway).
+  it('reads only adjustment events since `since` (across pages), never the whole list, and replays each status once', async () => {
     const t0 = Date.now() - 3 * HOUR;
     const iso = (h: number) => new Date(t0 + h * HOUR).toISOString();
     const p = paddle({
@@ -61,8 +63,8 @@ describe('reconcilePayments: adjustments since a recent checkpoint come from the
     const ev = p.calls.filter((c) => c.startsWith('/events'));
     expect(ev[0]).toBe(`/events?event_type=adjustment.created,adjustment.updated&from=${encodeURIComponent(new Date(t0).toISOString())}&order_by=id%5BASC%5D&per_page=200`);
     expect(ev).toHaveLength(2);
-    expect(seen.sort()).toEqual(['adj_a:approved', 'adj_b:approved']);
-    expect(out.adjustments).toMatchObject({ scanned: 2, applied: 2, invalid: 0 });
+    expect(seen.sort()).toEqual(['adj_a:approved', 'adj_a:pending_approval', 'adj_b:approved']);
+    expect(out.adjustments).toMatchObject({ scanned: 3, applied: 3, invalid: 0 });
   });
 
   it('an event whose adjustment has no valid time is counted invalid, never dropped', async () => {
@@ -139,5 +141,47 @@ describe('reconcile: subscriptions since a recent `since` come from the event st
     expect((await recoverBilling(b, { apiKey: 'pdl_sdbx_k', fetch: p.fetch })).status).toBe('done');
     expect(p.calls.filter((c) => c === '/subscriptions')).toHaveLength(0);
     expect(p.calls.some((c) => c.startsWith('/events?subscription.'))).toBe(true);
+  });
+});
+
+describe('recoverBilling resumes an interrupted run (third review)', () => {
+  const sub = (id: string) => ({ ...loadFixture('subscription.created').data, id, status: 'active', updated_at: '2026-10-01T00:00:00Z', custom_data: { userId: `u_${id}` } });
+  // Four pages of subscriptions; each page takes 40 ms, so a 100 ms run gets through about two of them.
+  function backlog() {
+    const calls: string[] = [];
+    const page = (data: any[], next: string | null) => ({ ok: true, status: 200, json: async () => ({ data, meta: { pagination: { has_more: !!next, next } } }) });
+    const fetch: FetchLike = async (url) => {
+      const u = new URL(url);
+      calls.push(u.pathname + u.search);
+      await new Promise((r) => setTimeout(r, 40));
+      if (u.pathname === '/subscriptions') {
+        const n = Number(u.searchParams.get('after')?.replace('sub_p', '') ?? 0);
+        return page([sub(`sub_${n}`)], n < 3 ? `https://sandbox-api.paddle.com/subscriptions?per_page=200&after=sub_p${n + 1}` : null);
+      }
+      return page([], null);
+    };
+    return { fetch, calls };
+  }
+
+  it('a run that times out saves its page; the next run continues there, inside the same window, and checkpoints at its start', async () => {
+    const b = createBilling({ environment: 'sandbox', webhookSecret: 's', store: memoryStore(), entitlements: {}, owns: () => true });
+    const p = backlog();
+    const t1 = new Date(Date.now() - 60_000);
+    const first = await recoverBilling(b, { apiKey: 'pdl_sdbx_k', fetch: p.fetch, timeoutMs: 100, now: () => t1 });
+    expect(first).toMatchObject({ status: 'failed', reason: 'timeout' });
+    const firstPages = p.calls.filter((c) => c.startsWith('/subscriptions')).length;
+    expect(firstPages).toBeGreaterThan(0);
+    expect(firstPages).toBeLessThan(4);
+    await new Promise((r) => setTimeout(r, 60)); // let the aborted run settle
+    p.calls.length = 0;
+    const second = await recoverBilling(b, { apiKey: 'pdl_sdbx_k', fetch: p.fetch, timeoutMs: 10_000 });
+    expect(second.status).toBe('done');
+    const subs = p.calls.filter((c) => c.startsWith('/subscriptions'));
+    expect(subs[0]).toContain('after=sub_p'); // resumed, not page 1 again
+    expect(subs.length).toBeLessThanOrEqual(4 - firstPages + 1);
+    for (const c of p.calls.filter((c) => c.startsWith('/transactions'))) expect(c).toContain(`updated_at%5BLT%5D=${encodeURIComponent(t1.toISOString())}`);
+    const state = await b.store.recovery!.getRecovery('sandbox');
+    expect(state?.checkpointAt).toBe(t1.toISOString());
+    for (const id of ['sub_0', 'sub_1', 'sub_2', 'sub_3']) expect(await b.store.getSubscription(id)).not.toBeNull();
   });
 });

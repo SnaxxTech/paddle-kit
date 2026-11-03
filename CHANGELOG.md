@@ -9,6 +9,30 @@
   `since` still reads the full list. On the shared sandbox, the event path left all 6 subscriptions identical to the
   full list (status, price, period end).
 
+### Fixed (third review, each with a test that failed first; outbox races on real Postgres)
+- **`importFulfilment` keeps the real adjustment.** A revoked import was recorded as a synthetic `import:<id>`
+  refund, so the real refund's reversal (a status change on its own id) never gave the order back, and a replayed
+  chargeback counted twice. **Breaking for revoked imports:** they now need `adjustmentId` (the Paddle adjustment that
+  revoked the order); an id that belongs to another payment is refused.
+- **Outbox leases.** A run that outlived its lease could overwrite the retry state of the run that took the item over
+  (attempts 2 → 1 in the reviewer's probe); a batch started every item's lease before reaching it, so a later item was
+  sent twice. The drain now claims one item at a time (through a CTE: `id IN (SELECT … LIMIT 1)` claimed several rows
+  on PGlite), counts each claim as an attempt (an item whose handler always outlives its lease still stops at
+  `maxAttempts`), changes retry state only under its own claim (`lost` in the result), always marks a finished send
+  sent, uses `clock_timestamp()` throughout (a caller's transaction froze `now()`), and its claim token is an epoch
+  integer (a text timestamp misparsed under another `DateStyle`). Handlers must be idempotent on `item.id`.
+- **`defineProducts` no longer depends on declaration order.** Every price assignment is checked before the maps are
+  built: a price retired in one product and sold in another, sold by two products, or retired in two products is
+  refused in either order (it was accepted in one order, or silently overwrote the first product's features).
+
+### Changed
+- **Resumable recovery (migration 006, CREATE-only).** Recovery reads page by page (nothing held in memory) and saves
+  its fixed window, phase and next page after each page; a run cut off by its 45 s budget is continued by the next.
+  Transactions and events are bounded by the window's end. Events are now applied per page: an adjustment or
+  subscription whose statuses fall on different pages replays each one (before: only the newest of the whole window,
+  which needed every page in memory). Statuses only move forward and hooks run at least once, so the end state is the
+  same; a hook can see one extra call.
+
 ### Docs
 - **Why there is no webhook inbox, measured.** `scripts/bench-webhook.mjs` times the webhook end to end on real
   Postgres, with `createFulfilment` and an outbox write: cold p95 165 ms (n=30), warm p95 15 ms (n=500), and 14 SQL

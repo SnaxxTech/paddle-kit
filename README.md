@@ -199,6 +199,10 @@ The first run scans all payment history by default (`initialSince` may explicitl
 from the last successful **start** time with an hour's overlap, including after outages longer than seven days. It retries
 unfinished original events through Paddle's documented time/type-filtered event stream, repairs subscriptions, and replays
 payments/adjustments through the same hooks/claims as webhooks. The checkpoint advances only after every phase succeeds.
+Since v0.8.7 (migration 006) a run reads page by page and saves its window (`from`, a fixed `to`), phase and next page
+after each page: a run cut off by its budget is continued by the next one instead of starting over, and the checkpoint
+becomes the window's `to`. A page with a failed item stops the saving, so the next run retries from that page. A saved
+window over a day old is dropped (a fresh window from the checkpoint covers it).
 A partial result, malformed page, page limit, timeout, or remaining eligible unfinished event keeps recovery failed.
 Hook side effects remain at least once and must be idempotent. Timed-out work is aborted where the driver supports it;
 non-cancellable in-flight writes may finish, so recovery never promises exactly-once execution.
@@ -329,6 +333,7 @@ The kit never changes your database schema itself. Do one of these two steps in 
 | `003_recovery` | `paddle_recovery` (the recovery job's lease and checkpoint) | v0.8.0 |
 | `004_claim_tokens_owned_ids` | `paddle_event_leases`, `paddle_owned_ids` | v0.8.0 |
 | `005_fulfilment_outbox` | `paddle_fulfilments`, `paddle_fulfilment_adjustments`, `paddle_fulfilment_reviews`, `paddle_outbox` (used only by `paddle-kit/fulfil`; Postgres; SQLite has no 005) | v0.8.6 |
+| `006_recovery_progress` | `paddle_recovery_progress` (where an interrupted recovery run stopped: its window, phase and next page) | v0.8.7 |
 
 Rules:
 
@@ -655,16 +660,20 @@ What the app can add (found by the first real consumer, Slop Remover's Full Scan
 - `revoke` and `restore` get `cause`, the adjustment behind them (refund or chargeback, for an audit row).
 - `fulfilmentState(q, transactionId)` reads a payment: `held` / `granted` / `revoked` / `declined`, what it grants,
   what was taken, and `revokedBy` (`refund` / `chargeback`), e.g. for a checkout confirmation.
-- `importFulfilment(q, { transactionId, userId, grants, state, revokedBy? })` brings in payments fulfilled before the
-  app used the kit (run it once in a migration), so their later refunds are honoured and a refunded one is not given
-  back by an unrelated event.
+- `importFulfilment(q, { transactionId, userId, grants, state, revokedBy?, adjustmentId?, taken? })` brings in payments
+  fulfilled before the kit, in a transaction. A revoked one needs the Paddle `adjustmentId` that took it back (since
+  v0.8.7), approved in Paddle, and `taken` (what `restore` gives back): only that adjustment's own reversal gives the
+  order back, a replay of it counts once, and an unrelated event changes nothing.
 - `createFulfilment(db, actions, { onReview })` is called once for each new review (in the same transaction), so the
   app's own alerting sees them. A payment that arrived after its refund raises a `held_payment` review.
 
 Side effects (a receipt email, a job) go to the **outbox** in the same transaction: `enqueue(q, { id, kind, payload })`
 with `id` as the idempotency key, so they are sent only if the payment's changes commit, and once. `drainOutbox(query,
-handlers)` sends due items at least once (retries 1 min, 2, 4, … 6 h; a handler must be safe to call twice), and
-`outboxCheck(query)` turns health red for an item that gave up or waits over an hour.
+handlers)` sends due items at least once (retries 1 min, 2, 4, … 6 h). **Handlers must be idempotent on `item.id`**
+(pass it as the idempotency key of the email or API call): a crash after sending, or a handler that runs past
+`leaseSeconds`, sends the item again. Since v0.8.7 the drain claims one item at a time, counts each claim as an
+attempt, and a worker whose lease was taken over cannot change the new run's retry state (`lost` in the result); a
+finished send is always marked sent. `outboxCheck(query)` turns health red for an item that gave up or waits over an hour.
 
 `lib/credits.ts`
 

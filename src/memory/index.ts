@@ -1,4 +1,4 @@
-import type { Customer, EventStatus, Health, ReasonCode, Store, Subscription, RecoveryState } from '../core/types';
+import type { Customer, EventStatus, Health, ReasonCode, Store, Subscription, RecoveryState, RecoveryProgress } from '../core/types';
 
 interface EventRow { eventId: string; eventType: string; occurredAt: string; receivedAt: string; status: EventStatus; reason: ReasonCode | null }
 interface FailureHit { at: string; reason: ReasonCode }
@@ -13,6 +13,7 @@ export function memoryStore(): Store {
   const customers = new Map<string, Customer>();
   const claims = new Map<string, { at: string; token?: string }>(); // eventId -> claim
   const recoveries = new Map<string, RecoveryState>();
+  const progress = new Map<string, RecoveryProgress>();
   const transactions = new Map<string, boolean>(); // transactionId -> owned
   const ownedPrices = new Set<string>();
   const ownedProducts = new Set<string>();
@@ -72,7 +73,15 @@ export function memoryStore(): Store {
         if (!prev || prev.runId !== input.runId || prev.status !== 'running') return false;
         recoveries.set(input.name, { ...prev, ...input, leaseUntil: null,
           lastSucceededAt: input.status === 'succeeded' ? input.finishedAt : prev.lastSucceededAt,
-          checkpointAt: input.status === 'succeeded' ? prev.startedAt : prev.checkpointAt });
+          checkpointAt: input.status === 'succeeded' ? input.checkpointAt ?? prev.startedAt : prev.checkpointAt });
+        return true;
+      },
+      async getRecoveryProgress(name) { return structuredClone(progress.get(name) ?? null); },
+      async saveRecoveryProgress({ name, runId, progress: p }) {
+        const r = recoveries.get(name);
+        if (!r || r.runId !== runId || r.status !== 'running') return false;
+        if (p) progress.set(name, structuredClone(p));
+        else progress.delete(name);
         return true;
       },
       async getPendingEvents({ before, limit }) {
