@@ -104,10 +104,64 @@ export async function canUse(userId: string | null, feature: string): Promise<bo
 
 Rules for every app:
 
-- **Checkout is bound to the signed-in user on the server.** Render the checkout button from a server component and pass it the user id from your server session (`createCheckout(...).open({ userId })`), never from a form field or a URL. `custom_data` still comes back from the browser: the most a user can do is pay for someone else.
+- **Checkout is bound to the signed-in user on the server.** Create the transaction on the server (`createCheckoutTransaction`, below) with the user from your session, and open it in the browser with `openTransaction(id)`: the browser then cannot change who is paid for or what is bought. The older `createCheckout(...).open({ userId, items })` still works, but its `custom_data` comes from the browser (the most a user can do is pay for someone else).
 - **Broken config never unlocks paid operations when enforcement is on** (`canUse` above). Show the problem names only on the authenticated health route.
 - **Separate sandbox and live keys.** `PADDLE_ENV=sandbox` with `test_` / `pdl_sdbx_` credentials (Vercel Preview and Development), `PADDLE_ENV=production` with `live_` / `pdl_live_` (Vercel Production only). `readBillingEnv` refuses a mix, and `recoverBilling` refuses an API key of the other environment.
 - **Business effects deduplicate by Paddle's ids, not by event ids.** A recovery replay of a payment or refund carries a new event id (`reconcile_txn_…`, `reconcile_adj_…`), so grant on `transactionId` and keep adjustments by `adjustmentId` (see One-time purchases and refunds, Example).
+
+## Checkout created on the server, and the customer portal (`paddle-kit/server`, since v0.8.4)
+
+Two server-only calls (they need `PADDLE_API_KEY`; never import `paddle-kit/server` in a client component):
+
+- `createCheckoutTransaction(api, { userId, items, customerId?, customData?, allowedPriceIds? })` creates an
+  automatically-collected transaction: `custom_data.userId` is always the `userId` you pass (from your session), items
+  are checked (whole quantities, and only `allowedPriceIds` when given) before Paddle is called. Returns
+  `{ transactionId, checkoutUrl }`. The browser opens it with `checkout.openTransaction(transactionId)`.
+- `customerPortalSession(api, { customerId, subscriptionIds? })` creates a portal session (one per click: the links
+  are personal and expire) and returns `{ overview, subscriptions: { [id]: { cancel, updatePaymentMethod } } }`. Only
+  links on `customer-portal.paddle.com` / `sandbox-customer-portal.paddle.com` are returned; anything else throws.
+
+`api` is `{ apiKey, environment, fetch? }`; pass `billing.config.paddleFetch` (set by `billingFromEnv`) as `fetch`.
+Errors are `PaddleError` with the HTTP `status` and Paddle's error code, never the key.
+
+`app/billing/actions.ts`
+
+```ts
+'use server';
+import { createCheckoutTransaction, customerPortalSession } from 'paddle-kit/server';
+import { billing, config, products } from '@/lib/billing';
+import { currentUser } from '@/lib/session'; // your auth: the signed-in user, from the session cookie
+
+/** Returns a transaction id; the browser opens it with `checkout.openTransaction(id)`. */
+export async function startCheckout(cycle: 'monthly' | 'yearly'): Promise<string> {
+  const user = await currentUser();
+  if (!user) throw new Error('sign in first');
+  if (!billing || !config?.apiKey || !products) throw new Error('billing is not available');
+  const api = { apiKey: config.apiKey, environment: config.environment, fetch: billing.config.paddleFetch };
+  // The price comes from the product definition, never from the request: a retired price is never sold.
+  const { transactionId } = await createCheckoutTransaction(api, {
+    userId: user.id,
+    items: [{ priceId: products.checkoutPriceId('pro', cycle), quantity: 1 }],
+  });
+  return transactionId;
+}
+
+/** The customer portal for the signed-in user's own billing: look the customer up in your records, never the request. */
+export async function portalLink(): Promise<string> {
+  const user = await currentUser();
+  if (!user) throw new Error('sign in first');
+  if (!billing || !config?.apiKey) throw new Error('billing is not available');
+  const [subscription] = await billing.store.getSubscriptionsByUser(user.id);
+  if (!subscription) throw new Error('no billing history yet');
+  const api = { apiKey: config.apiKey, environment: config.environment, fetch: billing.config.paddleFetch };
+  const portal = await customerPortalSession(api, { customerId: subscription.customerId, subscriptionIds: [subscription.subscriptionId] });
+  return portal.overview; // redirect the browser here
+}
+```
+
+Tested against the Paddle sandbox: the created transaction kept the server's `userId` when the extra `customData`
+tried to set another one, and the portal links were all on `sandbox-customer-portal.paddle.com`. The block above runs
+in `tests/server.test.ts`.
 
 ## Resilience: the transport and the recovery job (since v0.8.0)
 

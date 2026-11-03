@@ -1,5 +1,10 @@
 # Upgrading paddle-kit
 
+## 0.8.4 (from 0.8.3)
+
+No migration; nothing to do. Optional: create checkouts on the server (`createCheckoutTransaction` +
+`openTransaction`) instead of `open({ userId, items })`, and build portal links with `customerPortalSession`.
+
 ## 0.8.3 (from 0.8.2)
 
 No migration. Install `#v0.8.3`; nothing else to do. Optional: replace a hand-built `entitlements` map with `products: { pro: { features: ['pro'] } }` and

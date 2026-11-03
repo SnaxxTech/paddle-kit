@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.8.4 (unreleased)
+
+Checkout created on the server, and the customer portal (second review). No migration; nothing changes unless an app
+uses them.
+
+### Added
+- **`paddle-kit/server`** (edge-safe, server only): `createCheckoutTransaction(api, { userId, items, customerId?,
+  customData?, allowedPriceIds? })` creates an automatically-collected transaction whose `custom_data.userId` is always
+  the server's `userId`, checks items (whole quantities, allowed prices) before calling Paddle, and returns
+  `{ transactionId, checkoutUrl }`. `customerPortalSession(api, { customerId, subscriptionIds? })` returns the
+  overview and per-subscription links and throws for any link not on Paddle's portal host. `api` refuses a key of the
+  other environment. Errors are `PaddleError` (status and Paddle's code, never the key).
+- **`checkout.openTransaction(transactionId)`** in `paddle-kit/client` opens the checkout for a server-created
+  transaction.
+- README: "Checkout created on the server, and the customer portal", with a server-action example that a test runs as
+  written. Checked against the Paddle sandbox: the transaction kept the server's `userId` when `customData` tried to
+  set another, its items and customer matched, an unknown price gave `PaddleError` 400, and every portal link was on
+  `sandbox-customer-portal.paddle.com`.
+
 ## 0.8.3 (2026-11-03)
 
 One product definition for access and checkout (second review). No migration; nothing changes unless an app passes

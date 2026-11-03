@@ -57,6 +57,10 @@
     "./price": {
       "types": "./dist/price/index.d.ts",
       "default": "./dist/price/index.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "default": "./dist/server/index.js"
     }
   },
   "scripts": {

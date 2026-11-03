@@ -34,5 +34,13 @@ export async function createCheckout(cfg: {
         customData: { ...o.customData, userId: o.userId },
       });
     },
+    /**
+     * Since v0.8.4: opens the checkout for a transaction the server created (`createCheckoutTransaction` in
+     * paddle-kit/server). Paddle takes the items, customer and custom data from that transaction.
+     */
+    openTransaction(transactionId: string): void {
+      if (!/^txn_[a-z\d]+$/.test(transactionId)) throw new Error('paddle-kit: openTransaction needs a transaction id (txn_…)');
+      paddle.Checkout.open({ transactionId });
+    },
   };
 }
