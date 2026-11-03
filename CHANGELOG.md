@@ -33,6 +33,17 @@ affected (its tables stay empty, and readiness checks them only with `readiness:
 - README: "Fulfilment module", with a credit-pack `lib/credits.ts` that a test runs as written; the credit preset
   points to it. The hand-written examples stay (and stay tested).
 
+### Changed
+- **Recovery reads only the adjustments that changed** (the last open item of the reviews). `GET /adjustments` has no
+  date filter, so each run read the whole list (up to 200 pages). When the window starts within 89 days (Paddle keeps
+  events 90), `reconcilePayments` / `recoverBilling` now read `adjustment.created` / `adjustment.updated` events since
+  `since` (`/events?event_type=…&from=…`), and replay each adjustment's newest state once. An older window (a first
+  run, an outage over 89 days) reads the full list as before. On the Paddle sandbox both paths found the same
+  adjustment over the same 60-day window (one request each: the account has one adjustment, so it shows correctness,
+  not the saving). Tests: `tests/recovery-paging.test.ts` (failed before: the event stream was never read); the
+  reconcile suite's scenarios now run through the event path. No persisted cursor: the checkpoint already bounds the
+  window, and a run that times out retries the same window through the idempotent ledger.
+
 ### Tests
 - `tests/fulfil.test.ts` (PGlite): every scenario of the hand-written examples through the module (grant by quantity
   once, buy 5 / spend 3 / refund / reverse = 2, chargeback and won dispute, refund before payment, a won chargeback

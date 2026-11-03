@@ -124,7 +124,8 @@ describe('reconcilePayments', () => {
     ...loadFixture('adjustment.created').data, id, transaction_id: txnId, subscription_id: null, status: 'approved', type: 'full',
     created_at: '2026-10-11T00:00:00Z', updated_at: '2026-10-11T00:00:00Z', ...o,
   });
-  // A Paddle API with /transactions (list), /transactions/{id} and /adjustments.
+  // A Paddle API with /transactions (list), /transactions/{id}, /adjustments, and /events serving the same adjustments
+  // as adjustment events (since v0.8.6 a window inside 89 days reads them from the event stream; SINCE is one).
   function paddle(data: { txs?: unknown[]; adjs?: unknown[]; byId?: Record<string, unknown> }) {
     const urls: string[] = [];
     const fetch: FetchLike = async (url) => {
@@ -133,6 +134,7 @@ describe('reconcilePayments', () => {
       const page = (rows: unknown[] = []) => ({ ok: true, status: 200, json: async () => ({ data: rows, meta: { pagination: { has_more: false } } }) });
       if (path === '/transactions') return page(data.txs);
       if (path === '/adjustments') return page(data.adjs);
+      if (path === '/events') return page((data.adjs ?? []).map((a: any, i) => ({ event_id: `evt_${i}`, event_type: 'adjustment.updated', occurred_at: a.updated_at, data: a })));
       const one = data.byId?.[path.split('/')[2]!];
       return one ? { ok: true, status: 200, json: async () => ({ data: one }) } : { ok: false, status: 404, json: async () => ({ error: { code: 'not_found' } }) };
     };

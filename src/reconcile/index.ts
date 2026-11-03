@@ -109,6 +109,9 @@ export interface PaymentCounts {
  * Adjustments come after transactions, and an adjustment of a transaction the store never saw first replays that
  * transaction, so a refund is never judged without its payment. Web fetch only (edge-safe).
  */
+/** Paddle keeps events 90 days; a window inside 89 days is read from the event stream (one day of margin). */
+const EVENT_STREAM_WINDOW_MS = 89 * 24 * 3_600_000;
+
 export async function reconcilePayments(
   billing: Billing,
   opts: { apiKey: string; since: Date | string; fetch?: FetchLike; signal?: AbortSignal },
@@ -149,11 +152,26 @@ export async function reconcilePayments(
   }
 
   const adjustments = counts();
-  // GET /adjustments has no date filter: read the list (up to 200 pages of 50) and keep those updated since `since`.
-  // ponytail: reads the whole list each run; filter by `transaction_id` in batches if an account passes 10,000 adjustments.
+  // GET /adjustments has no date filter. Since v0.8.6, a window Paddle's event stream still holds (it keeps 90 days)
+  // is read from adjustment events since `since` instead: a recovery run reads only what changed since its checkpoint.
+  // Each adjustment's newest event wins (events come oldest first). An older window (a first run, a long outage)
+  // reads the whole list (up to 200 pages of 50) as before.
+  // ponytail: the full read stays for > 89-day windows; filter by `transaction_id` in batches past 10,000 adjustments.
   // Validated before the date filter: an adjustment without a valid time is counted invalid, never dropped as "old".
+  let candidates: Json[];
+  if (Date.now() - since.getTime() <= EVENT_STREAM_WINDOW_MS) {
+    const latest = new Map<string, Json>();
+    const path = `/events?event_type=adjustment.created,adjustment.updated&from=${sinceParam}&order_by=id%5BASC%5D&per_page=200`;
+    for (const e of await api.list(path, 200)) {
+      const data = e?.data as Json | undefined;
+      if (data && typeof data.id === 'string') latest.set(data.id, data);
+    }
+    candidates = [...latest.values()];
+  } else {
+    candidates = await api.list('/adjustments?per_page=50', 200);
+  }
   const recent: Array<{ adj: Json; at: string }> = [];
-  for (const adj of await api.list('/adjustments?per_page=50', 200)) {
+  for (const adj of candidates) {
     const at = timeOf(adj);
     if (at === null) {
       adjustments.scanned++;
