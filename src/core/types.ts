@@ -159,6 +159,30 @@ export interface Health {
   lastOwnedAt?: string | null;
   /** Events acked as `not_ours` in the last 24 hours. Normal on a shared seller account; alert only together with an old `lastOwnedAt`. */
   notOursLast24h?: number;
+  /** Unresolved event failures, including ones older than the provider's retry window. */
+  unresolvedFailed?: number;
+  oldestPendingAt?: string | null;
+}
+
+export type RecoveryFailureReason = 'incomplete' | 'timeout' | 'recovery_error' | 'api_error' | 'network' | 'circuit_open';
+
+export interface RecoveryState {
+  name: string;
+  runId: string;
+  status: 'running' | 'succeeded' | 'failed';
+  startedAt: string;
+  finishedAt: string | null;
+  lastSucceededAt: string | null;
+  checkpointAt: string | null;
+  leaseUntil: string | null;
+  reason: RecoveryFailureReason | null;
+}
+
+export interface RecoveryStore {
+  getRecovery(name: string): Promise<RecoveryState | null>;
+  claimRecovery(input: { name: string; runId: string; startedAt: string; leaseUntil: string }): Promise<boolean>;
+  finishRecovery(input: { name: string; runId: string; finishedAt: string; status: 'succeeded' | 'failed'; reason: RecoveryFailureReason | null }): Promise<boolean>;
+  getPendingEvents(input: { before: string; limit: number }): Promise<Array<{ eventId: string; eventType: string; occurredAt: string }>>;
 }
 
 export interface Store {
@@ -177,6 +201,8 @@ export interface Store {
    */
   upsertCustomer(c: Customer): Promise<{ applied: boolean }>;
   upsertSubscription(s: Subscription): Promise<{ applied: boolean }>;
+  /** Provider snapshot application with an atomic grace transition. Older snapshots never change the grace clock. */
+  applySubscription?(s: Omit<Subscription, 'pastDueSince'>): Promise<{ applied: boolean }>;
   getSubscription(subscriptionId: string): Promise<Subscription | null>;
   getSubscriptionsByUser(userId: string): Promise<Subscription[]>;
   health(now: Date): Promise<Health>;
@@ -186,6 +212,8 @@ export interface Store {
    */
   recordTransaction?(t: SeenTransaction & { subscriptionId: string | null; customerId: string | null; occurredAt: string; receivedAt: string }): Promise<void>;
   getTransaction?(transactionId: string): Promise<SeenTransaction | null>;
+  /** Built-in stores support durable recovery after migration 003. Custom stores may supply their own adapter. */
+  recovery?: RecoveryStore;
 }
 
 export interface LogEntry {

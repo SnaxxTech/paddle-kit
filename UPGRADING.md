@@ -1,5 +1,21 @@
 # Upgrading paddle-kit
 
+## 0.8.0-qr.1 candidate
+
+Run every adapter migration, including **003_recovery**, before using `recoverBilling` or a health check that reads recovery
+state. Use one shared `createPaddleTransport` instance for outbound calls and pass its `fetch` into price/recovery APIs.
+Keep the verified webhook path independent of Paddle API availability. Schedule `recoverBilling` from an authenticated
+cron (45-second runner, at least a 60-second host budget); return non-success on `status: 'failed'`.
+
+`RecoveryStore` is optional on custom `Store` implementations; built-in adapters implement it. Custom stores should also
+implement `applySubscription` atomically. The built-in provider path now ignores stale snapshots when calculating grace.
+It does not backdate a later delinquency from an older event. Unsigned request statistics remain per instance, and the
+outbound circuit is also per instance; neither is a distributed availability measurement.
+
+Use one exact candidate tarball across consumers; swap to an immutable release tag only after release. QR Lab is being
+verified first. Existing v0.7 integration branches in other apps do not automatically use these features.
+
+
 paddle-kit ships as git tags (`github:SnaxxTech/paddle-kit#vX.Y.Z`). Every upgrade is the same three steps, in this order.
 
 ## 1. Read the CHANGELOG first

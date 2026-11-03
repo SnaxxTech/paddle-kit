@@ -1,9 +1,11 @@
 import { nextPastDueSince } from '../core/access';
 import { processorOf, type Billing } from '../core/billing';
 import { customDataOf, itemsOf, parseEvent, subscriptionFrom } from '../core/events';
-import type { ProcessResult } from '../core/handler';
+import { within, type ProcessResult } from '../core/handler';
 import { resolveOwnership } from '../core/owns';
 import { LIVE_BASE, PaddleError, SANDBOX_BASE, paddleClient, type FetchLike, type Json } from '../core/paddle-api';
+import type { RecoveryStore } from '../core/types';
+import { PaddleTransportError } from '../core/transport';
 
 export type { FetchLike };
 
@@ -14,7 +16,7 @@ export type { FetchLike };
  */
 export async function reconcile(
   billing: Billing,
-  opts: { apiKey: string; fetch?: FetchLike },
+  opts: { apiKey: string; fetch?: FetchLike; signal?: AbortSignal },
 ): Promise<{ scanned: number; applied: number; notOurs: number; invalid: number }> {
   const api = apiFor(billing, opts);
   // A resolver that fails throws here: reconcile never mirrors every product's subscriptions because a lookup failed.
@@ -25,6 +27,7 @@ export async function reconcile(
   let notOurs = 0;
   let invalid = 0;
   for (const data of await api.list('/subscriptions?per_page=200', 1000)) {
+    opts.signal?.throwIfAborted();
     scanned++;
     const sub = subscriptionFrom(data, typeof data.updated_at === 'string' ? data.updated_at : '');
     if (!sub || Number.isNaN(Date.parse(sub.lastEventAt))) {
@@ -37,19 +40,21 @@ export async function reconcile(
       notOurs++;
       continue;
     }
-    const result = await billing.store.upsertSubscription({ ...sub, pastDueSince: nextPastDueSince(prev, sub.status, sub.lastEventAt) });
+    const result = billing.store.applySubscription
+      ? await billing.store.applySubscription(sub)
+      : await billing.store.upsertSubscription({ ...sub, pastDueSince: nextPastDueSince(prev, sub.status, sub.lastEventAt) });
     if (result.applied) applied++;
   }
   return { scanned, applied, notOurs, invalid };
 }
 
-function apiFor(billing: Billing, opts: { apiKey: string; fetch?: FetchLike }) {
+function apiFor(billing: Billing, opts: { apiKey: string; fetch?: FetchLike; signal?: AbortSignal }) {
   const keyEnv = opts.apiKey.startsWith('pdl_sdbx_') ? 'sandbox' : opts.apiKey.startsWith('pdl_live_') ? 'production' : null;
   if (keyEnv !== billing.config.environment) {
     throw new Error(`paddle-kit: API key does not match environment "${billing.config.environment}"`);
   }
   const base = billing.config.environment === 'production' ? LIVE_BASE : SANDBOX_BASE;
-  return paddleClient(base, opts.apiKey, opts.fetch ?? ((url, init) => fetch(url, init)), [opts.apiKey]);
+  return paddleClient(base, opts.apiKey, opts.fetch ?? ((url, init) => fetch(url, init)), [opts.apiKey], opts.signal);
 }
 
 export interface PaymentCounts {
@@ -76,7 +81,7 @@ export interface PaymentCounts {
  */
 export async function reconcilePayments(
   billing: Billing,
-  opts: { apiKey: string; since: Date | string; fetch?: FetchLike },
+  opts: { apiKey: string; since: Date | string; fetch?: FetchLike; signal?: AbortSignal },
 ): Promise<{ transactions: PaymentCounts; adjustments: PaymentCounts }> {
   const process = processorOf(billing);
   if (!process) throw new Error('paddle-kit: reconcilePayments needs a billing made by createBilling');
@@ -91,6 +96,7 @@ export async function reconcilePayments(
     else c.applied++;
   };
   const replay = (eventId: string, eventType: string, data: Json) => {
+    opts.signal?.throwIfAborted();
     const at = typeof data.updated_at === 'string' ? data.updated_at : typeof data.created_at === 'string' ? data.created_at : new Date().toISOString();
     const ev = parseEvent({ event_id: eventId, event_type: eventType, occurred_at: at, data });
     return ev ? process(ev) : Promise.resolve(null);
@@ -110,6 +116,7 @@ export async function reconcilePayments(
     .filter((a) => Date.parse(a.updated_at ?? a.created_at) >= since.getTime())
     .sort((a, b) => Date.parse(a.updated_at ?? a.created_at) - Date.parse(b.updated_at ?? b.created_at));
   for (const adj of recent) {
+    opts.signal?.throwIfAborted();
     adjustments.scanned++;
     if (billing.store.getTransaction && typeof adj.transaction_id === 'string' && !(await billing.store.getTransaction(adj.transaction_id))) {
       try {
@@ -122,4 +129,111 @@ export async function reconcilePayments(
     tally(adjustments, await replay(`reconcile_adj_${adj.id}_${adj.status}`, 'adjustment.updated', adj));
   }
   return { transactions, adjustments };
+}
+
+export interface RecoveryOptions {
+  apiKey: string;
+  fetch?: FetchLike;
+  /** A stable name scoped to this billing environment. Default environment. */
+  name?: string;
+  /** First successful run covers all history by default. Never silently rolls forward after an outage. */
+  initialSince?: Date;
+  overlapMs?: number;
+  timeoutMs?: number;
+  pendingLimit?: number;
+  /** Must exceed the longest configured webhook claim lease. Default 5 minutes. */
+  pendingAgeMs?: number;
+  store?: RecoveryStore;
+  now?: () => Date;
+}
+
+export type RecoveryResult =
+  | { status: 'busy' }
+  | { status: 'failed'; reason: 'incomplete' | 'timeout' | 'recovery_error' | 'api_error' | 'network' | 'circuit_open'; httpStatus?: number }
+  | { status: 'done'; since: string; subscriptions: Awaited<ReturnType<typeof reconcile>>;
+      payments: Awaited<ReturnType<typeof reconcilePayments>>; events: { applied: number; failed: number } };
+
+/**
+ * Durable self-repair: reclaim an expired job lease, replay unfinished original events, repair snapshots/payments,
+ * and advance the checkpoint only after ALL work succeeds. Partial work is safe to retry through the same ledger.
+ * Use one runner from an authenticated cron. This does not create a scheduler or retry irreversible app side effects.
+ */
+export async function recoverBilling(billing: Billing, opts: RecoveryOptions): Promise<RecoveryResult> {
+  const store = opts.store ?? billing.store.recovery;
+  if (!store) throw new Error('paddle-kit: recovery needs a RecoveryStore (built-in stores require migration 003)');
+  const timeoutMs = opts.timeoutMs ?? 45000;
+  const overlapMs = opts.overlapMs ?? 3600000;
+  const pendingLimit = opts.pendingLimit ?? 100;
+  const pendingAgeMs = opts.pendingAgeMs ?? 300000;
+  const initial = opts.initialSince ?? new Date(0);
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || !Number.isSafeInteger(overlapMs) || overlapMs < 0
+      || !Number.isSafeInteger(pendingLimit) || pendingLimit < 1 || !Number.isSafeInteger(pendingAgeMs) || pendingAgeMs < 0
+      || !Number.isFinite(initial.getTime())) throw new Error('paddle-kit: invalid recovery limits');
+  const now = opts.now ?? (() => new Date());
+  const startedAt = now();
+  const name = opts.name ?? billing.config.environment;
+  const runId = crypto.randomUUID();
+  const controller = new AbortController();
+  let claimed = false;
+  let incomplete = false;
+  let completed = false;
+  const work = async (): Promise<RecoveryResult> => {
+    claimed = await store.claimRecovery({ name, runId, startedAt: startedAt.toISOString(), leaseUntil: new Date(startedAt.getTime() + timeoutMs + 5000).toISOString() });
+    controller.signal.throwIfAborted();
+    if (!claimed) return { status: 'busy' };
+    const state = await store.getRecovery(name);
+    const since = new Date(Math.max(initial.getTime(), state?.checkpointAt ? Date.parse(state.checkpointAt) - overlapMs : initial.getTime()));
+    const api = apiFor(billing, { ...opts, signal: controller.signal });
+    const process = processorOf(billing);
+    if (!process) throw new Error('paddle-kit: recovery needs a billing made by createBilling');
+    const ids = await store.getPendingEvents({ before: new Date(startedAt.getTime() - pendingAgeMs).toISOString(), limit: pendingLimit + 1 });
+    const events = { applied: 0, failed: Math.max(0, ids.length - pendingLimit) };
+    for (const pending of ids.slice(0, pendingLimit)) {
+      const id = pending.eventId;
+      controller.signal.throwIfAborted();
+      // Synthetic replays are repaired by reconcilePayments below; provider event IDs are fetched unchanged.
+      if (!id.startsWith('evt_')) continue;
+      try {
+        // Paddle's filter searches entity data, not the envelope's event_id. Search a bounded time/type window,
+        // then match the original ID exactly. Events outside Paddle's retention remain failures for a person.
+        const occurred = Date.parse(pending.occurredAt);
+        const params = new URLSearchParams({ from: new Date(occurred - 60000).toISOString(), to: new Date(occurred + 60000).toISOString(), event_type: pending.eventType, per_page: '200' });
+        const envelope = (await api.list(`/events?${params}`, 5)).find(e => e.event_id === id);
+        controller.signal.throwIfAborted();
+        const event = parseEvent(envelope);
+        if (!event || event.eventId !== id) { events.failed++; continue; }
+        const result = await process(event);
+        if (result.http !== 200) events.failed++;
+        else events.applied++;
+      } catch {
+        controller.signal.throwIfAborted();
+        events.failed++;
+      }
+    }
+    const common = { apiKey: opts.apiKey, fetch: opts.fetch, signal: controller.signal };
+    const subscriptions = await reconcile(billing, common);
+    const payments = await reconcilePayments(billing, { ...common, since });
+    controller.signal.throwIfAborted();
+    const remaining = await store.getPendingEvents({ before: new Date(startedAt.getTime() - pendingAgeMs).toISOString(), limit: 1 });
+    controller.signal.throwIfAborted();
+    incomplete = subscriptions.invalid > 0 || events.failed > 0 || remaining.length > 0 || payments.transactions.failed > 0 || payments.adjustments.failed > 0;
+    if (incomplete) throw new Error('incomplete recovery');
+    completed = await store.finishRecovery({ name, runId, status: 'succeeded', finishedAt: now().toISOString(), reason: null });
+    if (!completed) throw new Error('recovery lease lost');
+    return { status: 'done', since: since.toISOString(), subscriptions, payments, events };
+  };
+  try {
+    return await within(work(), timeoutMs, 'billing recovery');
+  } catch (error) {
+    controller.abort();
+    const reason = incomplete ? 'incomplete' : (error as Error)?.name === 'TimeoutError' ? 'timeout'
+      : error instanceof PaddleTransportError && ['network', 'timeout', 'circuit_open'].includes(error.code)
+        ? error.code as 'network' | 'timeout' | 'circuit_open'
+      : error instanceof PaddleError && error.status !== undefined ? 'api_error' : 'recovery_error';
+    if (claimed && !completed) {
+      try { await within(store.finishRecovery({ name, runId, status: 'failed', finishedAt: now().toISOString(), reason }), 2000, 'recovery status'); }
+      catch { /* The database may be down; the durable lease expires and the next run takes over. */ }
+    }
+    return { status: 'failed', reason, ...(error instanceof PaddleError && error.status !== undefined ? { httpStatus: error.status } : {}) };
+  }
 }

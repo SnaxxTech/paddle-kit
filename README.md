@@ -1,5 +1,59 @@
 # paddle-kit
 
+## QR Lab resilience candidate (0.8.0-qr.1, unreleased)
+
+Run migration **003_recovery** before enabling the new recovery runner. Keep one transport per app and Paddle
+account/environment; use it for price reads, reconciliation, and portal requests:
+
+```ts
+import { createPaddleTransport } from 'paddle-kit/core';
+import { recoverBilling } from 'paddle-kit/reconcile';
+
+const paddle = createPaddleTransport();
+// getPrice(priceId, { apiKey, environment, fetch: paddle.fetch });
+const result = await recoverBilling(billing, { apiKey, fetch: paddle.fetch });
+if (result.status === 'failed') throw new Error(`Billing recovery: ${result.reason}`);
+```
+
+`createPaddleTransport` bounds each full JSON attempt to 4 seconds and the operation (including backoff) to 10 seconds.
+GETs retry at most twice on network failures, timeouts, and HTTP 408/429/500/502/503/504. Mutations are never retried
+implicitly; 401/403 and other permanent errors return immediately. `Retry-After` controls the delay; if it will not fit
+in the budget the caller gets the response and retries in a later job. Requests cannot follow redirects or leave the
+Paddle API origins. Error messages contain no credentials or original network error text.
+
+After three failed operations the circuit opens for 30 seconds. A 429 starts a provider cooldown immediately. Once
+cooldown expires, exactly one request probes Paddle: success closes the circuit; failure opens it again. `paddle.state()`
+reports `closed`, `open`, or `half_open`, failure count and retry time. This state belongs to one warm process; it is
+**not** a fleet-wide rate limit. Incoming verified webhooks and local access reads do not depend on the circuit.
+A serverless restart resets the circuit, so durable recovery and provider-side limits are still needed.
+
+`recoverBilling` uses `billing.store.recovery` (all built-in stores; custom stores may provide `opts.store`). One database
+lease prevents overlapping jobs; an expired lease can be reclaimed, and a replaced worker cannot overwrite its successor's
+checkpoint. The default job budget is 45 seconds. Call it from an authenticated cron with a function budget of at least
+60 seconds. It does not create a scheduler.
+
+The first run scans all payment history by default (`initialSince` may explicitly set a later boundary). Later runs resume
+from the last successful **start** time with an hour's overlap, including after outages longer than seven days. It retries
+unfinished original events through Paddle's documented time/type-filtered event stream, repairs subscriptions, and replays
+payments/adjustments through the same hooks/claims as webhooks. The checkpoint advances only after every phase succeeds.
+A partial result, malformed page, page limit, timeout, or remaining eligible unfinished event keeps recovery failed.
+Hook side effects remain at least once and must be idempotent. Timed-out work is aborted where the driver supports it;
+non-cancellable in-flight writes may finish, so recovery never promises exactly-once execution.
+
+Paddle retains original events for 90 days. An original event outside retention, a permanent payload problem, missing API
+permissions, or a persistent business hook failure requires human attention; recovery leaves it visible instead of dropping
+it. Recovery requires `notification.read`, `subscription.read`, `transaction.read` and `adjustment.read` API permissions.
+Health now includes durable `unresolvedFailed` and `oldestPendingAt` signals. Doctor treats unresolved failures and events
+unfinished for over five minutes as problems independently of the latest failure reason. With `staleHours`, other products'
+traffic no longer hides stale owned traffic.
+
+Built-in stores expose `applySubscription` for atomic grace transitions. A newer overdue snapshot preserves the current
+clock; a recovery clears it; a later delinquency starts a fresh clock. Older snapshots never backdate it. This deliberately
+permits extra grace when the first overdue event arrives out of order, rather than inferring an episode from stale data.
+The low-level `upsertSubscription` API is unchanged. Custom stores without `applySubscription` retain read/write behavior
+and must provide their own concurrency guarantees.
+
+
 Billing for SnaxxTech web apps that sell with **Paddle Billing** (v2, not Paddle Classic).
 
 > **Team status:** what is done, what is next and who does it → [STATUS.md](STATUS.md).
@@ -964,13 +1018,10 @@ Do these steps one time for each app: first in sandbox, then again for live.
     - Run the CLI with `--live` and a **separate env file** (`--env-file .env.production.local`, never the dev `.env.local`). Then a live key and a `test_` token cannot be in one file.
     - Use `PADDLE_ENV=production` and a `live_` client token.
 
-## Known issues (still open in v0.7.0)
+## Known limitations
 
-- **The past_due grace period can move.** The kit calculates the grace start from the stored row.
-  - Two `past_due` events at the same time can make the grace longer, by the time between them.
-  - A lost or late recovery event can join two `past_due` periods into one. Then the grace ends too early, and the customer loses access.
-  - `reconcile` does **not** correct this, because it keeps the stored value.
-  - Fix it by hand: `UPDATE paddle_subscriptions SET past_due_since = '<first past_due time>' WHERE subscription_id = '<sub_id>'`. Or wait until the subscription is no longer `past_due`.
+- **Grace depends on seeing recovery transitions.** Built-in stores now apply the grace transition atomically and ignore stale overdue events. If an entire recovery transition was never observed before another delinquency, a current snapshot alone cannot reconstruct the intervening episode. Review provider history when that happens. Custom stores without `applySubscription` also need their own atomic transition implementation.
+  A current snapshot repairs the current status, but cannot prove the history of missed episodes. Inspect provider history before correcting that clock manually.
 - **Health does not count stored failures per reason.** `failedLast24h` is one total, and health shows only the last reason. (`unverified.byReason` does count refusals per reason, per instance.)
 - **`unverified` is per instance and resets on restart.** On a serverless host, health may be answered by an instance that saw none of the refused requests. Judge a wrong secret by `lastEventAt`, not by `unverified`.
 

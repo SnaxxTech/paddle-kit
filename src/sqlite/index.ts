@@ -1,4 +1,4 @@
-import type { Customer, EventStatus, Health, ReasonCode, Store, Subscription } from '../core/types';
+import type { Customer, EventStatus, Health, ReasonCode, Store, Subscription, RecoveryState } from '../core/types';
 
 /** The subset of better-sqlite3 this store uses; any compatible driver works. */
 export interface SqliteStatement {
@@ -70,6 +70,14 @@ CREATE TABLE IF NOT EXISTS paddle_transactions (
 );
 `,
   },
+  {
+    name: '003_recovery',
+    sql: `CREATE TABLE IF NOT EXISTS paddle_recovery (
+  name TEXT PRIMARY KEY, run_id TEXT NOT NULL, status TEXT NOT NULL, started_at INTEGER NOT NULL,
+  finished_at INTEGER, last_succeeded_at INTEGER, checkpoint_at INTEGER, lease_until INTEGER, reason TEXT
+);
+CREATE INDEX IF NOT EXISTS paddle_events_unfinished_idx ON paddle_events (received_at) WHERE status IN ('received','failed');`,
+  },
 ];
 
 const DAY_MS = 86_400_000;
@@ -104,7 +112,63 @@ export function sqliteStore({ db }: { db: SqliteDatabase }): Store {
     return s;
   };
 
+  async function writeSubscription(s: Subscription, deriveGrace = false) {
+    const r = q(`INSERT INTO paddle_subscriptions
+         (subscription_id, customer_id, user_id, status, price_ids, current_period_end, scheduled_change,
+          canceled_at, past_due_since, last_event_at, raw, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (subscription_id) DO UPDATE SET
+         customer_id = excluded.customer_id,
+         user_id = COALESCE(excluded.user_id, paddle_subscriptions.user_id),
+         status = excluded.status,
+         price_ids = excluded.price_ids,
+         current_period_end = excluded.current_period_end,
+         scheduled_change = excluded.scheduled_change,
+         canceled_at = excluded.canceled_at,
+         past_due_since = CASE WHEN ? THEN
+           CASE WHEN excluded.status <> 'past_due' THEN NULL
+             WHEN paddle_subscriptions.status = 'past_due' THEN COALESCE(paddle_subscriptions.past_due_since, excluded.last_event_at)
+             ELSE excluded.last_event_at END
+           ELSE excluded.past_due_since END,
+         last_event_at = excluded.last_event_at,
+         raw = excluded.raw,
+         updated_at = excluded.updated_at
+       WHERE paddle_subscriptions.last_event_at <= excluded.last_event_at`).run(
+      s.subscriptionId, s.customerId, s.userId, s.status, JSON.stringify(s.priceIds), ms(s.currentPeriodEnd),
+      json(s.scheduledChange), ms(s.canceledAt), ms(s.pastDueSince), ms(s.lastEventAt), JSON.stringify(s.raw ?? {}),
+      Date.now(), deriveGrace ? 1 : 0,
+    );
+    return { applied: r.changes > 0 };
+  }
   return {
+    recovery: {
+      async getRecovery(name) {
+        const r = q('SELECT * FROM paddle_recovery WHERE name = ?').get(name) as Row | undefined;
+        return r ? { name: r.name as string, runId: r.run_id as string, status: r.status as RecoveryState['status'],
+          startedAt: iso(r.started_at)!, finishedAt: iso(r.finished_at), lastSucceededAt: iso(r.last_succeeded_at),
+          checkpointAt: iso(r.checkpoint_at), leaseUntil: iso(r.lease_until), reason: r.reason as RecoveryState['reason'] } : null;
+      },
+      async claimRecovery(e) {
+        return q(`INSERT INTO paddle_recovery (name, run_id, status, started_at, lease_until) VALUES (?, ?, 'running', ?, ?)
+          ON CONFLICT (name) DO UPDATE SET run_id = excluded.run_id, status = 'running', started_at = excluded.started_at,
+            lease_until = excluded.lease_until, finished_at = NULL, reason = NULL
+          WHERE paddle_recovery.lease_until IS NULL OR paddle_recovery.lease_until <= excluded.started_at`)
+          .run(e.name, e.runId, ms(e.startedAt), ms(e.leaseUntil)).changes > 0;
+      },
+      async finishRecovery(e) {
+        return q(`UPDATE paddle_recovery SET status = ?, finished_at = ?, lease_until = NULL, reason = ?,
+          last_succeeded_at = CASE WHEN ? = 'succeeded' THEN ? ELSE last_succeeded_at END,
+          checkpoint_at = CASE WHEN ? = 'succeeded' THEN started_at ELSE checkpoint_at END
+          WHERE name = ? AND run_id = ? AND status = 'running'`)
+          .run(e.status, ms(e.finishedAt), e.reason, e.status, ms(e.finishedAt), e.status, e.name, e.runId).changes > 0;
+      },
+      async getPendingEvents(e) {
+        return (q(`SELECT e.event_id, e.event_type, e.occurred_at FROM paddle_events e WHERE e.status IN ('received','failed') AND e.received_at <= ?
+          AND NOT EXISTS (SELECT 1 FROM paddle_event_claims c WHERE c.event_id = e.event_id AND c.claimed_at > ?)
+          ORDER BY e.received_at, e.event_id LIMIT ?`).all(ms(e.before), ms(e.before), e.limit) as Row[])
+          .map(r => ({ eventId: r.event_id as string, eventType: r.event_type as string, occurredAt: iso(r.occurred_at)! }));
+      },
+    },
     async recordEvent(e) {
       q(`INSERT INTO paddle_events (event_id, event_type, occurred_at, received_at, status)
          VALUES (?, ?, ?, ?, 'received') ON CONFLICT (event_id) DO NOTHING`).run(
@@ -138,30 +202,8 @@ export function sqliteStore({ db }: { db: SqliteDatabase }): Store {
       );
       return { applied: r.changes > 0 };
     },
-    async upsertSubscription(s: Subscription) {
-      const r = q(`INSERT INTO paddle_subscriptions
-           (subscription_id, customer_id, user_id, status, price_ids, current_period_end, scheduled_change,
-            canceled_at, past_due_since, last_event_at, raw, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (subscription_id) DO UPDATE SET
-           customer_id = excluded.customer_id,
-           user_id = COALESCE(excluded.user_id, paddle_subscriptions.user_id),
-           status = excluded.status,
-           price_ids = excluded.price_ids,
-           current_period_end = excluded.current_period_end,
-           scheduled_change = excluded.scheduled_change,
-           canceled_at = excluded.canceled_at,
-           past_due_since = excluded.past_due_since,
-           last_event_at = excluded.last_event_at,
-           raw = excluded.raw,
-           updated_at = excluded.updated_at
-         WHERE paddle_subscriptions.last_event_at <= excluded.last_event_at`).run(
-        s.subscriptionId, s.customerId, s.userId, s.status, JSON.stringify(s.priceIds), ms(s.currentPeriodEnd),
-        json(s.scheduledChange), ms(s.canceledAt), ms(s.pastDueSince), ms(s.lastEventAt), JSON.stringify(s.raw ?? {}),
-        Date.now(),
-      );
-      return { applied: r.changes > 0 };
-    },
+    upsertSubscription: writeSubscription,
+    applySubscription: s => writeSubscription({ ...s, pastDueSince: s.status === 'past_due' ? s.lastEventAt : null }, true),
     async recordTransaction(t) {
       q(`INSERT INTO paddle_transactions (transaction_id, owned, subscription_id, customer_id, occurred_at, received_at)
          VALUES (?, ?, ?, ?, ?, ?)
@@ -191,7 +233,9 @@ export function sqliteStore({ db }: { db: SqliteDatabase }): Store {
            (SELECT COALESCE(SUM(hits), 0) FROM paddle_failures WHERE last_at > ? AND last_at <= ?) AS failed_requests,
            (SELECT COUNT(*) FROM paddle_events WHERE reason = 'no_user_id' AND received_at > ? AND received_at <= ?) AS unlinked,
            (SELECT MAX(received_at) FROM paddle_events WHERE status = 'processed' AND (reason IS NULL OR reason = 'no_user_id')) AS last_owned_at,
-           (SELECT COUNT(*) FROM paddle_events WHERE reason = 'not_ours' AND received_at > ? AND received_at <= ?) AS not_ours`).get(
+           (SELECT COUNT(*) FROM paddle_events WHERE reason = 'not_ours' AND received_at > ? AND received_at <= ?) AS not_ours,
+           (SELECT COUNT(*) FROM paddle_events WHERE status = 'failed') AS unresolved_failed,
+           (SELECT MIN(received_at) FROM paddle_events WHERE status = 'received') AS oldest_pending`).get(
         since, until, since, until, since, until, since, until,
       ) as Row;
       const last = q(`SELECT at, reason FROM (
@@ -200,6 +244,8 @@ export function sqliteStore({ db }: { db: SqliteDatabase }): Store {
          ) ORDER BY at DESC LIMIT 1`).get() as Row | undefined;
       return {
         lastEventAt: iso(agg.last_event_at),
+        unresolvedFailed: Number(agg.unresolved_failed),
+        oldestPendingAt: iso(agg.oldest_pending),
         lastFailureAt: iso(last?.at),
         lastFailureReason: (last?.reason as ReasonCode | undefined) ?? null,
         failedLast24h: Number(agg.failed_events) + Number(agg.failed_requests),

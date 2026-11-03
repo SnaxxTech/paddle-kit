@@ -60,4 +60,21 @@ CREATE TABLE IF NOT EXISTS paddle_transactions (
 );
 `,
   },
+  {
+    name: '003_recovery',
+    sql: `CREATE TABLE IF NOT EXISTS paddle_recovery (
+  name text PRIMARY KEY,
+  run_id text NOT NULL,
+  status text NOT NULL,
+  started_at timestamptz NOT NULL,
+  finished_at timestamptz,
+  last_succeeded_at timestamptz,
+  checkpoint_at timestamptz,
+  lease_until timestamptz,
+  reason text
+);
+CREATE INDEX IF NOT EXISTS paddle_events_unfinished_idx ON paddle_events (received_at)
+  WHERE status IN ('received', 'failed');
+`,
+  },
 ];

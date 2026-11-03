@@ -3,3 +3,4 @@ export { createBilling } from './billing';
 export { MAX_WEBHOOK_BODY_BYTES } from './handler';
 export { adjustmentEffect, type AdjustmentEffect } from './adjustments';
 export type { Billing, BillingConfig } from './billing';
+export { createPaddleTransport, PaddleTransportError, type PaddleTransport, type TransportOptions, type CircuitState } from './transport';

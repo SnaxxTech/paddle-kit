@@ -204,17 +204,11 @@ export function createWebhookHandler(d: HandlerDeps): WebhookHandler {
         // A subscription already in the mirror stays ours, so a later item change can never strand a stale row.
         if (!prev && !ours) return NOT_OURS;
         const pastDueSince = nextPastDueSince(prev, ev.subscription.status, ev.occurredAt);
-        const { applied } = await d.store.upsertSubscription({ ...ev.subscription, pastDueSince });
+        const { applied } = d.store.applySubscription
+          ? await d.store.applySubscription(ev.subscription)
+          : await d.store.upsertSubscription({ ...ev.subscription, pastDueSince });
         if (!applied) {
-          if (
-            ev.subscription.status === 'past_due' &&
-            prev?.status === 'past_due' &&
-            prev.pastDueSince &&
-            Date.parse(prev.pastDueSince) > Date.parse(ev.occurredAt)
-          ) {
-            // an older past_due event arrived late: pull the grace clock back (same lastEventAt applies)
-            await d.store.upsertSubscription({ ...prev, pastDueSince: ev.occurredAt });
-          }
+          // A stale overdue snapshot may predate a recovery. Never infer its episode from the current row.
           return { status: 'stale', reason: 'out_of_order' };
         }
         // kept only because it is mirrored: processed as before, but no proof that owns matches (Health.lastOwnedAt)

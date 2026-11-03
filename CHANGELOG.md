@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.0-qr.1 (unreleased candidate)
+
+- Add opt-in `createPaddleTransport`: bounded JSON deadlines, safe GET retries with jitter/Retry-After, an in-process
+  circuit breaker with one half-open probe, redirect/origin protection, and sanitized transport errors.
+- Add `recoverBilling`: durable checkpoint/lease, original event replay via the documented event stream, snapshot/payment
+  repair, explicit partial failure, and a bounded job. **Run migration 003_recovery before enabling it.** All built-in
+  stores expose `recovery`; custom stores may provide an adapter. No app scheduler is created automatically.
+- Fail instead of silently truncating paginated reads. Health exposes unresolved failures/unfinished work, and doctor
+  evaluates these independently of the last failure reason and distinguishes stale owned traffic.
+- Apply provider subscription grace transitions atomically in built-in stores. Stale snapshots no longer backdate grace;
+  the tradeoff is conservative extra grace if the first overdue snapshot arrives late. Low-level upsert remains unchanged.
+- QR Lab is the first consumer under verification; other app integrations are unchanged. This candidate is not tagged or published.
+
+
 ## 0.7.0 (unreleased)
 
 Upgrade steps: [UPGRADING.md](UPGRADING.md). No new migration. Fixes the three items the 2026-10-29 review confirmed (A1–A3), plus prices found by label and multi-app monitoring.
