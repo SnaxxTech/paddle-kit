@@ -2,7 +2,7 @@
 
 ## 0.8.4 (from 0.8.3)
 
-No migration; nothing to do. Optional: create checkouts on the server (`createCheckoutTransaction` +
+No migration. Install `#v0.8.4`; nothing else to do. Optional: create checkouts on the server (`createCheckoutTransaction` +
 `openTransaction`) instead of `open({ userId, items })`, and build portal links with `customerPortalSession`.
 
 ## 0.8.3 (from 0.8.2)
@@ -86,7 +86,7 @@ Check first that your database has no tables of the new names with a different s
 ## 3. Bump the tag
 
 ```bash
-npm i github:SnaxxTech/paddle-kit#v0.8.3
+npm i github:SnaxxTech/paddle-kit#v0.8.4
 ```
 
 Commit the `package.json` and lockfile change. Since v0.5.0 the repository is public, so CI needs no token (README checklist, step 7). Then run the app's own tests and its sandbox end-to-end check.

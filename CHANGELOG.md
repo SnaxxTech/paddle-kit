@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.4 (unreleased)
+## 0.8.4 (2026-11-03)
 
 Checkout created on the server, and the customer portal (second review). No migration; nothing changes unless an app
 uses them.
