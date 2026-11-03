@@ -1,5 +1,9 @@
 # Upgrading paddle-kit
 
+## 0.8.5 (from 0.8.4)
+
+No migration. Install `#v0.8.5`. With `openTransaction`, pass the signed-in user's email: `openTransaction(id, { email })`.
+
 ## 0.8.4 (from 0.8.3)
 
 No migration. Install `#v0.8.4`; nothing else to do. Optional: create checkouts on the server (`createCheckoutTransaction` +
@@ -86,7 +90,7 @@ Check first that your database has no tables of the new names with a different s
 ## 3. Bump the tag
 
 ```bash
-npm i github:SnaxxTech/paddle-kit#v0.8.4
+npm i github:SnaxxTech/paddle-kit#v0.8.5
 ```
 
 Commit the `package.json` and lockfile change. Since v0.5.0 the repository is public, so CI needs no token (README checklist, step 7). Then run the app's own tests and its sandbox end-to-end check.

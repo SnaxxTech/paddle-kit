@@ -36,11 +36,13 @@ export async function createCheckout(cfg: {
     },
     /**
      * Since v0.8.4: opens the checkout for a transaction the server created (`createCheckoutTransaction` in
-     * paddle-kit/server). Paddle takes the items, customer and custom data from that transaction.
+     * paddle-kit/server). Paddle takes the items, customer and custom data from that transaction. Since v0.8.5:
+     * `email` prefills the email field when the transaction has no customer yet (a first purchase); Paddle ignores it
+     * for a transaction created with `customerId`.
      */
-    openTransaction(transactionId: string): void {
+    openTransaction(transactionId: string, o: { email?: string } = {}): void {
       if (!/^txn_[a-z\d]+$/.test(transactionId)) throw new Error('paddle-kit: openTransaction needs a transaction id (txn_…)');
-      paddle.Checkout.open({ transactionId });
+      paddle.Checkout.open(o.email ? { transactionId, customer: { email: o.email } } : { transactionId });
     },
   };
 }

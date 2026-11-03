@@ -42,6 +42,14 @@ describe('createCheckout', () => {
     expect(open).toHaveBeenCalledTimes(1);
   });
 
+  it('openTransaction prefills the email for a first purchase (checked in the Paddle sandbox overlay)', async () => {
+    const checkout = await createCheckout({ token: 'test_abc', environment: 'sandbox' });
+    checkout.openTransaction('txn_01abc', { email: 'a@x.com' });
+    expect(open).toHaveBeenCalledWith({ transactionId: 'txn_01abc', customer: { email: 'a@x.com' } });
+    checkout.openTransaction('txn_01abc', { email: '' });
+    expect(open).toHaveBeenLastCalledWith({ transactionId: 'txn_01abc' });
+  });
+
   it('refuses to open without a userId', async () => {
     const checkout = await createCheckout({ token: 'test_abc', environment: 'sandbox' });
     expect(() => checkout.open({ items: [{ priceId: 'pri_1', quantity: 1 }], userId: '' })).toThrow(/userId/);

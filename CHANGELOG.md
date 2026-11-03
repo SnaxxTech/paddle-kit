@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.5 (2026-11-03)
+
+### Fixes
+- **`checkout.openTransaction(transactionId, { email })`**: prefills the email field for a first purchase. Opening a
+  server-created transaction with no customer showed an empty email field, where `open({ email })` had prefilled it
+  (seen in the Paddle sandbox overlay while integrating QR-Lab). Passing `customer.email` with the transaction id fills
+  it, checked in the same overlay. No change without `email`.
+
 ## 0.8.4 (2026-11-03)
 
 Checkout created on the server, and the customer portal (second review). No migration; nothing changes unless an app
