@@ -34,6 +34,14 @@ describe('createCheckout', () => {
     expect(open).toHaveBeenCalledWith(expect.objectContaining({ customData: { keep: true, userId: 'user_1' } }));
   });
 
+  it('openTransaction opens the checkout for a server-created transaction, and only for a txn_ id', async () => {
+    const checkout = await createCheckout({ token: 'test_abc', environment: 'sandbox' });
+    checkout.openTransaction('txn_01abc');
+    expect(open).toHaveBeenCalledWith({ transactionId: 'txn_01abc' });
+    expect(() => checkout.openTransaction('pri_1')).toThrow(/transaction id/);
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
   it('refuses to open without a userId', async () => {
     const checkout = await createCheckout({ token: 'test_abc', environment: 'sandbox' });
     expect(() => checkout.open({ items: [{ priceId: 'pri_1', quantity: 1 }], userId: '' })).toThrow(/userId/);

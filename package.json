@@ -1,6 +1,6 @@
 {
   "name": "paddle-kit",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "private": true,
   "type": "module",
   "bin": {
@@ -57,6 +57,10 @@
     "./price": {
       "types": "./dist/price/index.d.ts",
       "default": "./dist/price/index.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "default": "./dist/server/index.js"
     }
   },
   "scripts": {

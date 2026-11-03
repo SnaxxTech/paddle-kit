@@ -104,10 +104,64 @@ export async function canUse(userId: string | null, feature: string): Promise<bo
 
 Rules for every app:
 
-- **Checkout is bound to the signed-in user on the server.** Render the checkout button from a server component and pass it the user id from your server session (`createCheckout(...).open({ userId })`), never from a form field or a URL. `custom_data` still comes back from the browser: the most a user can do is pay for someone else.
+- **Checkout is bound to the signed-in user on the server.** Create the transaction on the server (`createCheckoutTransaction`, below) with the user from your session, and open it in the browser with `openTransaction(id)`: the browser then cannot change who is paid for or what is bought. The older `createCheckout(...).open({ userId, items })` still works, but its `custom_data` comes from the browser (the most a user can do is pay for someone else).
 - **Broken config never unlocks paid operations when enforcement is on** (`canUse` above). Show the problem names only on the authenticated health route.
 - **Separate sandbox and live keys.** `PADDLE_ENV=sandbox` with `test_` / `pdl_sdbx_` credentials (Vercel Preview and Development), `PADDLE_ENV=production` with `live_` / `pdl_live_` (Vercel Production only). `readBillingEnv` refuses a mix, and `recoverBilling` refuses an API key of the other environment.
 - **Business effects deduplicate by Paddle's ids, not by event ids.** A recovery replay of a payment or refund carries a new event id (`reconcile_txn_…`, `reconcile_adj_…`), so grant on `transactionId` and keep adjustments by `adjustmentId` (see One-time purchases and refunds, Example).
+
+## Checkout created on the server, and the customer portal (`paddle-kit/server`, since v0.8.4)
+
+Two server-only calls (they need `PADDLE_API_KEY`; never import `paddle-kit/server` in a client component):
+
+- `createCheckoutTransaction(api, { userId, items, customerId?, customData?, allowedPriceIds? })` creates an
+  automatically-collected transaction: `custom_data.userId` is always the `userId` you pass (from your session), items
+  are checked (whole quantities, and only `allowedPriceIds` when given) before Paddle is called. Returns
+  `{ transactionId, checkoutUrl }`. The browser opens it with `checkout.openTransaction(transactionId)`.
+- `customerPortalSession(api, { customerId, subscriptionIds? })` creates a portal session (one per click: the links
+  are personal and expire) and returns `{ overview, subscriptions: { [id]: { cancel, updatePaymentMethod } } }`. Only
+  links on `customer-portal.paddle.com` / `sandbox-customer-portal.paddle.com` are returned; anything else throws.
+
+`api` is `{ apiKey, environment, fetch? }`; pass `billing.config.paddleFetch` (set by `billingFromEnv`) as `fetch`.
+Errors are `PaddleError` with the HTTP `status` and Paddle's error code, never the key.
+
+`app/billing/actions.ts`
+
+```ts
+'use server';
+import { createCheckoutTransaction, customerPortalSession } from 'paddle-kit/server';
+import { billing, config, products } from '@/lib/billing';
+import { currentUser } from '@/lib/session'; // your auth: the signed-in user, from the session cookie
+
+/** Returns a transaction id; the browser opens it with `checkout.openTransaction(id)`. */
+export async function startCheckout(cycle: 'monthly' | 'yearly'): Promise<string> {
+  const user = await currentUser();
+  if (!user) throw new Error('sign in first');
+  if (!billing || !config?.apiKey || !products) throw new Error('billing is not available');
+  const api = { apiKey: config.apiKey, environment: config.environment, fetch: billing.config.paddleFetch };
+  // The price comes from the product definition, never from the request: a retired price is never sold.
+  const { transactionId } = await createCheckoutTransaction(api, {
+    userId: user.id,
+    items: [{ priceId: products.checkoutPriceId('pro', cycle), quantity: 1 }],
+  });
+  return transactionId;
+}
+
+/** The customer portal for the signed-in user's own billing: look the customer up in your records, never the request. */
+export async function portalLink(): Promise<string> {
+  const user = await currentUser();
+  if (!user) throw new Error('sign in first');
+  if (!billing || !config?.apiKey) throw new Error('billing is not available');
+  const [subscription] = await billing.store.getSubscriptionsByUser(user.id);
+  if (!subscription) throw new Error('no billing history yet');
+  const api = { apiKey: config.apiKey, environment: config.environment, fetch: billing.config.paddleFetch };
+  const portal = await customerPortalSession(api, { customerId: subscription.customerId, subscriptionIds: [subscription.subscriptionId] });
+  return portal.overview; // redirect the browser here
+}
+```
+
+Tested against the Paddle sandbox: the created transaction kept the server's `userId` when the extra `customData`
+tried to set another one, and the portal links were all on `sandbox-customer-portal.paddle.com`. The block above runs
+in `tests/server.test.ts`.
 
 ## Resilience: the transport and the recovery job (since v0.8.0)
 
@@ -201,7 +255,7 @@ What it does **not** do: in-app purchases in mobile store apps. Google Play and 
 
 ## Add the kit to a new Next.js app (since v0.6.0)
 
-1. Install: `npm i github:SnaxxTech/paddle-kit#v0.8.3`.
+1. Install: `npm i github:SnaxxTech/paddle-kit#v0.8.4`.
 2. Run one CLI command in the app folder: `npx paddle-kit-catalog --webhook-url https://<host>/api/paddle` (see Catalog CLI). It makes the product, the prices, the webhook destination and the client token, and writes `.env.local`.
 3. Paste the host block that the CLI prints into your host's settings (Vercel: add `--host vercel` to get the commands). Redeploy.
 4. Add the four files of the Quickstart (`lib/billing.ts`, the webhook route, the recovery route with `vercel.json`, `lib/policy.ts`), and call `canUse` where a paid feature starts.
@@ -228,13 +282,13 @@ What each version changed, in simple words: [docs/HISTORY.md](docs/HISTORY.md). 
 ## Install
 
 ```bash
-npm i github:SnaxxTech/paddle-kit#v0.8.3
+npm i github:SnaxxTech/paddle-kit#v0.8.4
 ```
 
 **The kit is not on the npm registry.** So `npx paddle-kit-catalog` in a folder that has not installed the kit fails with `npm error 404 Not Found`: npx looks for a package of that name on the registry. Two ways work:
 
-- Run it in the app, after `npm i github:SnaxxTech/paddle-kit#v0.8.3`. Then `npx paddle-kit-catalog …` (and `npx paddle-kit-doctor …`) use the installed copy.
-- Outside an app: `npx --package=github:SnaxxTech/paddle-kit#v0.8.3 paddle-kit-catalog …` (the same for `paddle-kit-doctor`). The catalog CLI then prints one line to say that it runs from the npx cache, because it writes its env file in the current folder.
+- Run it in the app, after `npm i github:SnaxxTech/paddle-kit#v0.8.4`. Then `npx paddle-kit-catalog …` (and `npx paddle-kit-doctor …`) use the installed copy.
+- Outside an app: `npx --package=github:SnaxxTech/paddle-kit#v0.8.4 paddle-kit-catalog …` (the same for `paddle-kit-doctor`). The catalog CLI then prints one line to say that it runs from the npx cache, because it writes its env file in the current folder.
 
 - The repository is public (since v0.5.0). CI and the host install it with no token. Your secrets never go in this repository: each app keeps its own Paddle keys and webhook secret in its own env files and host settings (see Environment variables).
 - The kit pins the Paddle API to version 1: each REST call sends `Paddle-Version: 1`, and the catalog CLI sets `api_version: 1` on the webhook destination. A new Paddle API version can then not change the payloads that the kit reads. Paddle refuses a version older than the account's default. So if a future Paddle account has a default newer than 1, each REST call and the destination step fail with `PaddleError`. This is on purpose: the kit's parsers must be updated first.
@@ -1150,7 +1204,7 @@ jobs:
         run: |
           mkdir -p site
           set +e
-          npx --yes --package=github:SnaxxTech/paddle-kit#v0.8.3 paddle-kit-doctor --apps apps.json --json --html site/index.html > results.json
+          npx --yes --package=github:SnaxxTech/paddle-kit#v0.8.4 paddle-kit-doctor --apps apps.json --json --html site/index.html > results.json
           code=$?
           [ "$code" -eq 2 ] && exit 2   # the file or flags are wrong: fail loudly, publish nothing
           exit 0                        # red apps are shown on the page (and, later, as issues)
@@ -1234,7 +1288,7 @@ Do these steps one time for each app: first in sandbox, then again for live.
    4. Start Paddle.js when that page loads (for example, call `createCheckout` in an effect on mount, not only in a button click). Paddle opens a checkout link from the `_ptxn` query parameter when the page loads.
 
    We found no API for this setting (**UNVERIFIED** that there is none).
-2. **Install the kit in the app:** `npm i github:SnaxxTech/paddle-kit#v0.8.3`. The kit is not on the npm registry, so run the CLIs in the app folder (or see Install for `npx --package=…`).
+2. **Install the kit in the app:** `npm i github:SnaxxTech/paddle-kit#v0.8.4`. The kit is not on the npm registry, so run the CLIs in the app folder (or see Install for `npx --package=…`).
 3. **Make the catalog.** Run `npx paddle-kit-catalog --webhook-url https://<host>/api/paddle` (see Catalog CLI). Read the table that it shows. Never copy the webhook secret by hand.
 4. **Put the variables on the host.** Paste the host block that the CLI prints (`--host vercel` prints the commands). Add `PADDLE_HEALTH_TOKEN` (any long random value), and `PADDLE_API_KEY` if the app uses `getPrice`, `findPrice`, `resolvePrices` or `reconcile`. Redeploy.
 5. **Add the code:** the four Quickstart files: `lib/billing.ts` with `billingFromEnv`, the webhook route, the recovery route with its `vercel.json` cron and `CRON_SECRET`, and `lib/policy.ts` with `canUse`. Pass `onError` so a failure's cause reaches your error tracker. Optional: show the price with `findPrice` or `getPrice` (see Show the price from Paddle), so that the price lives only in Paddle, and report its source with a `healthChecks` entry. A one-time-purchase app may drop `PADDLE_PRICES` with `resolvePrices` (see Find prices by their label).
