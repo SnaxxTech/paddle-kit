@@ -248,3 +248,100 @@ describe('wiring: the recovery route drains the outbox, readiness checks migrati
     expect(await migrations()).toEqual({ ok: true });
   });
 });
+
+// The six gaps the first real consumer (Slop Remover's Full Scan) found. Each test failed on 0db6ccd.
+describe('fulfil: gaps found by the Slop Remover port', () => {
+  async function kit() {
+    return import('../src/fulfil');
+  }
+
+  it('1. grant may decline: state declined plus a review; a later refund does not call revoke', async () => {
+    const { pg, db } = await database();
+    const calls: string[] = [];
+    const picky: FulfilmentActions<{ credits: number }> = {
+      ...credits,
+      // async, inside the payment's lock, with the app's transaction
+      orderOf: async (tx, q) => ((await q.query('SELECT 1 AS ok')).rows[0].ok === 1 ? credits.orderOf(tx, q) : null),
+      grant: async (_q, f) => { calls.push(`grant:${f.transactionId}`); return { declined: 'order_already_paid' }; },
+      revoke: async (q, f) => { calls.push('revoke'); return credits.revoke(q, f); },
+    };
+    const t = harness(pg, db, picky);
+    await t.pay('txn_1');
+    expect(await t.state('txn_1')).toBe('declined');
+    expect(await t.reviews()).toEqual([{ kind: 'declined:order_already_paid', transaction_id: 'txn_1' }]);
+    await t.adjust('adj_r', 'txn_1', 'refund', 'approved');
+    expect(calls).toEqual(['grant:txn_1']);
+  });
+
+  it('2. importFulfilment: a pre-kit paid order honours its later refund; a pre-kit refunded order is not restored by an unrelated event', async () => {
+    const { importFulfilment } = await kit();
+    const { pg, db } = await database();
+    await pg.query(`INSERT INTO accounts VALUES ('u1', 5), ('u2', 0)`);
+    await db.transaction(async (q) => {
+      expect(await importFulfilment(q, { transactionId: 'txn_old_paid', userId: 'u1', grants: { credits: 5 }, state: 'granted' })).toBe(true);
+      expect(await importFulfilment(q, { transactionId: 'txn_old_paid', userId: 'u1', grants: { credits: 5 }, state: 'granted' })).toBe(false);
+      await importFulfilment(q, { transactionId: 'txn_old_refunded', userId: 'u2', grants: { credits: 5 }, state: 'revoked', revokedBy: 'refund', taken: 5 });
+    });
+    const t = harness(pg, db);
+    await t.adjust('adj_r', 'txn_old_paid', 'refund', 'approved');
+    expect(await t.balance('u1')).toBe(0);
+    await t.adjust('adj_w', 'txn_old_refunded', 'chargeback_warning', 'approved'); // unrelated: must not restore
+    expect(await t.balance('u2')).toBe(0);
+    expect(await t.state('txn_old_refunded')).toBe('revoked');
+  });
+
+  it('3. revoke and restore are told the adjustment that caused them', async () => {
+    const { pg, db } = await database();
+    const causes: string[] = [];
+    const told: FulfilmentActions<{ credits: number }> = {
+      ...credits,
+      revoke: async (q, f) => { causes.push(`revoke:${f.cause?.action}:${f.cause?.adjustmentId}`); return credits.revoke(q, f); },
+      restore: async (q, f) => { causes.push(`restore:${f.cause?.action}:${f.cause?.status}`); return credits.restore(q, f); },
+    };
+    const t = harness(pg, db, told);
+    await t.pay('txn_1');
+    await t.adjust('adj_cb', 'txn_1', 'chargeback', 'approved');
+    await t.adjust('adj_cbr', 'txn_1', 'chargeback_reverse', 'approved');
+    expect(causes).toEqual(['revoke:chargeback:adj_cb', 'restore:chargeback_reverse:approved']);
+  });
+
+  it('4. fulfilmentState reads a payment: state, what it grants, and what revoked it', async () => {
+    const { fulfilmentState } = await kit();
+    const { pg, db } = await database();
+    const t = harness(pg, db);
+    const read = (id: string) => db.transaction((q) => fulfilmentState(q, id));
+    expect(await read('txn_x')).toBeNull();
+    await t.pay('txn_1');
+    expect(await read('txn_1')).toMatchObject({ state: 'granted', userId: 'u1', grants: { credits: 5 }, revokedBy: null });
+    await t.adjust('adj_cb', 'txn_1', 'chargeback', 'approved');
+    expect(await read('txn_1')).toMatchObject({ state: 'revoked', revokedBy: 'chargeback', taken: 5 });
+    await t.adjust('adj_r', 'txn_2', 'refund', 'approved');
+    await t.pay('txn_2');
+    expect(await read('txn_2')).toMatchObject({ state: 'held', revokedBy: 'refund' });
+  });
+
+  it('5. a payment held because its refund came first raises a held_payment review, once', async () => {
+    const { pg, db } = await database();
+    const t = harness(pg, db);
+    await t.adjust('adj_r', 'txn_1', 'refund', 'approved');
+    await t.pay('txn_1');
+    await t.pay('txn_1');
+    expect(await t.reviews()).toEqual([{ kind: 'held_payment', transaction_id: 'txn_1' }]);
+  });
+
+  it('6. onReview is called once for each new kit review, in the same transaction', async () => {
+    const { createFulfilment } = await kit();
+    const { pg, db } = await database();
+    await pg.exec('CREATE TABLE app_alerts (id text PRIMARY KEY, kind text)');
+    const seen: string[] = [];
+    const hooks = createFulfilment(db, credits, {
+      onReview: async (q, r) => { seen.push(`${r.kind}:${r.transactionId}`); await q.query('INSERT INTO app_alerts VALUES ($1, $2)', [r.id, r.kind]); },
+    });
+    const ctx = { eventId: 'e', eventType: 't', store: {} as any, known: true };
+    const adj = (status: string) => hooks.onAdjustment!({ adjustmentId: 'adj_p', transactionId: 'txn_1', action: 'refund', status, type: 'partial', subscriptionId: null, customerId: null, currency: 'USD', total: '1', subtotal: '1', occurredAt: '', raw: {} } as Adjustment, ctx);
+    await adj('approved');
+    await adj('approved'); // redelivery: no second review, no second call
+    expect(seen).toEqual(['refund:txn_1']);
+    expect((await pg.query('SELECT kind FROM app_alerts')).rows).toEqual([{ kind: 'refund' }]);
+  });
+});

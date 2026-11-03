@@ -15,6 +15,14 @@ affected (its tables stay empty, and readiness checks them only with `readiness:
   partial refunds, chargeback warnings and unfulfilled paid orders become `paddle_fulfilment_reviews` rows; replays
   and late, older statuses change nothing; subscription payments are skipped. A throw in the app's action rolls the
   whole payment back, so Paddle's retry grants exactly once.
+- **Shaped by the first real consumer** (Slop Remover's Full Scan on this branch: its billing tests, 146 on PGlite and
+  48/48 on real Postgres, pass on the module; 6 gaps it found are fixed here, each with a test that failed before):
+  `orderOf(tx, q)` may be async and read the database inside the payment's lock; `grant` may return
+  `{ declined: reason }` (state `declined`, a `declined:<reason>` review, later refunds change nothing); `revoke` /
+  `restore` get `cause` (the adjustment behind them); `fulfilmentState(q, id)` reads a payment (state, grants, taken,
+  `revokedBy`); `importFulfilment(q, …)` brings in payments fulfilled before the kit (a refunded one gets an
+  `import:<id>` adjustment, so only a real reversal gives it back); a payment held because its refund came first raises
+  a `held_payment` review; `createFulfilment(db, actions, { onReview })` is called once per new review.
 - **Outbox:** `enqueue(q, { id, kind, payload })` in the same transaction (the id is the idempotency key);
   `drainOutbox(query, handlers, { limit, maxAttempts, leaseSeconds })` sends at least once with backoff and stores
   the error redacted; `outboxCheck(query)` is a health check (red for an item that gave up or waits > 60 min).

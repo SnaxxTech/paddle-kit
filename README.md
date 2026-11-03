@@ -647,6 +647,20 @@ your database transaction. You write only what a grant, a revoke and a restore m
   `paddle_fulfilment_reviews` (a person decides), never only a log line;
 - replays and late, older statuses change nothing; subscription payments are left to entitlements.
 
+What the app can add (found by the first real consumer, Slop Remover's Full Scan):
+
+- `orderOf(tx, q)` may be async and read the database (it runs inside the payment's lock), and `grant` may return
+  `{ declined: reason }` (say, the order was already paid by another transaction): the payment is then `declined`,
+  with a `declined:<reason>` review, and its later refunds change nothing.
+- `revoke` and `restore` get `cause`, the adjustment behind them (refund or chargeback, for an audit row).
+- `fulfilmentState(q, transactionId)` reads a payment: `held` / `granted` / `revoked` / `declined`, what it grants,
+  what was taken, and `revokedBy` (`refund` / `chargeback`), e.g. for a checkout confirmation.
+- `importFulfilment(q, { transactionId, userId, grants, state, revokedBy? })` brings in payments fulfilled before the
+  app used the kit (run it once in a migration), so their later refunds are honoured and a refunded one is not given
+  back by an unrelated event.
+- `createFulfilment(db, actions, { onReview })` is called once for each new review (in the same transaction), so the
+  app's own alerting sees them. A payment that arrived after its refund raises a `held_payment` review.
+
 Side effects (a receipt email, a job) go to the **outbox** in the same transaction: `enqueue(q, { id, kind, payload })`
 with `id` as the idempotency key, so they are sent only if the payment's changes commit, and once. `drainOutbox(query,
 handlers)` sends due items at least once (retries 1 min, 2, 4, … 6 h; a handler must be safe to call twice), and
