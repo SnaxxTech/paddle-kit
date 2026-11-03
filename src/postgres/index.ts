@@ -1,3 +1,4 @@
+import { missingSchema } from '../core/schema';
 import type { EventStatus, Health, ReasonCode, Store, Subscription, RecoveryState } from '../core/types';
 
 export { MIGRATIONS } from './migrations';
@@ -175,6 +176,20 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
          ON CONFLICT (id) DO NOTHING`,
         [jsonParam(rows), at],
       );
+    },
+    async checkSchema() {
+      // The schema the connection resolves unqualified names in, so a per-app schema (search_path) is checked.
+      const { rows } = await query(
+        `SELECT table_name, column_name FROM information_schema.columns
+          WHERE table_schema = current_schema() AND table_name LIKE 'paddle\\_%'`,
+      );
+      const found = new Map<string, Set<string>>();
+      for (const r of rows) {
+        const t = r.table_name as string;
+        if (!found.has(t)) found.set(t, new Set());
+        found.get(t)!.add(r.column_name as string);
+      }
+      return { missing: missingSchema(found) };
     },
     async getOwnedIds() {
       const { rows } = await query(`SELECT id, kind FROM paddle_owned_ids ORDER BY id`);

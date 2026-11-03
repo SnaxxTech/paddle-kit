@@ -1,13 +1,20 @@
 import { PGlite } from '@electric-sql/pglite';
-import { expect, it } from 'vitest';
+import { afterEach, expect, it } from 'vitest';
 import { MIGRATIONS, postgresStore } from '../src/postgres';
 import { createBilling } from '../src/core/billing';
 import { sign } from './helpers/sign';
 import { loadFixture, subscriptionEvent } from './helpers/fixtures';
 import { runStoreContract } from './helpers/store-contract';
 
+// Every database a test opens is closed after it, so instances do not pile up across the file.
+const open: PGlite[] = [];
+afterEach(async () => {
+  await Promise.all(open.splice(0).map((db) => db.close()));
+});
+
 async function freshDb() {
   const db = new PGlite();
+  open.push(db);
   for (const m of MIGRATIONS) await db.exec(m.sql);
   return db;
 }

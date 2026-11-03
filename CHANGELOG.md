@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.8.2 (2026-11-03)
+
+The second review's next two items: a readiness check, and the Quickstart's three presets as tested examples. No
+migration, nothing changes unless an app opts in.
+
+### Added
+- **`readinessChecks`** (`paddle-kit/config`) and **`billingFromEnv({ readiness })`**: health checks that turn health
+  and `paddle-kit-doctor` red before the first payment needs something: `paddle_api_key` (one cached `GET /` to Paddle:
+  the key is accepted and has the permissions recovery needs, plus `price.read`/`product.read` with `resolvePrices`,
+  plus any `permissions` you name; one request per instance even when checks overlap), `migrations` (every table and
+  column the kit uses, from `REQUIRED_SCHEMA`; a database that does not answer is reported as that, not as a missing
+  migration) and `cron_secret` (set, 16+ characters). Details name permissions, tables and variables only.
+- **`Store.checkSchema()`** on the Postgres (`information_schema`, current schema) and SQLite (`pragma_table_info`)
+  stores: the required tables and columns that are missing. A test keeps `REQUIRED_SCHEMA` equal to what the migrations
+  create on both. Checked against the real Paddle sandbox: a good key passed
+  (6 permissions), a made-up key and a sandbox key sent to live were refused (403).
+- **Three presets** in the Quickstart: subscription (the setup as is), one-time unlock (new README example
+  `unlockHooks` / `hasUnlock`), credit packs (the existing example). `tests/readme-presets.test.ts` runs the README's
+  `lib/billing.ts` + `lib/policy.ts` end to end with signed subscription events, and the unlock example's wiring,
+  webhook and `canUse` on PGlite (refund before payment, reversal, replay, partial refund). A paid order with no user or
+  a price that unlocks nothing is kept in `unlock_reviews`, once per payment, never just logged.
+
 ## 0.8.1 (2026-11-03)
 
 Fixes the README copy-paste traps the second review of 0.8.0 found. Each fix has a test that runs the README block as

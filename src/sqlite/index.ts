@@ -1,3 +1,4 @@
+import { REQUIRED_SCHEMA, missingSchema } from '../core/schema';
 import type { Customer, EventStatus, Health, ReasonCode, Store, Subscription, RecoveryState } from '../core/types';
 
 /** The subset of better-sqlite3 this store uses; any compatible driver works. */
@@ -237,6 +238,14 @@ export function sqliteStore({ db }: { db: SqliteDatabase }): Store {
       const insert = q(`INSERT INTO paddle_owned_ids (id, kind, first_seen_at) VALUES (?, ?, ?) ON CONFLICT (id) DO NOTHING`);
       for (const id of ids.priceIds) insert.run(id, 'price', ms(at));
       for (const id of ids.productIds) insert.run(id, 'product', ms(at));
+    },
+    async checkSchema() {
+      const found = new Map<string, Set<string>>();
+      for (const table of Object.keys(REQUIRED_SCHEMA)) {
+        const cols = q(`SELECT name FROM pragma_table_info(?)`).all(table) as Row[];
+        if (cols.length > 0) found.set(table, new Set(cols.map((c) => c.name as string)));
+      }
+      return { missing: missingSchema(found) };
     },
     async getOwnedIds() {
       const rows = q(`SELECT id, kind FROM paddle_owned_ids ORDER BY id`).all() as Row[];

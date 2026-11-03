@@ -5,6 +5,9 @@ import { createBilling, type Billing, type BillingConfig } from '../core/billing
 import { isOwnsResolver } from '../core/owns';
 import { createPaddleTransport, type PaddleTransport } from '../core/transport';
 import type { OwnsResolver, Store } from '../core/types';
+import { readinessChecks, type ReadinessOptions } from './readiness';
+
+export { readinessChecks, type ReadinessOptions } from './readiness';
 
 /** key -> price id, or key -> { billing cycle -> price id }. */
 export type PriceMap = Record<string, string | Record<string, string>>;
@@ -293,6 +296,11 @@ export type BillingFromEnvOptions = ReadBillingEnvOptions &
      * `getOwnedIds`.
      */
     owns?: BillingConfig['owns'];
+    /**
+     * Since v0.8.2: adds `readinessChecks` to health (API key permissions, migrations 003/004, and CRON_SECRET when
+     * `cronSecret` is passed), next to your own `healthChecks`. One cached request to Paddle per 10 minutes.
+     */
+    readiness?: Omit<ReadinessOptions, 'apiKey' | 'environment' | 'store' | 'resolvesPrices'>;
   };
 
 /**
@@ -318,7 +326,7 @@ export function billingFromEnv(
   transport?: PaddleTransport;
 } {
   const enforce = env.BILLING_ENFORCE === '1';
-  const { requiredPrices, requiredCycles, requireLaunchAt, resolvePrices: lookup, entitlements, owns, ...rest } = opts;
+  const { requiredPrices, requiredCycles, requireLaunchAt, resolvePrices: lookup, entitlements, owns, readiness, ...rest } = opts;
   // One resilient transport for this app and environment: price lookups and recovery share its circuit breaker.
   const transport = createPaddleTransport();
   const resolvePrices = lookup && { ...lookup, fetch: lookup.fetch ?? transport.fetch };
@@ -339,6 +347,19 @@ export function billingFromEnv(
     owns: owns ?? durable ?? config.owns,
     catalogApp: resolvePrices?.app,
     entitlements: typeof entitlements === 'function' ? entitlements(config) : (entitlements ?? {}),
+    healthChecks: readiness
+      ? {
+          ...readinessChecks({
+            ...readiness,
+            fetch: readiness.fetch ?? transport.fetch,
+            apiKey: config.apiKey,
+            environment: config.environment,
+            store: rest.store,
+            resolvesPrices: !!resolvePrices,
+          }),
+          ...rest.healthChecks,
+        }
+      : rest.healthChecks,
   });
   return { billing, config, problems, enforce, transport };
 }

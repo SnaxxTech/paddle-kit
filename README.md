@@ -17,6 +17,14 @@ subscriptions and recovery checkpoint. Give each its own database, Neon branch o
 
 Run migrations `001`–`004` (Run the migrations) before the first deploy of this version.
 
+**Three presets**, each a tested example (the tests run the blocks of this file as written):
+
+| You sell | Use |
+|---|---|
+| A subscription | This setup as it is: `entitlements` maps the plan's price ids to features, `canUse` checks them. |
+| A one-time unlock (lifetime licence) | This setup plus the hooks of "Example: a one-time unlock"; `canUse` also asks `hasUnlock`. |
+| Credit packs | This setup plus the hooks of "Example" (credits, refunds and chargebacks). |
+
 `lib/billing.ts`
 
 ```ts
@@ -33,6 +41,9 @@ export const { billing, config, problems, enforce } = billingFromEnv(process.env
   // `priceIds` reads both forms of a PADDLE_PRICES entry: "pri_…" and { "monthly": "pri_…", "yearly": "pri_…" }.
   entitlements: (c) => Object.fromEntries(priceIds(c.prices.pro).map((id) => [id, ['pro']])),
   onError: (error, ctx) => console.error('paddle-kit failure', ctx, error), // may hold secrets: your error tracker only
+  // Health shows whether the API key has the permissions recovery needs, migrations 003/004 are in, and CRON_SECRET is
+  // set (since v0.8.2). Add `permissions: ['subscription.write']` if the app changes plans through the API.
+  readiness: { cronSecret: process.env.CRON_SECRET },
 });
 if (problems.length > 0) console.error('billing misconfigured:', problems.join('; ')); // names only, never values
 ```
@@ -188,7 +199,7 @@ What it does **not** do: in-app purchases in mobile store apps. Google Play and 
 
 ## Add the kit to a new Next.js app (since v0.6.0)
 
-1. Install: `npm i github:SnaxxTech/paddle-kit#v0.8.1`.
+1. Install: `npm i github:SnaxxTech/paddle-kit#v0.8.2`.
 2. Run one CLI command in the app folder: `npx paddle-kit-catalog --webhook-url https://<host>/api/paddle` (see Catalog CLI). It makes the product, the prices, the webhook destination and the client token, and writes `.env.local`.
 3. Paste the host block that the CLI prints into your host's settings (Vercel: add `--host vercel` to get the commands). Redeploy.
 4. Add the four files of the Quickstart (`lib/billing.ts`, the webhook route, the recovery route with `vercel.json`, `lib/policy.ts`), and call `canUse` where a paid feature starts.
@@ -215,13 +226,13 @@ What each version changed, in simple words: [docs/HISTORY.md](docs/HISTORY.md). 
 ## Install
 
 ```bash
-npm i github:SnaxxTech/paddle-kit#v0.8.1
+npm i github:SnaxxTech/paddle-kit#v0.8.2
 ```
 
 **The kit is not on the npm registry.** So `npx paddle-kit-catalog` in a folder that has not installed the kit fails with `npm error 404 Not Found`: npx looks for a package of that name on the registry. Two ways work:
 
-- Run it in the app, after `npm i github:SnaxxTech/paddle-kit#v0.8.1`. Then `npx paddle-kit-catalog …` (and `npx paddle-kit-doctor …`) use the installed copy.
-- Outside an app: `npx --package=github:SnaxxTech/paddle-kit#v0.8.1 paddle-kit-catalog …` (the same for `paddle-kit-doctor`). The catalog CLI then prints one line to say that it runs from the npx cache, because it writes its env file in the current folder.
+- Run it in the app, after `npm i github:SnaxxTech/paddle-kit#v0.8.2`. Then `npx paddle-kit-catalog …` (and `npx paddle-kit-doctor …`) use the installed copy.
+- Outside an app: `npx --package=github:SnaxxTech/paddle-kit#v0.8.2 paddle-kit-catalog …` (the same for `paddle-kit-doctor`). The catalog CLI then prints one line to say that it runs from the npx cache, because it writes its env file in the current folder.
 
 - The repository is public (since v0.5.0). CI and the host install it with no token. Your secrets never go in this repository: each app keeps its own Paddle keys and webhook secret in its own env files and host settings (see Environment variables).
 - The kit pins the Paddle API to version 1: each REST call sends `Paddle-Version: 1`, and the catalog CLI sets `api_version: 1` on the webhook destination. A new Paddle API version can then not change the payloads that the kit reads. Paddle refuses a version older than the account's default. So if a future Paddle account has a default newer than 1, each REST call and the destination step fail with `PaddleError`. This is on purpose: the kit's parsers must be updated first.
@@ -720,6 +731,117 @@ We ran this example against a real SQL database (PGlite), through the built pack
 
 The example itself is a test (`tests/readme-hooks.test.ts`, on PGlite): the test reads the SQL and TypeScript blocks above out of this file and runs them as written. Since v0.8.0 it also covers the two cases the v0.7 example got wrong: a full refund that arrived **before** its payment (the payment now grants nothing), and a won chargeback while a separate full refund still stands (nothing is given back). A chargeback took the credits and a won dispute gave them back one time; a refund that was approved and then reversed took them and gave them back; a give-back with nothing taken back gave nothing; redeliveries and older, late statuses changed nothing; a partial refund and a chargeback warning became review rows. Since v0.8.1 a reversal gives back only what the revoke took: buy 5, spend 3, refund (takes the 2 left), reverse: 2 come back, not 5. Not yet seen from real Paddle: a chargeback, its reversal, or a reversed refund.
 
+### Example: a one-time unlock
+
+A price that unlocks a feature for good (a lifetime licence, a template pack). A full refund or a chargeback that still
+stands takes it away; a reversal gives it back. The tables (Postgres):
+
+```sql
+CREATE TABLE unlocks (transaction_id text NOT NULL, user_id text NOT NULL, feature text NOT NULL,
+  revoked boolean NOT NULL DEFAULT false, PRIMARY KEY (transaction_id, feature));
+CREATE INDEX unlocks_user_idx ON unlocks (user_id, feature);
+-- Every adjustment, kept against its transaction even before the payment arrives (a refund can come first).
+CREATE TABLE unlock_adjustments (id text PRIMARY KEY, transaction_id text NOT NULL, action text NOT NULL, type text,
+  status text NOT NULL, rank int NOT NULL);
+-- Paid, but not unlocked automatically (no user, or a price that unlocks nothing): a person refunds or unlocks by hand.
+CREATE TABLE unlock_reviews (transaction_id text PRIMARY KEY, reason text NOT NULL, detail text,
+  created_at timestamptz NOT NULL DEFAULT now(), resolved_at timestamptz);
+```
+
+```ts
+import { paymentRevoked, type BillingConfig } from 'paddle-kit/core';
+
+type Tx = { query(text: string, params?: unknown[]): Promise<{ rows: any[] }> };
+declare const db: { transaction<T>(fn: (q: Tx) => Promise<T>): Promise<T>; query: Tx['query'] };
+
+const lockPayment = (q: Tx, transactionId: string) => q.query('SELECT pg_advisory_xact_lock(hashtext($1))', [transactionId]);
+
+// The unlocks of a payment stand unless an adjustment that still stands took the payment back.
+async function settle(q: Tx, transactionId: string) {
+  const adjustments = (await q.query('SELECT action, type, status FROM unlock_adjustments WHERE transaction_id = $1', [transactionId])).rows;
+  await q.query('UPDATE unlocks SET revoked = $1 WHERE transaction_id = $2', [paymentRevoked(adjustments), transactionId]);
+}
+
+/**
+ * `features`: price id -> the feature it unlocks, or a function returning that map (read when a payment arrives, so
+ * it can use the config `billingFromEnv` returns): `() => ({ [priceIdOf(config!.prices, 'lifetime')]: 'pro' })`.
+ */
+export function unlockHooks(features: Record<string, string> | (() => Record<string, string>)): Pick<BillingConfig, 'onTransaction' | 'onAdjustment'> {
+  return {
+    onTransaction: async (tx) => {
+      if (tx.subscriptionId !== null) return; // a subscription payment: entitlements handle it
+      const map = typeof features === 'function' ? features() : features;
+      const userId = tx.customData?.userId; // untrusted, but a user can only pay for someone else
+      const unlocked = tx.items.map((i) => map[i.priceId]).filter((f): f is string => !!f);
+      await db.transaction(async (q) => {
+        if (typeof userId !== 'string' || unlocked.length === 0) {
+          // Paid, but nothing to unlock automatically. Keep it (never just log), keyed by the payment, so a replay
+          // adds nothing and the payment stays visible until a person refunds it or unlocks by hand.
+          const reason = typeof userId !== 'string' ? 'no_user' : 'unknown_price';
+          await q.query('INSERT INTO unlock_reviews (transaction_id, reason, detail) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+            [tx.transactionId, reason, `${tx.currency} ${tx.total}: ${tx.items.map((i) => i.priceId).join(', ')}`]);
+          return;
+        }
+        await lockPayment(q, tx.transactionId);
+        for (const feature of unlocked) {
+          await q.query('INSERT INTO unlocks (transaction_id, user_id, feature) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [tx.transactionId, userId, feature]);
+        }
+        await settle(q, tx.transactionId); // a refund that arrived first keeps it revoked
+      });
+    },
+    onAdjustment: async (adj) => {
+      await db.transaction(async (q) => {
+        await lockPayment(q, adj.transactionId);
+        // A status only moves forward (pending_approval → approved / rejected → reversed).
+        await q.query(
+          `INSERT INTO unlock_adjustments (id, transaction_id, action, type, status, rank)
+           VALUES ($1, $2, $3, $4, $5, CASE $5 WHEN 'pending_approval' THEN 0 WHEN 'reversed' THEN 2 ELSE 1 END)
+           ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, rank = EXCLUDED.rank WHERE unlock_adjustments.rank < EXCLUDED.rank`,
+          [adj.adjustmentId, adj.transactionId, adj.action, adj.type, adj.status],
+        );
+        await settle(q, adj.transactionId);
+      });
+    },
+  };
+}
+
+/** For `canUse` in lib/policy.ts: a subscription (`billing.hasAccess`) or an unlock that still stands. */
+export async function hasUnlock(userId: string, feature: string): Promise<boolean> {
+  const rows = (await db.query('SELECT 1 FROM unlocks WHERE user_id = $1 AND feature = $2 AND NOT revoked LIMIT 1', [userId, feature])).rows;
+  return rows.length > 0;
+}
+```
+
+Wire it in `lib/billing.ts` (the Quickstart's, with a `lifetime` price) and let `canUse` ask both:
+
+```ts
+// lib/billing.ts: the Quickstart's call, plus the hooks
+export const { billing, config, problems, enforce } = billingFromEnv(process.env, {
+  requiredPrices: ['lifetime'],
+  store: postgresStore({ query: (text, params) => pool.query(text, params) }),
+  ...unlockHooks(() => ({ [priceIdOf(config!.prices, 'lifetime')]: 'pro' })),
+  readiness: { cronSecret: process.env.CRON_SECRET },
+});
+```
+
+`lib/policy.ts` with unlocks
+
+```ts
+import { billing, enforce } from '@/lib/billing';
+import { hasUnlock } from '@/lib/unlocks';
+
+export async function canUse(userId: string | null, feature: string): Promise<boolean> {
+  if (!userId) return false;
+  if (!billing) return !enforce;
+  return (await billing.hasAccess(userId, feature)) || hasUnlock(userId, feature);
+}
+```
+
+This example is a test too (`tests/readme-presets.test.ts`, on PGlite). Through a signed `transaction.completed` and
+`canUse`: a payment unlocked the feature, a replay did not duplicate it, a full refund took it away and its reversal
+gave it back. A refund that arrived first kept it locked; a partial refund changed nothing. A payment with no user or
+an unknown price unlocked nothing and stayed in `unlock_reviews`, once per payment.
+
 ### Refunds, chargebacks and reversals (`adjustmentEffect`, since v0.7.0)
 
 Every change to a payment arrives as an adjustment, and the same adjustment comes again when its status moves (`pending_approval` → `approved` / `rejected` → maybe `reversed`). `adjustmentEffect(adj)` turns Paddle's actions and statuses into what the app should do:
@@ -1026,7 +1148,7 @@ jobs:
         run: |
           mkdir -p site
           set +e
-          npx --yes --package=github:SnaxxTech/paddle-kit#v0.8.1 paddle-kit-doctor --apps apps.json --json --html site/index.html > results.json
+          npx --yes --package=github:SnaxxTech/paddle-kit#v0.8.2 paddle-kit-doctor --apps apps.json --json --html site/index.html > results.json
           code=$?
           [ "$code" -eq 2 ] && exit 2   # the file or flags are wrong: fail loudly, publish nothing
           exit 0                        # red apps are shown on the page (and, later, as issues)
@@ -1110,7 +1232,7 @@ Do these steps one time for each app: first in sandbox, then again for live.
    4. Start Paddle.js when that page loads (for example, call `createCheckout` in an effect on mount, not only in a button click). Paddle opens a checkout link from the `_ptxn` query parameter when the page loads.
 
    We found no API for this setting (**UNVERIFIED** that there is none).
-2. **Install the kit in the app:** `npm i github:SnaxxTech/paddle-kit#v0.8.1`. The kit is not on the npm registry, so run the CLIs in the app folder (or see Install for `npx --package=…`).
+2. **Install the kit in the app:** `npm i github:SnaxxTech/paddle-kit#v0.8.2`. The kit is not on the npm registry, so run the CLIs in the app folder (or see Install for `npx --package=…`).
 3. **Make the catalog.** Run `npx paddle-kit-catalog --webhook-url https://<host>/api/paddle` (see Catalog CLI). Read the table that it shows. Never copy the webhook secret by hand.
 4. **Put the variables on the host.** Paste the host block that the CLI prints (`--host vercel` prints the commands). Add `PADDLE_HEALTH_TOKEN` (any long random value), and `PADDLE_API_KEY` if the app uses `getPrice`, `findPrice`, `resolvePrices` or `reconcile`. Redeploy.
 5. **Add the code:** the four Quickstart files: `lib/billing.ts` with `billingFromEnv`, the webhook route, the recovery route with its `vercel.json` cron and `CRON_SECRET`, and `lib/policy.ts` with `canUse`. Pass `onError` so a failure's cause reaches your error tracker. Optional: show the price with `findPrice` or `getPrice` (see Show the price from Paddle), so that the price lives only in Paddle, and report its source with a `healthChecks` entry. A one-time-purchase app may drop `PADDLE_PRICES` with `resolvePrices` (see Find prices by their label).

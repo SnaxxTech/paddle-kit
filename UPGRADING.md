@@ -1,5 +1,11 @@
 # Upgrading paddle-kit
 
+## 0.8.2 (from 0.8.1)
+
+No migration. Install `#v0.8.2`. Nothing else to do. Optional: add `readiness: { cronSecret: process.env.CRON_SECRET }` to `billingFromEnv` (add
+`permissions: ['subscription.write']` if the app changes plans through the API), so health shows a missing permission,
+migration or cron secret. It makes one request to Paddle per 10 minutes of health checks.
+
 ## 0.8.1 (from 0.8.0)
 
 No `paddle_*` migration. Install `#v0.8.1`: the Quickstart imports `priceIds` and `createRecoveryRoute`, which 0.8.0 does not have. Only if you copied these README examples:
@@ -70,7 +76,7 @@ Check first that your database has no tables of the new names with a different s
 ## 3. Bump the tag
 
 ```bash
-npm i github:SnaxxTech/paddle-kit#v0.8.1
+npm i github:SnaxxTech/paddle-kit#v0.8.2
 ```
 
 Commit the `package.json` and lockfile change. Since v0.5.0 the repository is public, so CI needs no token (README checklist, step 7). Then run the app's own tests and its sandbox end-to-end check.
