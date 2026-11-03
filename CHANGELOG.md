@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.3 (unreleased)
+## 0.8.3 (2026-11-03)
 
 One product definition for access and checkout (second review). No migration; nothing changes unless an app passes
 `products`.
