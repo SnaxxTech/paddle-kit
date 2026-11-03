@@ -1,9 +1,102 @@
 # paddle-kit
 
-## QR Lab resilience candidate (0.8.0-qr.1, unreleased)
+## Standard setup (since v0.8.0)
 
-Run migration **003_recovery** before enabling the new recovery runner. Keep one transport per app and Paddle
-account/environment; use it for price reads, reconciliation, and portal requests:
+Every app uses the same four pieces. Nothing else is needed: no billing service, no queue, no Redis.
+
+1. **One config** (`lib/billing.ts`): `billingFromEnv`.
+2. **One webhook route** (`app/api/paddle/route.ts`): `createWebhookRoute`.
+3. **One scheduled recovery job** (`app/api/cron/billing-recovery/route.ts`): `recoverBilling`.
+4. **One app policy module** (`lib/policy.ts`): the only place that decides what a user may do.
+
+Run migrations `001`–`004` (Run the migrations) before the first deploy of this version.
+
+`lib/billing.ts`
+
+```ts
+import { Pool } from '@neondatabase/serverless';
+import { billingFromEnv } from 'paddle-kit/config';
+import { postgresStore } from 'paddle-kit/postgres';
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+export const { billing, config, problems, enforce } = billingFromEnv(process.env, {
+  requiredPrices: ['pro'],
+  store: postgresStore({ query: (text, params) => pool.query(text, params) }),
+  // price id -> features. Keep a retired price here while subscriptions on it still renew.
+  entitlements: (c) => Object.fromEntries(Object.values(c.prices.pro as Record<string, string>).map((id) => [id, ['pro']])),
+  onError: (error, ctx) => console.error('paddle-kit failure', ctx, error), // may hold secrets: your error tracker only
+});
+if (problems.length > 0) console.error('billing misconfigured:', problems.join('; ')); // names only, never values
+```
+
+What `billingFromEnv` now does by default:
+
+- **Resilient Paddle calls.** One `createPaddleTransport()` per app and environment (returned as `transport`, and set as `billing.config.paddleFetch`). Price lookups, `reconcile`, `reconcilePayments` and `recoverBilling` use it unless a call passes its own `fetch`: bounded GET retries with backoff and jitter, `Retry-After`, a circuit breaker, no automatic retry of a mutation.
+- **Explicit, historical ownership.** With `PADDLE_PRICES` set (subscription apps: `entitlements` needs the ids when billing is built), `owns` is every id in it. With `resolvePrices: { app }` and no `PADDLE_PRICES` (one-time sales), `owns` is read from the store's owned ids: every price and product of the app, archived ones included, so a late payment or renewal on a retired price is still yours. The webhook path never asks Paddle. Until the recovery job has filled the ids once, events answer **503** `prices_unavailable` (Paddle retries); they are never acked as `not_ours`. On a shared seller account never leave `owns` unset: unset means "every event is mine".
+- **`enforce`** is `BILLING_ENFORCE === '1'`, read even when the rest of the env is broken.
+
+`app/api/paddle/route.ts`
+
+```ts
+import { createWebhookRoute } from 'paddle-kit/next';
+import { billing, problems } from '@/lib/billing';
+
+export const { POST, GET } = createWebhookRoute({ billing, problems, healthToken: process.env.PADDLE_HEALTH_TOKEN });
+```
+
+`app/api/cron/billing-recovery/route.ts`
+
+```ts
+import { recoverBilling } from 'paddle-kit/reconcile';
+import { billing, config } from '@/lib/billing';
+
+export const maxDuration = 60; // the job's own budget is 45 s
+
+export async function GET(req: Request) {
+  // Vercel Cron sends this header; anyone else gets 401.
+  if (req.headers.get('authorization') !== `Bearer ${process.env.CRON_SECRET}`) return new Response(null, { status: 401 });
+  if (!billing || !config?.apiKey) return Response.json({ status: 'off' });
+  const result = await recoverBilling(billing, { apiKey: config.apiKey });
+  // A failed run answers 500 so the cron's own monitoring sees it; the health route shows it too.
+  return Response.json(result, { status: result.status === 'failed' ? 500 : 200 });
+}
+```
+
+`vercel.json`: `{ "crons": [{ "path": "/api/cron/billing-recovery", "schedule": "0 * * * *" }] }`. Hourly on Vercel Pro; the Hobby plan allows one run a day, which is still enough (the doctor flags a job with no success for 26 h). The job:
+
+1. keeps the owned price and product ids (`syncOwnership`, with `resolvePrices`);
+2. replays unfinished webhook events by their original ids;
+3. repairs subscriptions and payments through the same hooks and claims as webhooks;
+4. moves its checkpoint only when every step succeeded. A record it cannot judge (for example an adjustment without a valid date) makes the run `failed` / `incomplete`, with the counts in the result, and keeps the checkpoint.
+
+The health route reports the job under `recovery`: latest status and reason, `lastSucceededAt`, `checkpointAt` and `checkpointAgeSeconds`, next to the unresolved work (`unresolvedFailed`, `oldestPendingAt`). `paddle-kit-doctor` turns red when the job never completed or has not completed for 26 h.
+
+`lib/policy.ts`
+
+```ts
+import { billing, enforce } from '@/lib/billing';
+
+/** The only place that decides whether `userId` may use `feature`. Reads the app's own database: no Paddle call. */
+export async function canUse(userId: string | null, feature: string): Promise<boolean> {
+  if (!userId) return false;
+  // Billing not set up and not enforced (before launch): the free experience. Broken config with enforcement on: refuse.
+  if (!billing) return !enforce;
+  return billing.hasAccess(userId, feature);
+}
+```
+
+Rules for every app:
+
+- **Checkout is bound to the signed-in user on the server.** Render the checkout button from a server component and pass it the user id from your server session (`createCheckout(...).open({ userId })`), never from a form field or a URL. `custom_data` still comes back from the browser: the most a user can do is pay for someone else.
+- **Broken config never unlocks paid operations when enforcement is on** (`canUse` above). Show the problem names only on the authenticated health route.
+- **Separate sandbox and live keys.** `PADDLE_ENV=sandbox` with `test_` / `pdl_sdbx_` credentials (Vercel Preview and Development), `PADDLE_ENV=production` with `live_` / `pdl_live_` (Vercel Production only). `readBillingEnv` refuses a mix, and `recoverBilling` refuses an API key of the other environment.
+- **Business effects deduplicate by Paddle's ids, not by event ids.** A recovery replay of a payment or refund carries a new event id (`reconcile_txn_…`, `reconcile_adj_…`), so grant on `transactionId` and keep adjustments by `adjustmentId` (see One-time purchases and refunds, Example).
+
+## Resilience: the transport and the recovery job (since v0.8.0)
+
+`billingFromEnv` wires both (Standard setup). With `createBilling` directly, keep one transport per app and Paddle
+account/environment and pass it, or set `paddleFetch`:
 
 ```ts
 import { createPaddleTransport } from 'paddle-kit/core';
@@ -182,6 +275,7 @@ Rules:
 2. The migrations use `CREATE TABLE IF NOT EXISTS`. If your database already has a table with one of these names but a different shape, the migration does nothing. Check for tables with these names before you migrate.
 3. We never edit a migration after we ship it. A change comes as a new numbered migration.
 4. `MIGRATIONS` is the only copy. The `migrations/*.sql` files were removed in v0.4.0.
+5. **v0.8.0 adds `003_recovery` and `004_claim_tokens_owned_ids`** (new tables `paddle_recovery`, `paddle_event_leases`, `paddle_owned_ids`; nothing is altered or dropped). Run both before deploying v0.8.0: without `004` every event answers 500 `store_error` (Paddle retries, nothing is lost). `paddle_event_claims` is no longer used; drop it by hand later if you like.
 
 Timestamps are kept to the millisecond (Paddle sends microseconds). When two events for one subscription have the same millisecond, the later delivery wins.
 
@@ -514,7 +608,8 @@ The kit calls a hook after it records the event and before it marks the event `p
    - the payment is older than v0.4.0;
    - the store cannot record transactions.
 
-   **Record a `known: false` refund. Never drop it.** For example, write a resolved review row. Then your payment code can refuse a payment that was already taken back.
+   **Keep every adjustment against its transaction, `known: false` ones too. Never drop it.** Then your payment code checks it: a payment whose refund arrived first grants nothing (the Example's `adjustments` table and `settle`).
+9. **Derive what a payment grants from all its adjustments, never by counting events (v0.8.0).** Refunds and chargebacks overlap: a won chargeback must not give back credits while a separate full refund still stands. `paymentRevoked(adjustments)` says whether the payment stands taken back. Run one payment's changes one at a time (the Example locks per transaction).
 4. **`custom_data` comes from the browser, so do not trust it.** Check the order with `tx.items` (`priceId`, `quantity`). The catalog price sets the amount.
 5. **Do not compare amounts or currency with your list price.** Paddle can show a local price (EUR for a USD list price). Discounts and tax also change the amounts. Record `tx.currency`, `tx.subtotal` (before discount and tax) and `tx.total` (with tax). Amounts are strings in the lowest unit (cents).
 6. **Give the item in one database transaction.** Insert the order and give the credits together. If you insert the order first and the grant then fails, the retry sees "already done", and the customer paid for nothing.

@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { billingFromEnv } from '../src/config';
+import { reconcile } from '../src/reconcile';
 import { createBilling } from '../src/core/billing';
 import { memoryStore } from '../src/memory';
 import { recoverBilling } from '../src/reconcile';
@@ -84,6 +86,36 @@ describe('durable billing recovery', () => {
     const result = await recoverBilling(b, { ...options, fetch });
     expect(result).toMatchObject({ status: 'failed', reason: 'incomplete', payments: { adjustments: { invalid: 1 } } });
     expect(await b.store.recovery!.getRecovery('sandbox')).toMatchObject({ status: 'failed', checkpointAt: null });
+  });
+});
+
+describe('safe defaults (v0.8.0)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('health reports the recovery job: last success, checkpoint age, and unresolved work', async () => {
+    const b = createBilling({ environment: 'sandbox', webhookSecret: 'audit_secret', store: memoryStore(), owns: { priceIds: ['pri_ours'] },
+      entitlements: {}, healthToken: 'tok', log: () => {}, now: () => new Date(at.getTime() + 90_000) });
+    const health = async () => (await b.handleHealth(new Request('https://app.test/h', { headers: { authorization: 'Bearer tok' } }))).json();
+    expect(await health()).toMatchObject({ recovery: null, unresolvedFailed: 0, oldestPendingAt: null });
+    expect(await recoverBilling(b, options)).toMatchObject({ status: 'done' });
+    expect((await health()).recovery).toEqual({ name: 'sandbox', status: 'succeeded', reason: null, lastSucceededAt: at.toISOString(), checkpointAt: at.toISOString(), checkpointAgeSeconds: 90 });
+  });
+
+  it('billingFromEnv wires the resilient transport: reconcile without a fetch retries a 503 instead of failing', async () => {
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', async (url: string) => {
+      calls.push(url);
+      if (calls.length === 1) return new Response(JSON.stringify({ error: { code: 'unavailable' } }), { status: 503 });
+      return new Response(JSON.stringify({ data: [], meta: { pagination: { has_more: false } } }), { status: 200 });
+    });
+    const { billing, transport } = billingFromEnv(
+      { PADDLE_ENV: 'sandbox', PADDLE_NOTIFICATION_WEBHOOK_SECRET: 's', NEXT_PUBLIC_PADDLE_CLIENT_TOKEN: 'test_x', PADDLE_PRICES: '{"pro":"pri_ours"}' },
+      { requiredPrices: ['pro'], store: memoryStore(), log: () => {} },
+    );
+    expect(billing!.config.paddleFetch).toBe(transport!.fetch);
+    expect(await reconcile(billing!, { apiKey: 'pdl_sdbx_fake' })).toEqual({ scanned: 0, applied: 0, notOurs: 0, invalid: 0 });
+    expect(calls).toHaveLength(2);
+    expect(transport!.state().state).toBe('closed');
   });
 });
 

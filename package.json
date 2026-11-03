@@ -1,6 +1,6 @@
 {
   "name": "paddle-kit",
-  "version": "0.8.0-qr.1",
+  "version": "0.8.0-qr.2",
   "private": true,
   "type": "module",
   "bin": {

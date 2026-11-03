@@ -285,7 +285,18 @@ export type BillingFromEnvOptions = ReadBillingEnvOptions &
 export function billingFromEnv(
   env: Record<string, string | undefined>,
   opts: BillingFromEnvOptions,
-): { billing: Billing | null; config: BillingEnv | BillingEnvWithLookup | null; problems: string[]; transport?: PaddleTransport } {
+): {
+  billing: Billing | null;
+  config: BillingEnv | BillingEnvWithLookup | null;
+  problems: string[];
+  /**
+   * Since v0.8.0: BILLING_ENFORCE === '1', read even when the rest of the env is broken. With `billing` null and
+   * `enforce` true, paid operations must be refused, never served free: a broken config never unlocks them.
+   */
+  enforce: boolean;
+  transport?: PaddleTransport;
+} {
+  const enforce = env.BILLING_ENFORCE === '1';
   const { requiredPrices, requiredCycles, requireLaunchAt, resolvePrices: lookup, entitlements, owns, ...rest } = opts;
   // One resilient transport for this app and environment: price lookups and recovery share its circuit breaker.
   const transport = createPaddleTransport();
@@ -294,7 +305,7 @@ export function billingFromEnv(
     config: BillingEnv | BillingEnvWithLookup | null;
     problems: string[];
   };
-  if (!config) return { billing: null, config: null, problems };
+  if (!config) return { billing: null, config: null, problems, enforce };
   // Prices found by label: ownership comes from the ids kept in the store (historical ones too, filled by the recovery
   // job), so a late payment on a retired price is still ours and the webhook path never asks Paddle.
   const durable = !owns && isOwnsResolver(config.owns) && rest.store.getOwnedIds ? storedOwnership(rest.store) : undefined;
@@ -308,7 +319,7 @@ export function billingFromEnv(
     catalogApp: resolvePrices?.app,
     entitlements: typeof entitlements === 'function' ? entitlements(config) : (entitlements ?? {}),
   });
-  return { billing, config, problems, transport };
+  return { billing, config, problems, enforce, transport };
 }
 
 /** Owned ids from the store. None yet throws (the webhook answers 503 and Paddle retries): never "not ours" by default. */

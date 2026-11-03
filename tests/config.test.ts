@@ -373,10 +373,17 @@ describe('readBillingEnv', () => {
 
   describe('billingFromEnv (one-call setup, since v0.7.0)', () => {
     it('billing off and misconfigured give billing: null, never a throw (safe at module scope in a build)', () => {
-      expect(billingFromEnv({}, { ...OPTS, store: memoryStore() })).toEqual({ billing: null, config: null, problems: [] });
+      expect(billingFromEnv({}, { ...OPTS, store: memoryStore() })).toEqual({ billing: null, config: null, problems: [], enforce: false });
       const bad = billingFromEnv({ PADDLE_ENV: 'sandbox' }, { ...OPTS, store: memoryStore() });
       expect(bad.billing).toBeNull();
       expect(bad.problems.length).toBeGreaterThan(0);
+      expect(bad.enforce).toBe(false);
+    });
+
+    it('a broken env with BILLING_ENFORCE=1 still says enforce: true, so the app refuses paid operations (v0.8.0)', () => {
+      const broken = billingFromEnv({ ...valid, BILLING_ENFORCE: '1', PADDLE_PRICES: 'not json' }, { ...OPTS, store: memoryStore() });
+      expect([broken.billing, broken.config, broken.enforce]).toEqual([null, null, true]);
+      expect(billingFromEnv({ ...valid, BILLING_ENFORCE: '1' }, { ...OPTS, store: memoryStore() }).enforce).toBe(true);
     });
 
     it('valid env: every secret, the health token, owns and entitlements built from the price ids', async () => {

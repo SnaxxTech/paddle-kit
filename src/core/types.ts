@@ -273,6 +273,23 @@ export interface HealthReport extends Health {
   unverified: UnverifiedStats;
   /** Since v0.7.0, only when `createBilling({ healthChecks })` is set: each check by name. A timeout or a throw is `ok: false`. */
   checks?: Record<string, CheckResult>;
+  /**
+   * Since v0.8.0, when the store supports recovery: the recovery job named after the environment (`recoverBilling`'s
+   * default name). `null`: it never ran. With `unresolvedFailed` and `oldestPendingAt` it shows unresolved work.
+   */
+  recovery?: RecoveryHealth | null;
+}
+
+export interface RecoveryHealth {
+  name: string;
+  /** The latest run: `running`, `succeeded`, or `failed` with `reason`. */
+  status: RecoveryState['status'];
+  reason: RecoveryFailureReason | null;
+  lastSucceededAt: string | null;
+  /** Where the next run resumes (the last successful run's start). */
+  checkpointAt: string | null;
+  /** Seconds since `checkpointAt`, at the time of the report. */
+  checkpointAgeSeconds: number | null;
 }
 
 /** What `createBilling({ onError })` gets with the error. */

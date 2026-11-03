@@ -173,7 +173,15 @@ export function createBilling(config: BillingConfig): Billing {
         ? Promise.all(Object.entries(config.healthChecks).map(async ([name, check]) => [name, await runCheck(name, check)] as const))
         : null;
       try {
-        const body: HealthReport = { ...(await store.health(now())), kitVersion, environment: config.environment, unverified: unverified.stats() };
+        const at = now();
+        const body: HealthReport = { ...(await store.health(at)), kitVersion, environment: config.environment, unverified: unverified.stats() };
+        if (store.recovery) {
+          const r = await within(store.recovery.getRecovery(config.environment), config.storeTimeoutMs, 'store.recovery.getRecovery');
+          body.recovery = r && {
+            name: r.name, status: r.status, reason: r.reason, lastSucceededAt: r.lastSucceededAt, checkpointAt: r.checkpointAt,
+            checkpointAgeSeconds: r.checkpointAt ? Math.max(0, Math.floor((at.getTime() - Date.parse(r.checkpointAt)) / 1000)) : null,
+          };
+        }
         if (checks) body.checks = Object.fromEntries(await checks);
         return Response.json(body);
       } catch (error) {

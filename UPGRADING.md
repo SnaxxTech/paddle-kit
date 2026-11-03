@@ -1,5 +1,23 @@
 # Upgrading paddle-kit
 
+## 0.8.0-qr.2 candidate (from v0.6/v0.7 or 0.8.0-qr.1)
+
+1. **Run migrations `003_recovery` and `004_claim_tokens_owned_ids` before deploying.** Both only create tables. Code
+   of this version on a database without `004` answers 500 `store_error` to every event (Paddle retries).
+2. **Claims move to `paddle_event_leases`.** During a rolling deploy an old and a new instance do not see each other's
+   claims, so one event delivered to both at the same moment can run its hook twice. Hooks are at least once anyway;
+   deploy outside a payment burst if that matters. Drop `paddle_event_claims` later by hand if you like.
+3. **Credit packs and refunds:** compare your hooks with the README Example. If you count revoke/restore rows per event
+   (the v0.7 example), switch to keeping adjustments per transaction and deriving the grant (`paymentRevoked`).
+4. **Prices found by label (`resolvePrices`, no `PADDLE_PRICES`):** after deploying, run the recovery job once (or
+   `syncOwnership`). Until it has stored the app's ids, webhooks answer 503 `prices_unavailable` and Paddle retries; no
+   event is acked as `not_ours`. `PADDLE_API_KEY` needs `price.read` and `product.read` too.
+5. **Schedule the recovery job** (README, Standard setup). Health now has `recovery`, and the doctor is red until the job
+   has completed once and while it has not completed for 26 h.
+6. `billingFromEnv` now uses a resilient transport by default. A custom `Store`: implement `claimToken` in
+   `recordEvent` / `markEvent` and `addOwnedIds` / `getOwnedIds` to get the fixes (all optional; without them the v0.7
+   behaviour stays). Code that compared `PaymentCounts` exactly gains an `invalid` field.
+
 ## 0.8.0-qr.1 candidate
 
 Run every adapter migration, including **003_recovery**, before using `recoverBilling` or a health check that reads recovery

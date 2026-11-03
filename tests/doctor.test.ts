@@ -41,6 +41,14 @@ async function run(argv: string[], fetch: DoctorFetch, env: Record<string, strin
 const answer = (status: number, body = '', headers: Record<string, string> = {}) =>
   async () => ({ status, headers: { get: (n: string) => headers[n.toLowerCase()] ?? null }, text: async () => body });
 
+
+/** A recovery job that just succeeded, as `recoverBilling` leaves it. */
+async function recovered(billing: { store: import('../src/core/types').Store }) {
+  const at = new Date().toISOString();
+  await billing.store.recovery!.claimRecovery({ name: 'sandbox', runId: 'r', startedAt: at, leaseUntil: new Date(Date.now() + 60_000).toISOString() });
+  await billing.store.recovery!.finishRecovery({ name: 'sandbox', runId: 'r', status: 'succeeded', finishedAt: at, reason: null });
+}
+
 describe('diagnose', () => {
   it('a healthy report: OK, with the last event and its age', () => {
     const d = diagnose(200, health(), { now: NOW });
@@ -196,9 +204,14 @@ describe('paddle-kit-doctor main', () => {
     expect(bad.output).toContain('PROBLEM:   PADDLE_PRICES is missing');
 
     const billing = createBilling({ environment: 'sandbox', webhookSecret: 's', store: memoryStore(), entitlements: {}, healthToken: TOKEN, log: () => {} });
+    const never = await run(['--url', URL_, '--token', TOKEN], viaRoute(createWebhookRoute({ billing, problems: [] })));
+    expect(never.code).toBe(1);
+    expect(never.output).toContain('PROBLEM: billing recovery has never completed: schedule the recovery job');
+    await recovered(billing);
     const on = await run(['--url', URL_, '--token', TOKEN], viaRoute(createWebhookRoute({ billing, problems: [] })));
     expect(on.code).toBe(0);
-    expect(on.output).toContain('Billing: on (sandbox), paddle-kit 0.8.0-qr.1');
+    expect(on.output).toMatch(/Recovery: last success .*; latest run succeeded/);
+    expect(on.output).toContain('Billing: on (sandbox), paddle-kit 0.8.0-qr.2');
     expect(on.output).toContain('Last event: none yet');
   });
 });
@@ -351,6 +364,7 @@ describe('paddle-kit-doctor --apps', () => {
       environment: 'sandbox', webhookSecret: 's', store: memoryStore(), entitlements: {}, healthToken: TOKEN, log: () => {},
       healthChecks: { price: async () => ({ ok: false, detail: 'fallback: not_found' }) },
     });
+    await recovered(billing);
     const on = viaRoute(createWebhookRoute({ billing, problems: [] }));
     const off = viaRoute(createWebhookRoute({ billing: null, problems: [] }));
     const apps = JSON.stringify([{ name: 'on', url: 'https://on.example/api/paddle', tokenEnv: 'T' }, { name: 'off', url: 'https://off.example/api/paddle', tokenEnv: 'T' }]);
@@ -400,6 +414,20 @@ describe('paddle-kit-doctor --html (dashboard)', () => {
     const r = await run(['--apps', 'apps.json', '--html', '/nonexistent-dir/x/index.html'], fleet, { G: 'g', R: 'r' }, { 'apps.json': apps });
     expect(r.code).toBe(2);
     expect(r.output).toContain('cannot write');
+  });
+});
+
+describe('doctor: the recovery job (v0.8.0)', () => {
+  const NOW = Date.parse('2026-11-03T12:00:00Z');
+  const base = { lastEventAt: '2026-11-03T11:00:00Z', lastFailureAt: null, lastFailureReason: null, failedLast24h: 0, unlinkedLast24h: 0 };
+  const rec = (o: object) => JSON.stringify({ ...base, recovery: { name: 'production', status: 'succeeded', reason: null, lastSucceededAt: '2026-11-03T11:30:00Z', checkpointAt: '2026-11-03T11:29:00Z', checkpointAgeSeconds: 1860, ...o } });
+  it('green when it succeeded recently; red when stale, never succeeded, or never ran; old health without the field is unchanged', () => {
+    expect(diagnose(200, rec({}), { now: NOW }).ok).toBe(true);
+    const stale = diagnose(200, rec({ status: 'failed', reason: 'incomplete', lastSucceededAt: '2026-11-01T00:00:00Z' }), { now: NOW });
+    expect(stale.lines.at(-1)).toBe('PROBLEM: billing recovery has not completed for more than 26 h (latest run: incomplete): check the recovery job');
+    expect(diagnose(200, rec({ status: 'failed', reason: 'timeout', lastSucceededAt: null }), { now: NOW }).ok).toBe(false);
+    expect(diagnose(200, JSON.stringify({ ...base, recovery: null }), { now: NOW }).ok).toBe(false);
+    expect(diagnose(200, JSON.stringify(base), { now: NOW }).ok).toBe(true);
   });
 });
 

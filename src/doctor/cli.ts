@@ -62,7 +62,7 @@ export interface Diagnosis {
 }
 
 /** Turns one health-route answer into plain lines. `body` is the raw text; it is parsed here. */
-export function diagnose(status: number, body: string, opts: { now?: number; sentToken?: boolean; staleHours?: number } = {}): Diagnosis {
+export function diagnose(status: number, body: string, opts: { now?: number; sentToken?: boolean; staleHours?: number; recoveryStaleHours?: number } = {}): Diagnosis {
   const now = opts.now ?? Date.now();
   let data: any = null;
   try {
@@ -114,6 +114,15 @@ export function diagnose(status: number, body: string, opts: { now?: number; sen
     lines.push(`Refused before the signature check: ${u.count} since ${u.since}, on the server instance that answered (${reasons})`);
     if (u.byReason.signature_mismatch)
       lines.push('WARNING: signature_mismatch: a request was signed with another secret. If Paddle sent it, the host has the wrong secret (no new verified event confirms it).');
+  }
+  // The recovery job (v0.8.0+ health): it repairs missed events and keeps owned ids; a silent stop is a problem.
+  if (h.recovery === null) problems.push('billing recovery has never completed: schedule the recovery job (README, Standard setup)');
+  else if (h.recovery) {
+    const r = h.recovery;
+    lines.push(`Recovery: last success ${r.lastSucceededAt ? ago(r.lastSucceededAt, now) : 'never'}; latest run ${r.status}${r.reason ? ` (${r.reason})` : ''}`);
+    const staleMs = (opts.recoveryStaleHours ?? 26) * HOUR;
+    if (!r.lastSucceededAt) problems.push(`billing recovery has never completed${r.reason ? ` (latest run: ${r.reason})` : ''}: check the recovery job's output`);
+    else if (now - Date.parse(r.lastSucceededAt) > staleMs) problems.push(`billing recovery has not completed for more than ${staleMs / HOUR} h${r.reason ? ` (latest run: ${r.reason})` : ''}: check the recovery job`);
   }
   for (const [name, c] of Object.entries(h.checks ?? {})) {
     if (c.ok) lines.push(`Check ${name}: ok${c.detail ? ` (${c.detail})` : ''}`);

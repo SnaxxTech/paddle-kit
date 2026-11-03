@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.8.0-qr.2 (unreleased candidate; proposed release: 0.8.0)
+
+Fixes the four gaps the 2026-11-03 review of 0.8.0-qr.1 reproduced, each with a test that failed before and passes
+after, and makes the safe path the default. **New migration `004_claim_tokens_owned_ids`** (CREATE-only). Upgrade steps:
+[UPGRADING.md](UPGRADING.md).
+
+### Fixes
+- **Refunds and credits (README example).** The credit-pack example granted 5 credits when a full refund had arrived
+  before its payment, and gave 5 back on a won chargeback while a separate full refund still stood. It now keeps every
+  adjustment against its transaction (a status only moves forward), runs one payment's changes under a per-transaction
+  advisory lock, and derives the grant from the adjustments that still stand. New `paymentRevoked(adjustments)` in
+  `paddle-kit/core`. `tests/readme-hooks.test.ts` reads the SQL and TypeScript blocks out of README.md and runs them as
+  written (PGlite), and a real-Postgres test races a payment, refund, chargeback and reversal on separate connections.
+- **Claim ownership.** An attempt whose lease had expired could fail late, mark the event `failed` and delete its
+  replacement's claim, so a third delivery ran the hooks while the replacement still ran. `recordEvent` takes a
+  `claimToken` (the handler sends a fresh UUID); `markEvent(…, claimToken)` writes the status and releases the claim only
+  while that token owns it, atomically, and returns `false` otherwise. The handler then answers 409 and records the
+  failure in health. Both new parameters are optional: custom stores keep compiling (unconditional, as before).
+  Claims move to the new table `paddle_event_leases` (Postgres and SQLite); `paddle_event_claims` is no longer used.
+- **Historical ownership.** With prices found by label, `owns` knew only the prices on sale now, so a late payment or
+  renewal on an archived or replaced price was acked 200 `not_ours` and never fulfilled. Ownership is now separate from
+  the price map: stores keep every owned price and product id for good (`addOwnedIds` / `getOwnedIds`, table
+  `paddle_owned_ids`), the new `syncOwnership(billing, { apiKey, app })` fills them from Paddle (active **and** archived
+  prices of the app's labelled products), and `recoverBilling` runs it first when `billing.config.catalogApp` is set.
+  `billingFromEnv` with `resolvePrices` decides ownership from the store alone: no Paddle call in the webhook path;
+  with no ids yet it answers 503 `prices_unavailable`, never `not_ours`.
+- **Recovery validation.** An adjustment without a valid `updated_at` / `created_at` compared false against `since`
+  and was dropped as old; recovery reported `done` and moved its checkpoint. Entities are validated before the date
+  filter and counted in the new `PaymentCounts.invalid`; any invalid record makes `recoverBilling` `failed` /
+  `incomplete`, keeps the checkpoint, and returns the partial counts (`subscriptions`, `payments`, `events`,
+  `remainingPending`, `ownership`) with the failure.
+
+### Safe path by default
+- `billingFromEnv` creates one `createPaddleTransport()` and uses it for price lookups and, via the new
+  `BillingConfig.paddleFetch`, for `reconcile`, `reconcilePayments`, `recoverBilling` and `syncOwnership` (a call's own
+  `fetch` still wins). It returns it as `transport`.
+- `billingFromEnv` returns `enforce` (`BILLING_ENFORCE === '1'`) even when the env is broken, so the app can refuse paid
+  operations instead of serving them free.
+- Health reports `recovery` (`status`, `reason`, `lastSucceededAt`, `checkpointAt`, `checkpointAgeSeconds`; `null`
+  when the job never ran). `paddle-kit-doctor` turns red when the job never completed or has not completed for 26 h.
+- README: **Standard setup** (one config, one webhook route, one scheduled recovery job, one policy module) and the
+  rules every app follows.
+
+### Known limits (follow-ups)
+- Recovery still re-reads the whole adjustment list each run (no resumable/incremental paging).
+- `entitlements` are keyed by price id: keep a retired price in `entitlements` while subscriptions on it still renew.
+
 ## 0.8.0-qr.1 (unreleased candidate)
 
 - Add opt-in `createPaddleTransport`: bounded JSON deadlines, safe GET retries with jitter/Retry-After, an in-process
