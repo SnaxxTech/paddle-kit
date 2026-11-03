@@ -211,7 +211,7 @@ describe('paddle-kit-doctor main', () => {
     const on = await run(['--url', URL_, '--token', TOKEN], viaRoute(createWebhookRoute({ billing, problems: [] })));
     expect(on.code).toBe(0);
     expect(on.output).toMatch(/Recovery: last success .*; latest run succeeded/);
-    expect(on.output).toContain('Billing: on (sandbox), paddle-kit 0.8.6');
+    expect(on.output).toContain('Billing: on (sandbox), paddle-kit 0.8.7');
     expect(on.output).toContain('Last event: none yet');
   });
 });

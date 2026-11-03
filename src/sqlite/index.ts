@@ -1,5 +1,5 @@
 import { REQUIRED_SCHEMA, missingSchema } from '../core/schema';
-import type { Customer, EventStatus, Health, ReasonCode, Store, Subscription, RecoveryState } from '../core/types';
+import type { Customer, EventStatus, Health, ReasonCode, Store, Subscription, RecoveryState, RecoveryProgress } from '../core/types';
 
 /** The subset of better-sqlite3 this store uses; any compatible driver works. */
 export interface SqliteStatement {
@@ -94,6 +94,13 @@ CREATE TABLE IF NOT EXISTS paddle_owned_ids (
   first_seen_at INTEGER NOT NULL
 );`,
   },
+  {
+    name: '006_recovery_progress',
+    sql: `CREATE TABLE IF NOT EXISTS paddle_recovery_progress (
+  name TEXT PRIMARY KEY, run_id TEXT NOT NULL, window_from INTEGER NOT NULL, window_to INTEGER NOT NULL,
+  phase TEXT NOT NULL, cursor TEXT, updated_at INTEGER NOT NULL
+);`,
+  },
 ];
 
 const DAY_MS = 86_400_000;
@@ -174,9 +181,23 @@ export function sqliteStore({ db }: { db: SqliteDatabase }): Store {
       async finishRecovery(e) {
         return q(`UPDATE paddle_recovery SET status = ?, finished_at = ?, lease_until = NULL, reason = ?,
           last_succeeded_at = CASE WHEN ? = 'succeeded' THEN ? ELSE last_succeeded_at END,
-          checkpoint_at = CASE WHEN ? = 'succeeded' THEN started_at ELSE checkpoint_at END
+          checkpoint_at = CASE WHEN ? = 'succeeded' THEN COALESCE(?, started_at) ELSE checkpoint_at END
           WHERE name = ? AND run_id = ? AND status = 'running'`)
-          .run(e.status, ms(e.finishedAt), e.reason, e.status, ms(e.finishedAt), e.status, e.name, e.runId).changes > 0;
+          .run(e.status, ms(e.finishedAt), e.reason, e.status, ms(e.finishedAt), e.status, ms(e.checkpointAt ?? null), e.name, e.runId).changes > 0;
+      },
+      async getRecoveryProgress(name) {
+        const r = q('SELECT * FROM paddle_recovery_progress WHERE name = ?').get(name) as Row | undefined;
+        return r ? { from: iso(r.window_from)!, to: iso(r.window_to)!, phase: r.phase as RecoveryProgress['phase'], cursor: (r.cursor as string | null) ?? null } : null;
+      },
+      async saveRecoveryProgress({ name, runId, progress: p }) {
+        const held = q(`SELECT 1 FROM paddle_recovery WHERE name = ? AND run_id = ? AND status = 'running'`).get(name, runId) !== undefined;
+        if (!held) return false;
+        if (!p) q('DELETE FROM paddle_recovery_progress WHERE name = ?').run(name);
+        else q(`INSERT INTO paddle_recovery_progress (name, run_id, window_from, window_to, phase, cursor, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT (name) DO UPDATE SET run_id = excluded.run_id, window_from = excluded.window_from, window_to = excluded.window_to,
+            phase = excluded.phase, cursor = excluded.cursor, updated_at = excluded.updated_at`)
+          .run(name, runId, ms(p.from), ms(p.to), p.phase, p.cursor, Date.now());
+        return true;
       },
       async getPendingEvents(e) {
         return (q(`SELECT e.event_id, e.event_type, e.occurred_at FROM paddle_events e WHERE e.status IN ('received','failed') AND e.received_at <= ?

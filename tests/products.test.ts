@@ -85,3 +85,30 @@ describe('billingFromEnv({ products })', () => {
     expect(problems.join(' ')).toContain('team');
   });
 });
+
+describe('defineProducts: price ownership does not depend on declaration order (third review)', () => {
+  const prices = { basic: 'pri_basic', pro: 'pri_pro' };
+  const both = <T>(a: [string, T], b: [string, T]) => [Object.fromEntries([a, b]), Object.fromEntries([b, a])];
+
+  it('a price retired in one product and on sale in another is refused in either order', () => {
+    for (const p of both(['basic', { features: ['b'], retiredPriceIds: ['pri_pro'] }], ['pro', { features: ['p'] }])) {
+      expect(() => defineProducts(prices, p)).toThrow('pri_pro');
+    }
+  });
+
+  it('a price on sale in two products is refused in either order, never a silent overwrite of its features', () => {
+    for (const p of both(['basic', { features: ['b'] }], ['pro', { features: ['p'] }])) {
+      expect(() => defineProducts({ basic: 'pri_same', pro: 'pri_same' }, p)).toThrow('pri_same');
+    }
+  });
+
+  it('a price retired in two products is refused in either order', () => {
+    for (const p of both(['basic', { features: ['b'], retiredPriceIds: ['pri_old'] }], ['pro', { features: ['p'], retiredPriceIds: ['pri_old'] }])) {
+      expect(() => defineProducts(prices, p)).toThrow('pri_old');
+    }
+  });
+
+  it('one product may list the same retired price twice', () => {
+    expect(defineProducts(prices, { basic: { features: ['b'], retiredPriceIds: ['pri_old', 'pri_old'] }, pro: { features: ['p'] } }).productOf('pri_old')).toEqual({ key: 'basic', cycle: null, retired: true });
+  });
+});

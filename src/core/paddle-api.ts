@@ -8,7 +8,7 @@ export const PADDLE_API_VERSION = 1;
 
 export type FetchLike = (
   url: string,
-  init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal; redirect?: 'error' },
+  init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal; redirect?: 'manual' },
 ) => Promise<{ ok: boolean; status: number; headers?: { get(name: string): string | null }; json(): Promise<unknown> }>;
 
 export class PaddleError extends Error {
@@ -39,6 +39,9 @@ export function paddleClient(base: string, apiKey: string, fetchImpl: FetchLike,
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'Paddle-Version': String(PADDLE_API_VERSION) },
       body: body === undefined ? undefined : JSON.stringify(body),
       ...(signal ? { signal } : {}),
+      // Never followed (the key would go along): a 3xx, or a browser's opaque redirect (status 0), is not ok and
+      // throws below. `manual`, not `error`: Cloudflare Workers rejects the "error" redirect mode (since v0.8.7).
+      redirect: 'manual',
     });
     let parsed: Json = {};
     try {
@@ -55,25 +58,27 @@ export function paddleClient(base: string, apiKey: string, fetchImpl: FetchLike,
     }
     return parsed;
   }
-  // Follows meta.pagination.next while has_more; never follows a link to another host (the key would leak).
+  // One page and the path of the next (null on the last); never follows a link to another host (the key would leak).
+  async function page(apiPath: string): Promise<{ data: Json[]; next: string | null }> {
+    const res: Json = await call('GET', apiPath);
+    if (!Array.isArray(res.data)) throw new PaddleError('pagination response has no data array');
+    const pagination = res.meta?.pagination;
+    if (!pagination?.has_more) return { data: res.data, next: null };
+    if (!pagination.next) throw new PaddleError('pagination response has_more without a next page');
+    const u = new URL(String(pagination.next), base);
+    if (u.origin !== new URL(base).origin || u.protocol !== 'https:') throw new PaddleError('pagination link points to another host');
+    return { data: res.data, next: u.pathname + u.search };
+  }
   async function list(apiPath: string, maxPages = 50): Promise<Json[]> {
     const items: Json[] = [];
     let next: string | null = apiPath;
-    for (let page = 0; next && page < maxPages; page++) {
-      const res: Json = await call('GET', next);
-      if (!Array.isArray(res.data)) throw new PaddleError('pagination response has no data array');
+    for (let n = 0; next && n < maxPages; n++) {
+      const res = await page(next);
       items.push(...res.data);
-      const pagination = res.meta?.pagination;
-      next = null;
-      if (pagination?.has_more) {
-        if (!pagination.next) throw new PaddleError('pagination response has_more without a next page');
-        const u = new URL(String(pagination.next), base);
-        if (u.origin !== new URL(base).origin || u.protocol !== 'https:') throw new PaddleError('pagination link points to another host');
-        next = u.pathname + u.search;
-      }
+      next = res.next;
     }
     if (next) throw new PaddleError('pagination limit reached: result is incomplete');
     return items;
   }
-  return { call, list };
+  return { call, list, page };
 }

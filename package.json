@@ -1,6 +1,6 @@
 {
   "name": "paddle-kit",
-  "version": "0.8.6",
+  "version": "0.8.7",
   "private": true,
   "type": "module",
   "bin": {
@@ -71,6 +71,7 @@
     "build": "tsup",
     "test": "vitest run",
     "test:pg": "vitest run tests/pg-concurrency.test.ts",
+    "bench:webhook": "node scripts/bench-webhook.mjs",
     "typecheck": "tsc --noEmit",
     "check:edge": "node scripts/check-edge.mjs",
     "smoke": "node scripts/smoke-pack.mjs"

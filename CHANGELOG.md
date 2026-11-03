@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.8.7 (2026-11-03)
+
+### Changed
+- **Recovery reads only the subscriptions that changed.** `reconcile` listed every subscription on each run (up to
+  1,000 pages). With `since` within 89 days, it now reads the `subscription.*` events since then (`/events`, newest
+  state per subscription). `recoverBilling` passes its window. A first run, an older window, or `reconcile` without
+  `since` still reads the full list. On the shared sandbox, the event path left all 6 subscriptions identical to the
+  full list (status, price, period end).
+
+### Fixed (third review, each with a test that failed first; outbox races on real Postgres)
+- **Paddle calls work on Cloudflare Workers.** The transport and the readiness key check sent `redirect: "error"`,
+  which workerd rejects with a TypeError: every call failed there (recovery `network`, readiness "Paddle did not
+  answer", and server checkout and portal helpers through the transport). All Paddle calls now send `manual` and treat
+  a 3xx as an error themselves, so a redirect is never followed and fails the same way on every host. Run in real
+  workerd (Miniflare) before and after: `network` / "did not answer" before, Paddle's own answer after.
+- **`importFulfilment` keeps the real adjustment.** A revoked import was recorded as a synthetic `import:<id>`
+  refund, so the real refund's reversal (a status change on its own id) never gave the order back, and a replayed
+  chargeback counted twice. **Breaking for revoked imports:** they now need `adjustmentId` (the Paddle adjustment that
+  revoked the order); an id that belongs to another payment is refused.
+- **Outbox leases.** A run that outlived its lease could overwrite the retry state of the run that took the item over
+  (attempts 2 → 1 in the reviewer's probe); a batch started every item's lease before reaching it, so a later item was
+  sent twice. The drain now claims one item at a time (through a CTE: `id IN (SELECT … LIMIT 1)` claimed several rows
+  on PGlite), counts each claim as an attempt (an item whose handler always outlives its lease still stops at
+  `maxAttempts`), changes retry state only under its own claim (`lost` in the result), always marks a finished send
+  sent, uses `clock_timestamp()` throughout (a caller's transaction froze `now()`), and its claim token is an epoch
+  integer (a text timestamp misparsed under another `DateStyle`). Handlers must be idempotent on `item.id`.
+- **`defineProducts` no longer depends on declaration order.** Every price assignment is checked before the maps are
+  built: a price retired in one product and sold in another, sold by two products, or retired in two products is
+  refused in either order (it was accepted in one order, or silently overwrote the first product's features).
+
+### Changed
+- **Resumable recovery (migration 006, CREATE-only).** Recovery reads page by page (nothing held in memory) and saves
+  its fixed window, phase and next page after each page; a run cut off by its 45 s budget is continued by the next.
+  Transactions and events are bounded by the window's end. Events are now applied per page: an adjustment or
+  subscription whose statuses fall on different pages replays each one (before: only the newest of the whole window,
+  which needed every page in memory). Statuses only move forward and hooks run at least once, so the end state is the
+  same; a hook can see one extra call.
+
+### Docs
+- **Why there is no webhook inbox, measured.** `scripts/bench-webhook.mjs` times the webhook end to end on real
+  Postgres, with `createFulfilment` and an outbox write: cold p95 165 ms (n=30), warm p95 15 ms (n=500), and 14 SQL
+  round trips. See README "No inbox needed".
+
 ## 0.8.6 (2026-11-03)
 
 The fulfilment module and an outbox (second review: "reusable fulfilment contracts … where apps supply only the

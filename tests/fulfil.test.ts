@@ -181,8 +181,8 @@ describe('outbox', () => {
       job: async () => { throw new Error('failed with pdl_sdbx_apikey_secret0123456789'); },
     };
     const query = (t: string, p?: unknown[]) => pg.query(t, p);
-    expect(await drainOutbox(query, handlers)).toEqual({ sent: 1, failed: 1, gaveUp: 0 });
-    expect(await drainOutbox(query, handlers)).toEqual({ sent: 0, failed: 0, gaveUp: 0 }); // b waits for its backoff
+    expect(await drainOutbox(query, handlers)).toEqual({ sent: 1, failed: 1, gaveUp: 0, lost: 0 });
+    expect(await drainOutbox(query, handlers)).toEqual({ sent: 0, failed: 0, gaveUp: 0, lost: 0 }); // b waits for its backoff
     expect(seen).toEqual(['a:u1']);
     const b = (await pg.query<any>(`SELECT attempts, last_error, next_at > now() + interval '50 seconds' AS later FROM paddle_outbox WHERE id = 'b'`)).rows[0];
     expect(b).toMatchObject({ attempts: 1, later: true });
@@ -211,7 +211,7 @@ describe('outbox', () => {
   it('an item of a kind with no handler is not dropped: it fails, visibly', async () => {
     const { pg, db } = await database();
     await db.transaction((q) => enqueue(q, { id: 'k', kind: 'sms', payload: {} }));
-    expect(await drainOutbox((t, p) => pg.query(t, p), {})).toEqual({ sent: 0, failed: 1, gaveUp: 0 });
+    expect(await drainOutbox((t, p) => pg.query(t, p), {})).toEqual({ sent: 0, failed: 1, gaveUp: 0, lost: 0 });
     expect((await pg.query<any>('SELECT last_error FROM paddle_outbox')).rows[0].last_error).toBe('Error: no handler for kind "sms"');
   });
 });
@@ -280,7 +280,7 @@ describe('fulfil: gaps found by the Slop Remover port', () => {
     await db.transaction(async (q) => {
       expect(await importFulfilment(q, { transactionId: 'txn_old_paid', userId: 'u1', grants: { credits: 5 }, state: 'granted' })).toBe(true);
       expect(await importFulfilment(q, { transactionId: 'txn_old_paid', userId: 'u1', grants: { credits: 5 }, state: 'granted' })).toBe(false);
-      await importFulfilment(q, { transactionId: 'txn_old_refunded', userId: 'u2', grants: { credits: 5 }, state: 'revoked', revokedBy: 'refund', taken: 5 });
+      await importFulfilment(q, { transactionId: 'txn_old_refunded', userId: 'u2', grants: { credits: 5 }, state: 'revoked', revokedBy: 'refund', adjustmentId: 'adj_old_r', taken: 5 });
     });
     const t = harness(pg, db);
     await t.adjust('adj_r', 'txn_old_paid', 'refund', 'approved');
@@ -343,5 +343,65 @@ describe('fulfil: gaps found by the Slop Remover port', () => {
     await adj('approved'); // redelivery: no second review, no second call
     expect(seen).toEqual(['refund:txn_1']);
     expect((await pg.query('SELECT kind FROM app_alerts')).rows).toEqual([{ kind: 'refund' }]);
+  });
+});
+
+describe('importFulfilment keeps the real adjustment (third review)', () => {
+  // A refund is reversed by a status change on its own adjustment id; a replayed chargeback must not count twice.
+  async function imported(revokedBy: 'refund' | 'chargeback', adjustmentId: string) {
+    const { importFulfilment } = await import('../src/fulfil');
+    const { pg, db } = await database();
+    await pg.query(`INSERT INTO accounts VALUES ('u1', 0)`);
+    await db.transaction((q) => importFulfilment(q, { transactionId: 'txn_old', userId: 'u1', grants: { credits: 5 }, state: 'revoked', revokedBy, adjustmentId, taken: 5 } as any));
+    return { t: harness(pg, db), pg, db, importFulfilment };
+  }
+
+  it('the real reversal of the imported refund gives the order back', async () => {
+    const { t } = await imported('refund', 'adj_r0');
+    await t.adjust('adj_r0', 'txn_old', 'refund', 'approved'); // a recovery replay of the original: no change
+    expect(await t.state('txn_old')).toBe('revoked');
+    await t.adjust('adj_r0', 'txn_old', 'refund', 'reversed');
+    expect(await t.state('txn_old')).toBe('granted');
+    expect(await t.balance()).toBe(5);
+  });
+
+  it('an unrelated reversal does not clear the imported refund', async () => {
+    const { t } = await imported('refund', 'adj_r0');
+    await t.adjust('adj_other', 'txn_old', 'refund', 'approved', 'partial');
+    await t.adjust('adj_other', 'txn_old', 'refund', 'reversed', 'partial');
+    await t.adjust('adj_cbr', 'txn_old', 'chargeback_reverse', 'approved');
+    expect(await t.state('txn_old')).toBe('revoked');
+    expect(await t.balance()).toBe(0);
+  });
+
+  it('a replayed imported chargeback counts once, so its reversal gives the order back', async () => {
+    const { t } = await imported('chargeback', 'adj_cb0');
+    await t.adjust('adj_cb0', 'txn_old', 'chargeback', 'approved');
+    await t.adjust('adj_cbr', 'txn_old', 'chargeback_reverse', 'approved');
+    expect(await t.state('txn_old')).toBe('granted');
+  });
+
+  it('a revoked import without the adjustment id is refused', async () => {
+    const { db, importFulfilment } = await imported('refund', 'adj_r0');
+    await expect(db.transaction((q) => importFulfilment(q, { transactionId: 'txn_2', userId: 'u1', grants: {}, state: 'revoked', revokedBy: 'refund' } as any)))
+      .rejects.toThrow(/adjustmentId/);
+  });
+});
+
+describe('outbox and import edge cases (third review, independent pass)', () => {
+  it('the claim token does not depend on the session DateStyle', async () => {
+    const { pg, db } = await database();
+    await db.transaction((q) => enqueue(q, { id: 'x', kind: 'email', payload: {} }));
+    let n = 0; // every statement in another DateStyle, as on a pool whose connections disagree
+    const query = async (t: string, p?: unknown[]) => { await pg.exec(`SET datestyle = '${n++ % 2 ? 'SQL, DMY' : 'SQL, MDY'}'`); return pg.query(t, p); };
+    expect(await drainOutbox(query as any, { email: async () => {} })).toMatchObject({ sent: 1, lost: 0 });
+  });
+
+  it('importFulfilment refuses an adjustment id that belongs to another payment', async () => {
+    const { importFulfilment } = await import('../src/fulfil');
+    const { db } = await database();
+    const imp = (txn: string) => db.transaction((q) => importFulfilment(q, { transactionId: txn, userId: 'u1', grants: {}, state: 'revoked', revokedBy: 'refund', adjustmentId: 'adj_same', taken: 1 }));
+    await imp('txn_1');
+    await expect(imp('txn_2')).rejects.toThrow(/adj_same/);
   });
 });

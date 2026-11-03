@@ -102,14 +102,17 @@ export async function fulfilmentState(q: SqlTx, transactionId: string): Promise<
 
 /**
  * Brings a payment fulfilled before the app used the kit into its tables (since v0.8.6), so a later refund is honoured
- * and a refunded order is not given back by an unrelated event. `state: 'revoked'` needs `revokedBy`: an approved full
- * refund or a chargeback is recorded for it (`import:<transactionId>`), which a real reversal later cancels. Returns
- * false when the kit already has the payment (nothing changes). Run it in a migration or a one-off script.
+ * and a refunded order is not given back by an unrelated event. `state: 'revoked'` needs `revokedBy` and the Paddle
+ * `adjustmentId` that took it back (since v0.8.7; `GET /adjustments?transaction_id=…`): it is recorded as that
+ * approved refund or chargeback, so only its own reversal gives the order back, and a replay of it counts once.
+ * Import only an adjustment Paddle shows as `approved`, and pass `taken` (what `restore` gives back on a reversal).
+ * Run it in a transaction (two writes). Returns false when the kit already has the payment (nothing changes). Run it in a migration or a one-off script.
  */
 export async function importFulfilment(
   q: SqlTx,
-  o: { transactionId: string; userId: string; grants: unknown; state: 'granted' } | { transactionId: string; userId: string; grants: unknown; state: 'revoked'; revokedBy: 'refund' | 'chargeback'; taken?: unknown },
+  o: { transactionId: string; userId: string; grants: unknown; state: 'granted' } | { transactionId: string; userId: string; grants: unknown; state: 'revoked'; revokedBy: 'refund' | 'chargeback'; adjustmentId: string; taken?: unknown },
 ): Promise<boolean> {
+  if (o.state === 'revoked' && !o.adjustmentId) throw new Error('paddle-kit: importFulfilment of a revoked payment needs the adjustmentId that revoked it');
   const taken = o.state === 'revoked' && o.taken !== undefined ? JSON.stringify(o.taken) : null;
   const ins = await q.query(
     `INSERT INTO paddle_fulfilments (transaction_id, user_id, grants, state, taken) VALUES ($1, $2, $3, $4, $5)
@@ -118,11 +121,15 @@ export async function importFulfilment(
   );
   if (ins.rows.length === 0) return false;
   if (o.state === 'revoked') {
-    await q.query(
+    const adj = await q.query(
       `INSERT INTO paddle_fulfilment_adjustments (adjustment_id, transaction_id, action, type, status, rank)
-       VALUES ($1, $2, $3, $4, 'approved', 1) ON CONFLICT (adjustment_id) DO NOTHING`,
-      [`import:${o.transactionId}`, o.transactionId, o.revokedBy, o.revokedBy === 'refund' ? 'full' : null],
+       VALUES ($1, $2, $3, $4, 'approved', 1)
+       ON CONFLICT (adjustment_id) DO UPDATE SET adjustment_id = EXCLUDED.adjustment_id RETURNING transaction_id`,
+      [o.adjustmentId, o.transactionId, o.revokedBy, o.revokedBy === 'refund' ? 'full' : null],
     );
+    if (adj.rows[0]?.transaction_id !== o.transactionId) {
+      throw new Error(`paddle-kit: importFulfilment: adjustment ${o.adjustmentId} belongs to another payment`);
+    }
   }
   return true;
 }
@@ -243,50 +250,65 @@ export interface DrainOptions {
 }
 
 /**
- * Sends due outbox items at least once: claims up to `limit` due items (other runs skip them for `leaseSeconds`),
- * calls the handler for each kind, marks it sent, or schedules a retry with exponential backoff (1 min, 2, 4, … 6 h).
- * A handler must be safe to call twice for one item (a crash after sending, before marking, sends it again). Run it
- * from the recovery cron (`createRecoveryRoute({ drainOutbox })`). Errors are stored redacted and cut to 200 characters.
+ * Sends due outbox items at least once: claims one due item at a time (other runs skip it for `leaseSeconds`), calls
+ * the handler for its kind, marks it sent, or schedules a retry with exponential backoff (1 min, 2, 4, … 6 h).
+ * Since v0.8.7: each claim counts as an attempt; a failure changes the row only while that claim still holds it, so a
+ * worker that ran past its lease cannot overwrite the retry state of the run that took the item over (`lost` counts
+ * those); a send that finished is always marked sent.
+ * A handler that runs past `leaseSeconds` can be called again by another run, and a crash after sending sends it again:
+ * handlers must be idempotent on `item.id` (pass it as the idempotency key of the email or API call). Run it from a
+ * frequent cron, or from the recovery cron (`createRecoveryRoute({ drainOutbox })`). Errors are stored redacted and
+ * cut to 200 characters.
  */
 export async function drainOutbox(
   query: SqlTx['query'],
   handlers: OutboxHandlers,
   o: DrainOptions = {},
-): Promise<{ sent: number; failed: number; gaveUp: number }> {
+): Promise<{ sent: number; failed: number; gaveUp: number; lost: number }> {
   const limit = o.limit ?? 20;
   const maxAttempts = o.maxAttempts ?? 8;
-  const claimed = (await query(
-    `UPDATE paddle_outbox SET next_at = now() + make_interval(secs => $3)
-      WHERE id IN (SELECT id FROM paddle_outbox WHERE sent_at IS NULL AND next_at <= now() AND attempts < $2
-                   ORDER BY next_at LIMIT $1 FOR UPDATE SKIP LOCKED)
-        -- Rechecked on a row another run claimed meanwhile (Postgres re-evaluates these on the newest row version).
-        AND sent_at IS NULL AND next_at <= now()
-      RETURNING id, kind, payload, attempts`,
-    [limit, maxAttempts, o.leaseSeconds ?? 120],
-  )).rows;
-  let sent = 0;
-  let failed = 0;
-  let gaveUp = 0;
-  for (const item of claimed) {
+  const out = { sent: 0, failed: 0, gaveUp: 0, lost: 0 };
+  // clock_timestamp(), never now(): a caller's transaction freezes now() at its start.
+  // The token is the claim's next_at in epoch microseconds: exact, and independent of the session's DateStyle.
+  const token = `(extract(epoch FROM next_at) * 1000000)::bigint`;
+  for (let n = 0; n < limit; n++) {
+    // One at a time, so an item's lease starts when it is sent, not when the batch began. A claim counts as an
+    // attempt, so an item whose handler always outlives its lease still stops at maxAttempts.
+    const item = (await query(
+      // A CTE runs once; `id IN (SELECT … LIMIT 1)` may be re-evaluated and claim more than one row.
+      `WITH c AS (SELECT id FROM paddle_outbox WHERE sent_at IS NULL AND next_at <= clock_timestamp() AND attempts < $1
+                  ORDER BY next_at, id LIMIT 1 FOR UPDATE SKIP LOCKED)
+       UPDATE paddle_outbox o SET next_at = clock_timestamp() + make_interval(secs => $2), attempts = o.attempts + 1 FROM c
+        WHERE o.id = c.id
+          -- Rechecked on a row another run claimed meanwhile (Postgres re-evaluates these on the newest row version).
+          AND o.sent_at IS NULL AND o.next_at <= clock_timestamp() AND o.attempts < $1
+        RETURNING o.id, o.kind, o.payload, o.attempts, ${token.replace('next_at', 'o.next_at')}::text AS token`,
+      [maxAttempts, o.leaseSeconds ?? 120],
+    )).rows[0];
+    if (!item) break;
+    const attempts = Number(item.attempts);
     const handler = handlers[item.kind];
     try {
       if (!handler) throw new Error(`no handler for kind "${item.kind}"`);
-      await handler(item.payload, { id: item.id, attempts: item.attempts });
-      await query('UPDATE paddle_outbox SET sent_at = now(), last_error = NULL WHERE id = $1', [item.id]);
-      sent++;
+      await handler(item.payload, { id: item.id, attempts: attempts - 1 });
+      // Sent is final and true whoever holds the lease now: marked even after a takeover, so it is not sent again.
+      await query('UPDATE paddle_outbox SET sent_at = clock_timestamp(), last_error = NULL WHERE id = $1 AND sent_at IS NULL', [item.id]);
+      out.sent++;
     } catch (error) {
-      const attempts = Number(item.attempts) + 1;
       const backoffSeconds = Math.min(60 * 2 ** (attempts - 1), 6 * 3600);
       const message = redactSecrets(`${(error as Error)?.name ?? 'Error'}: ${(error as Error)?.message ?? String(error)}`).slice(0, 200);
-      await query(
-        'UPDATE paddle_outbox SET attempts = $2, last_error = $3, next_at = now() + make_interval(secs => $4) WHERE id = $1',
-        [item.id, attempts, message, backoffSeconds],
+      // Only while this claim still holds the item: a run that took it over owns its retry state.
+      const done = await query(
+        `UPDATE paddle_outbox SET last_error = $3, next_at = clock_timestamp() + make_interval(secs => $4)
+          WHERE id = $1 AND ${token} = $2::bigint AND sent_at IS NULL RETURNING id`,
+        [item.id, item.token, message, backoffSeconds],
       );
-      if (attempts >= maxAttempts) gaveUp++;
-      else failed++;
+      if (done.rows.length === 0) out.lost++;
+      else if (attempts >= maxAttempts) out.gaveUp++;
+      else out.failed++;
     }
   }
-  return { sent, failed, gaveUp };
+  return out;
 }
 
 /**

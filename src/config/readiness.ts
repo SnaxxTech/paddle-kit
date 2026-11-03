@@ -58,7 +58,7 @@ export function readinessChecks(opts: ReadinessOptions): Record<string, () => Pr
       res = await fetchImpl(`${opts.environment === 'production' ? LIVE_BASE : SANDBOX_BASE}/`, {
         method: 'GET',
         headers: { Authorization: `Bearer ${opts.apiKey}`, 'Paddle-Version': String(PADDLE_API_VERSION) },
-        redirect: 'error',
+        redirect: 'manual', // Cloudflare Workers rejects 'error'; a 3xx is not ok and reported below
       });
     } catch {
       return { ok: false, detail: 'Paddle did not answer' };

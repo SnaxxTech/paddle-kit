@@ -1,5 +1,5 @@
 import { missingSchema } from '../core/schema';
-import type { EventStatus, Health, ReasonCode, Store, Subscription, RecoveryState } from '../core/types';
+import type { EventStatus, Health, ReasonCode, Store, Subscription, RecoveryState, RecoveryProgress } from '../core/types';
 
 export { MIGRATIONS } from './migrations';
 
@@ -82,8 +82,22 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
       async finishRecovery(e) {
         const { rows } = await query(`UPDATE paddle_recovery SET status = $3, finished_at = ${ms(4)}, lease_until = NULL, reason = $5,
           last_succeeded_at = CASE WHEN $3 = 'succeeded' THEN ${ms(4)} ELSE last_succeeded_at END,
-          checkpoint_at = CASE WHEN $3 = 'succeeded' THEN started_at ELSE checkpoint_at END
-          WHERE name = $1 AND run_id = $2 AND status = 'running' RETURNING name`, [e.name, e.runId, e.status, e.finishedAt, e.reason]);
+          checkpoint_at = CASE WHEN $3 = 'succeeded' THEN COALESCE(${ms(6)}, started_at) ELSE checkpoint_at END
+          WHERE name = $1 AND run_id = $2 AND status = 'running' RETURNING name`, [e.name, e.runId, e.status, e.finishedAt, e.reason, e.checkpointAt ?? null]);
+        return rows.length > 0;
+      },
+      async getRecoveryProgress(name) {
+        const { rows: [r] } = await query('SELECT * FROM paddle_recovery_progress WHERE name = $1', [name]);
+        return r ? { from: iso(r.window_from)!, to: iso(r.window_to)!, phase: r.phase as RecoveryProgress['phase'], cursor: (r.cursor as string | null) ?? null } : null;
+      },
+      async saveRecoveryProgress({ name, runId, progress: p }) {
+        const lease = `EXISTS (SELECT 1 FROM paddle_recovery WHERE name = $1 AND run_id = $2 AND status = 'running')`;
+        if (!p) return (await query(`WITH d AS (DELETE FROM paddle_recovery_progress WHERE name = $1 AND ${lease}) SELECT ${lease} AS ok`, [name, runId])).rows[0]?.ok === true;
+        const { rows } = await query(`INSERT INTO paddle_recovery_progress (name, run_id, window_from, window_to, phase, cursor, updated_at)
+          SELECT $1, $2, ${ms(3)}, ${ms(4)}, $5, $6, now() WHERE ${lease}
+          ON CONFLICT (name) DO UPDATE SET run_id = EXCLUDED.run_id, window_from = EXCLUDED.window_from, window_to = EXCLUDED.window_to,
+            phase = EXCLUDED.phase, cursor = EXCLUDED.cursor, updated_at = EXCLUDED.updated_at
+          RETURNING name`, [name, runId, p.from, p.to, p.phase, p.cursor]);
         return rows.length > 0;
       },
       async getPendingEvents(e) {

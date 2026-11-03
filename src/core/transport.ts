@@ -93,7 +93,10 @@ export function createPaddleTransport(opts: TransportOptions = {}): PaddleTransp
     try {
       // Buffer JSON inside the deadline: a response whose headers arrive promptly can still stall on its body.
       const work = (async () => {
-        const response = await rawFetch(url, { ...init, signal: controller.signal, redirect: 'error' });
+        // `manual`, not `error`: Cloudflare Workers rejects the "error" redirect mode (since v0.8.7). A redirect is never
+        // followed (the key would go along); it fails like a network error, as `error` did on other hosts.
+        const response = await rawFetch(url, { ...init, signal: controller.signal, redirect: 'manual' });
+        if (response.status === 0 || (response.status >= 300 && response.status < 400)) throw new PaddleTransportError('network');
         let payload: unknown;
         let malformed = false;
         try { payload = await response.json(); } catch { malformed = true; }
