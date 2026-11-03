@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.7 (2026-11-03)
+
+### Changed
+- **Recovery reads only the subscriptions that changed.** `reconcile` listed every subscription on each run (up to
+  1,000 pages). With `since` within 89 days, it now reads the `subscription.*` events since then (`/events`, newest
+  state per subscription). `recoverBilling` passes its window. A first run, an older window, or `reconcile` without
+  `since` still reads the full list. On the shared sandbox, the event path left all 6 subscriptions identical to the
+  full list (status, price, period end).
+
+### Docs
+- **Why there is no webhook inbox, measured.** `scripts/bench-webhook.mjs` times the webhook end to end on real
+  Postgres, with `createFulfilment` and an outbox write: cold p95 165 ms (n=30), warm p95 15 ms (n=500), and 14 SQL
+  round trips. See README "No inbox needed".
+
 ## 0.8.6 (2026-11-03)
 
 The fulfilment module and an outbox (second review: "reusable fulfilment contracts … where apps supply only the

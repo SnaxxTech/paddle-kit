@@ -14,10 +14,12 @@ export type { FetchLike };
  * Re-reads every subscription from the Paddle API and upserts it into the mirror, through the same mapping as the
  * webhook path. Each row carries the API's `updated_at`, so a webhook that occurred later still wins. Web fetch only.
  * `invalid` counts entities the webhook path would also reject (unknown status, missing ids).
+ * With `since` within 89 days (since v0.8.7), only subscriptions with a `subscription.*` event since then are read,
+ * from the event stream (each one's newest state), instead of every subscription; `recoverBilling` passes its window.
  */
 export async function reconcile(
   billing: Billing,
-  opts: { apiKey: string; fetch?: FetchLike; signal?: AbortSignal },
+  opts: { apiKey: string; fetch?: FetchLike; signal?: AbortSignal; since?: Date | string },
 ): Promise<{ scanned: number; applied: number; notOurs: number; invalid: number }> {
   const api = apiFor(billing, opts);
   // A resolver that fails throws here: reconcile never mirrors every product's subscriptions because a lookup failed.
@@ -27,7 +29,21 @@ export async function reconcile(
   let applied = 0;
   let notOurs = 0;
   let invalid = 0;
-  for (const data of await api.list('/subscriptions?per_page=200', 1000)) {
+  const since = opts.since === undefined ? null : new Date(opts.since);
+  if (since && Number.isNaN(since.getTime())) throw new Error('paddle-kit: reconcile needs a valid `since`');
+  let subscriptions: Json[];
+  if (since && Date.now() - since.getTime() <= EVENT_STREAM_WINDOW_MS) {
+    const latest = new Map<string, Json>();
+    const path = `/events?event_type=${SUBSCRIPTION_EVENTS}&from=${encodeURIComponent(since.toISOString())}&order_by=id%5BASC%5D&per_page=200`;
+    for (const e of await api.list(path, 200)) {
+      const data = e?.data as Json | undefined;
+      if (data && typeof data.id === 'string') latest.set(data.id, data); // oldest first: the newest state wins
+    }
+    subscriptions = [...latest.values()];
+  } else {
+    subscriptions = await api.list('/subscriptions?per_page=200', 1000);
+  }
+  for (const data of subscriptions) {
     opts.signal?.throwIfAborted();
     scanned++;
     const sub = subscriptionFrom(data, typeof data.updated_at === 'string' ? data.updated_at : '');
@@ -111,6 +127,8 @@ export interface PaymentCounts {
  */
 /** Paddle keeps events 90 days; a window inside 89 days is read from the event stream (one day of margin). */
 const EVENT_STREAM_WINDOW_MS = 89 * 24 * 3_600_000;
+const SUBSCRIPTION_EVENTS = ['activated', 'canceled', 'created', 'imported', 'past_due', 'paused', 'resumed', 'trialing', 'updated']
+  .map((t) => `subscription.${t}`).join(',');
 
 export async function reconcilePayments(
   billing: Billing,
@@ -300,7 +318,7 @@ export async function recoverBilling(billing: Billing, opts: RecoveryOptions): P
       }
     }
     const common = { apiKey: opts.apiKey, fetch: opts.fetch, signal: controller.signal };
-    const subscriptions = await reconcile(billing, common);
+    const subscriptions = await reconcile(billing, { ...common, since });
     const payments = await reconcilePayments(billing, { ...common, since });
     controller.signal.throwIfAborted();
     const remaining = await store.getPendingEvents({ before: new Date(startedAt.getTime() - pendingAgeMs).toISOString(), limit: 1 });

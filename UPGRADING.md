@@ -1,5 +1,10 @@
 # Upgrading paddle-kit
 
+## 0.8.7 (from 0.8.6)
+
+No action for `recoverBilling` (it already needs `notification.read`). If you call `reconcile` yourself with the new
+`since`, the key needs `notification.read` too; without `since` it reads the full list as before.
+
 ## 0.8.6 (from 0.8.5)
 
 1. Run migration `005_fulfilment_outbox` (CREATE-only; Postgres). Harmless if you do not use `paddle-kit/fulfil`.

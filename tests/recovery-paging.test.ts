@@ -81,3 +81,63 @@ describe('reconcilePayments: adjustments since a recent checkpoint come from the
     expect(seen).toEqual(['adj_old:approved']);
   });
 });
+
+// Subscriptions too (second follow-up): reconcile listed every subscription on each run.
+import { recoverBilling, reconcile } from '../src/reconcile';
+import { loadFixture } from './helpers/fixtures';
+
+describe('reconcile: subscriptions since a recent `since` come from the event stream', () => {
+  const sub = (id: string, status: string, at: string) => ({ ...loadFixture('subscription.created').data, id, status, updated_at: at, custom_data: { userId: `u_${id}` } });
+  function api(o: { subs?: any[]; events?: any[] }) {
+    const calls: string[] = [];
+    const page = (data: any[]) => ({ ok: true, status: 200, json: async () => ({ data, meta: { pagination: { has_more: false, next: null } } }) });
+    const fetch: FetchLike = async (url) => {
+      const u = new URL(url);
+      calls.push(u.pathname + (u.pathname === '/events' ? `?${u.searchParams.get('event_type')}` : ''));
+      if (u.pathname === '/subscriptions') return page(o.subs ?? []);
+      if (u.pathname === '/events') return page((u.searchParams.get('event_type') ?? '').startsWith('subscription.') ? (o.events ?? []) : []);
+      return page([]);
+    };
+    return { fetch, calls };
+  }
+  const billingFor = () => createBilling({ environment: 'sandbox', webhookSecret: 's', store: memoryStore(), entitlements: {}, owns: () => true });
+
+  it('with a recent `since`, reads subscription events (newest state per subscription), never the whole list', async () => {
+    const at = (h: number) => new Date(Date.now() - 3 * HOUR + h * HOUR).toISOString();
+    const p = api({
+      subs: [sub('sub_never', 'active', at(-5000))],
+      events: [
+        { event_id: 'evt_1', event_type: 'subscription.created', occurred_at: at(1), data: sub('sub_a', 'trialing', at(1)) },
+        { event_id: 'evt_2', event_type: 'subscription.updated', occurred_at: at(2), data: sub('sub_a', 'active', at(2)) },
+        { event_id: 'evt_3', event_type: 'subscription.canceled', occurred_at: at(2), data: sub('sub_b', 'canceled', at(2)) },
+      ],
+    });
+    const b = billingFor();
+    const out = await reconcile(b, { apiKey: 'pdl_sdbx_k', since: new Date(Date.now() - 3 * HOUR), fetch: p.fetch });
+    expect(p.calls.some((c) => c === '/subscriptions')).toBe(false);
+    expect(p.calls).toContain('/events?subscription.activated,subscription.canceled,subscription.created,subscription.imported,subscription.past_due,subscription.paused,subscription.resumed,subscription.trialing,subscription.updated');
+    expect(out).toMatchObject({ scanned: 2, applied: 2 });
+    expect((await b.store.getSubscription('sub_a'))?.status).toBe('active');
+    expect(await b.store.getSubscription('sub_never')).toBeNull();
+  });
+
+  it('without `since`, or with a window older than 89 days, lists every subscription as before', async () => {
+    for (const since of [undefined, new Date(Date.now() - 120 * DAY)]) {
+      const p = api({ subs: [sub('sub_x', 'active', new Date().toISOString())] });
+      await reconcile(billingFor(), { apiKey: 'pdl_sdbx_k', since, fetch: p.fetch });
+      expect(p.calls.filter((c) => c.startsWith('/events?subscription'))).toEqual([]);
+      expect(p.calls).toContain('/subscriptions');
+    }
+  });
+
+  it('recoverBilling passes its window: a second run after a recent checkpoint reads no subscription list', async () => {
+    const p = api({ subs: [sub('sub_x', 'active', new Date().toISOString())] });
+    const b = billingFor();
+    expect((await recoverBilling(b, { apiKey: 'pdl_sdbx_k', fetch: p.fetch })).status).toBe('done'); // first run: full history
+    expect(p.calls.filter((c) => c === '/subscriptions')).toHaveLength(1);
+    p.calls.length = 0;
+    expect((await recoverBilling(b, { apiKey: 'pdl_sdbx_k', fetch: p.fetch })).status).toBe('done');
+    expect(p.calls.filter((c) => c === '/subscriptions')).toHaveLength(0);
+    expect(p.calls.some((c) => c.startsWith('/events?subscription.'))).toBe(true);
+  });
+});

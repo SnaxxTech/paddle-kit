@@ -255,7 +255,7 @@ What it does **not** do: in-app purchases in mobile store apps. Google Play and 
 
 ## Add the kit to a new Next.js app (since v0.6.0)
 
-1. Install: `npm i github:SnaxxTech/paddle-kit#v0.8.6`.
+1. Install: `npm i github:SnaxxTech/paddle-kit#v0.8.7`.
 2. Run one CLI command in the app folder: `npx paddle-kit-catalog --webhook-url https://<host>/api/paddle` (see Catalog CLI). It makes the product, the prices, the webhook destination and the client token, and writes `.env.local`.
 3. Paste the host block that the CLI prints into your host's settings (Vercel: add `--host vercel` to get the commands). Redeploy.
 4. Add the four files of the Quickstart (`lib/billing.ts`, the webhook route, the recovery route with `vercel.json`, `lib/policy.ts`), and call `canUse` where a paid feature starts.
@@ -282,13 +282,13 @@ What each version changed, in simple words: [docs/HISTORY.md](docs/HISTORY.md). 
 ## Install
 
 ```bash
-npm i github:SnaxxTech/paddle-kit#v0.8.6
+npm i github:SnaxxTech/paddle-kit#v0.8.7
 ```
 
 **The kit is not on the npm registry.** So `npx paddle-kit-catalog` in a folder that has not installed the kit fails with `npm error 404 Not Found`: npx looks for a package of that name on the registry. Two ways work:
 
-- Run it in the app, after `npm i github:SnaxxTech/paddle-kit#v0.8.6`. Then `npx paddle-kit-catalog …` (and `npx paddle-kit-doctor …`) use the installed copy.
-- Outside an app: `npx --package=github:SnaxxTech/paddle-kit#v0.8.6 paddle-kit-catalog …` (the same for `paddle-kit-doctor`). The catalog CLI then prints one line to say that it runs from the npx cache, because it writes its env file in the current folder.
+- Run it in the app, after `npm i github:SnaxxTech/paddle-kit#v0.8.7`. Then `npx paddle-kit-catalog …` (and `npx paddle-kit-doctor …`) use the installed copy.
+- Outside an app: `npx --package=github:SnaxxTech/paddle-kit#v0.8.7 paddle-kit-catalog …` (the same for `paddle-kit-doctor`). The catalog CLI then prints one line to say that it runs from the npx cache, because it writes its env file in the current folder.
 
 - The repository is public (since v0.5.0). CI and the host install it with no token. Your secrets never go in this repository: each app keeps its own Paddle keys and webhook secret in its own env files and host settings (see Environment variables).
 - The kit pins the Paddle API to version 1: each REST call sends `Paddle-Version: 1`, and the catalog CLI sets `api_version: 1` on the webhook destination. A new Paddle API version can then not change the payloads that the kit reads. Paddle refuses a version older than the account's default. So if a future Paddle account has a default newer than 1, each REST call and the destination step fail with `PaddleError`. This is on purpose: the kit's parsers must be updated first.
@@ -1292,7 +1292,7 @@ jobs:
         run: |
           mkdir -p site
           set +e
-          npx --yes --package=github:SnaxxTech/paddle-kit#v0.8.6 paddle-kit-doctor --apps apps.json --json --html site/index.html > results.json
+          npx --yes --package=github:SnaxxTech/paddle-kit#v0.8.7 paddle-kit-doctor --apps apps.json --json --html site/index.html > results.json
           code=$?
           [ "$code" -eq 2 ] && exit 2   # the file or flags are wrong: fail loudly, publish nothing
           exit 0                        # red apps are shown on the page (and, later, as issues)
@@ -1356,12 +1356,23 @@ await reconcilePayments(billing, { apiKey: process.env.PADDLE_API_KEY!, since: n
 How `reconcile` works:
 
 - It reads `GET /subscriptions` with `fetch`, 200 per page. It follows Paddle's pages and never goes to a different host.
+- With `since` within 89 days (since v0.8.7), it reads only the `subscription.*` events since then (`GET /events`, needs `notification.read`) and applies each subscription's newest state, instead of every subscription. `recoverBilling` passes its window, so a run after a recent checkpoint reads only what changed. A first run or an older window still reads the full list.
 - It uses the same `subscriptionFrom()` as the webhook path. So a reconciled row is equal to the webhook row (snake_case `raw`, the same status and `userId` checks).
 - Each row has the API's `updated_at`, so a later webhook still wins.
 - `invalid` counts the subscriptions that the webhook path would also refuse.
 - It is safe for edge runtimes. To use your own `fetch`, pass `fetch`.
 
 The webhook path only writes to your store. It never calls the Paddle API, because Paddle waits only 5 seconds; the one exception is an `owns` resolver (`resolvePrices`), which looks the prices up once per `cacheSeconds` per instance. The signature clock check allows 5 seconds (the `signatureToleranceSeconds` option was removed in v0.4.0).
+
+**No inbox needed (measured for v0.8.7).** The webhook does its work before it answers, and that fits well inside Paddle's 5 seconds. `node scripts/bench-webhook.mjs` (after `npm run build`) sends `transaction.completed` for a one-time purchase through `handleWebhook` on real Postgres 17. `onTransaction` is `createFulfilment`, which grants plus `enqueue`s an outbox item in one transaction. The script checks that every sample left its fulfilment, outbox and account row. On a loaded laptop (load average 7–8), the worse of two runs gave:
+
+| Path | Samples | p50 | p95 | max |
+|---|---|---|---|---|
+| Cold: fresh Node process, import + pool + first webhook | 30 | 107 ms | 165 ms | 507 ms |
+| Warm, one at a time | 500 | 4.4 ms | 15 ms | 85 ms |
+| Warm, 10 at once | 500 | 14 ms | 34 ms | 128 ms |
+
+This path makes **14 SQL round trips** per webhook, and the database was on localhost. On a networked database, add 14 × the round-trip time, for example about 15–70 ms at 1–5 ms in the same region. Add the platform's cold start and a scale-to-zero database's wake-up on top. Those two are not measured here: check them in your host's function logs. Keep the database in the function's region, and put slow external work (email, other APIs) in the outbox instead of the hook. If a hook can't stay under a few seconds, `hookTimeoutMs` turns it into a retry rather than a lost event.
 
 **Note:** a slow cold start can use up the 5 seconds. In local testing, a dev server that compiled for 4.5 s refused the first event with 401 `stale_timestamp`. Paddle sends the event again, so this costs one retry, not the event.
 
@@ -1376,7 +1387,7 @@ Do these steps one time for each app: first in sandbox, then again for live.
    4. Start Paddle.js when that page loads (for example, call `createCheckout` in an effect on mount, not only in a button click). Paddle opens a checkout link from the `_ptxn` query parameter when the page loads.
 
    We found no API for this setting (**UNVERIFIED** that there is none).
-2. **Install the kit in the app:** `npm i github:SnaxxTech/paddle-kit#v0.8.6`. The kit is not on the npm registry, so run the CLIs in the app folder (or see Install for `npx --package=…`).
+2. **Install the kit in the app:** `npm i github:SnaxxTech/paddle-kit#v0.8.7`. The kit is not on the npm registry, so run the CLIs in the app folder (or see Install for `npx --package=…`).
 3. **Make the catalog.** Run `npx paddle-kit-catalog --webhook-url https://<host>/api/paddle` (see Catalog CLI). Read the table that it shows. Never copy the webhook secret by hand.
 4. **Put the variables on the host.** Paste the host block that the CLI prints (`--host vercel` prints the commands). Add `PADDLE_HEALTH_TOKEN` (any long random value), and `PADDLE_API_KEY` if the app uses `getPrice`, `findPrice`, `resolvePrices` or `reconcile`. Redeploy.
 5. **Add the code:** the four Quickstart files: `lib/billing.ts` with `billingFromEnv`, the webhook route, the recovery route with its `vercel.json` cron and `CRON_SECRET`, and `lib/policy.ts` with `canUse`. Pass `onError` so a failure's cause reaches your error tracker. Optional: show the price with `findPrice` or `getPrice` (see Show the price from Paddle), so that the price lives only in Paddle, and report its source with a `healthChecks` entry. A one-time-purchase app may drop `PADDLE_PRICES` with `resolvePrices` (see Find prices by their label).
