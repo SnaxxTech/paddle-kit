@@ -29,17 +29,17 @@ Run migrations `001`–`004` (Run the migrations) before the first deploy of thi
 
 ```ts
 import { Pool } from '@neondatabase/serverless';
-import { billingFromEnv, priceIds } from 'paddle-kit/config';
+import { billingFromEnv } from 'paddle-kit/config';
 import { postgresStore } from 'paddle-kit/postgres';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-export const { billing, config, problems, enforce } = billingFromEnv(process.env, {
-  requiredPrices: ['pro'],
+export const { billing, config, problems, enforce, products } = billingFromEnv(process.env, {
   store: postgresStore({ query: (text, params) => pool.query(text, params) }),
-  // price id -> features. Keep a retired price here while subscriptions on it still renew.
-  // `priceIds` reads both forms of a PADDLE_PRICES entry: "pri_…" and { "monthly": "pri_…", "yearly": "pri_…" }.
-  entitlements: (c) => Object.fromEntries(priceIds(c.prices.pro).map((id) => [id, ['pro']])),
+  // One definition for access and checkout (since v0.8.3). Each key is a PADDLE_PRICES key ("pri_…" or a cycle map);
+  // its prices on sale grant `features`. When you replace a price, move the old id to `retiredPriceIds`: subscriptions
+  // on it keep their features (and its events stay yours) while checkout sells only the new one.
+  products: { pro: { features: ['pro'], retiredPriceIds: [] } },
   onError: (error, ctx) => console.error('paddle-kit failure', ctx, error), // may hold secrets: your error tracker only
   // Health shows whether the API key has the permissions recovery needs, migrations 003/004 are in, and CRON_SECRET is
   // set (since v0.8.2). Add `permissions: ['subscription.write']` if the app changes plans through the API.
@@ -47,6 +47,8 @@ export const { billing, config, problems, enforce } = billingFromEnv(process.env
 });
 if (problems.length > 0) console.error('billing misconfigured:', problems.join('; ')); // names only, never values
 ```
+
+Checkout opens with a price on sale, never a retired one: `products!.checkoutPriceId('pro', 'monthly')`.
 
 What `billingFromEnv` now does by default:
 
@@ -1075,7 +1077,7 @@ Limits of this rule:
 
 - It catches an `owns` that matches none of your traffic. If `owns` misses only one new price while other prices in `owns` still sell or renew, `lastOwnedAt` stays fresh, and the rule stays quiet.
 - A refund of a one-time purchase that was ours before `owns` broke still counts (the kit uses the stored owned flag), so steady refunds of older purchases can delay the alert by up to your refund window plus N days.
-- The trade-off: if all of an app's paying subscribers are on a retired price that is no longer in `owns`, their renewals are `mirrored`, and the rule gives a false alarm. Add the retired price to `owns`.
+- The trade-off: if all of an app's paying subscribers are on a retired price that is no longer in `owns`, their renewals are `mirrored`, and the rule gives a false alarm. Add the retired price to `owns` (with `products`, list it in `retiredPriceIds`: that adds it to `owns` and keeps its features).
 - v0.4.0 recorded refunds of transactions it never saw, `customer.*` events and events kept only because their subscription was mirrored with reason `null`. Such rows count in `lastOwnedAt` until they are older than your N days.
 
 **Deploy check: `paddle-kit-doctor` (since v0.6.0).** It calls the health route of a deployed app and says in plain words what is wrong:

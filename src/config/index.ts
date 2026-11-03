@@ -6,6 +6,9 @@ import { isOwnsResolver } from '../core/owns';
 import { createPaddleTransport, type PaddleTransport } from '../core/transport';
 import type { OwnsResolver, Store } from '../core/types';
 import { readinessChecks, type ReadinessOptions } from './readiness';
+import { defineProducts, type ProductDefinition, type Products } from './products';
+
+export { defineProducts, type ProductDefinition, type Products } from './products';
 
 export { readinessChecks, type ReadinessOptions } from './readiness';
 
@@ -286,7 +289,16 @@ function memo<T>(fn: () => Promise<T>, ms: number): () => Promise<T> {
   };
 }
 
-export type BillingFromEnvOptions = ReadBillingEnvOptions &
+export type BillingFromEnvOptions = Omit<ReadBillingEnvOptions, 'requiredPrices'> & {
+    /** Keys PADDLE_PRICES must have. Every `products` key is required too. */
+    requiredPrices?: string[];
+    /**
+     * Since v0.8.3: product key (a PADDLE_PRICES key) → its features and retired prices. Builds the entitlements
+     * (prices on sale plus retired ones), adds the retired prices to `owns`, and is returned as `products` for
+     * checkout (`products.checkoutPriceId('pro', 'monthly')`). Needs PADDLE_PRICES (not prices found by label).
+     */
+    products?: Record<string, ProductDefinition>;
+  } &
   Omit<BillingConfig, 'environment' | 'webhookSecret' | 'healthToken' | 'owns' | 'entitlements' | 'catalogApp'> & {
     /** Price id → features, or a function of the config that builds it from the price ids. Default `{}` (one-time sales only). */
     entitlements?: BillingConfig['entitlements'] | ((config: BillingEnv | BillingEnvWithLookup) => BillingConfig['entitlements']);
@@ -324,9 +336,12 @@ export function billingFromEnv(
    */
   enforce: boolean;
   transport?: PaddleTransport;
+  /** Since v0.8.3, with `products`: entitlements, checkout prices and `productOf`. Null while billing is off. */
+  products?: Products | null;
 } {
   const enforce = env.BILLING_ENFORCE === '1';
-  const { requiredPrices, requiredCycles, requireLaunchAt, resolvePrices: lookup, entitlements, owns, readiness, ...rest } = opts;
+  const { requiredPrices: required, requiredCycles, requireLaunchAt, resolvePrices: lookup, entitlements, owns, readiness, products: productDefs, ...rest } = opts;
+  const requiredPrices = [...new Set([...(required ?? []), ...Object.keys(productDefs ?? {})])];
   // One resilient transport for this app and environment: price lookups and recovery share its circuit breaker.
   const transport = createPaddleTransport();
   const resolvePrices = lookup && { ...lookup, fetch: lookup.fetch ?? transport.fetch };
@@ -334,7 +349,16 @@ export function billingFromEnv(
     config: BillingEnv | BillingEnvWithLookup | null;
     problems: string[];
   };
-  if (!config) return { billing: null, config: null, problems, enforce };
+  if (!config) return { billing: null, config: null, problems, enforce, products: productDefs ? null : undefined };
+  let products: Products | undefined;
+  if (productDefs) {
+    try {
+      products = defineProducts(config.prices, productDefs);
+    } catch (error) {
+      // Names a product key or a price id, never a secret.
+      return { billing: null, config: null, problems: [...problems, (error as Error).message], enforce, products: null };
+    }
+  }
   // Prices found by label: ownership comes from the ids kept in the store (historical ones too, filled by the recovery
   // job), so a late payment on a retired price is still ours and the webhook path never asks Paddle.
   const durable = !owns && isOwnsResolver(config.owns) && rest.store.getOwnedIds ? storedOwnership(rest.store) : undefined;
@@ -344,9 +368,11 @@ export function billingFromEnv(
     environment: config.environment,
     webhookSecret: config.webhookSecrets ?? config.webhookSecret,
     healthToken: config.healthToken,
-    owns: owns ?? durable ?? config.owns,
+    owns: owns ?? durable ?? (products && config.owns && !isOwnsResolver(config.owns) && 'priceIds' in config.owns
+      ? { priceIds: [...new Set([...config.owns.priceIds, ...products.priceIds])] } // retired prices are still ours
+      : config.owns),
     catalogApp: resolvePrices?.app,
-    entitlements: typeof entitlements === 'function' ? entitlements(config) : (entitlements ?? {}),
+    entitlements: { ...products?.entitlements, ...(typeof entitlements === 'function' ? entitlements(config) : (entitlements ?? {})) },
     healthChecks: readiness
       ? {
           ...readinessChecks({
@@ -361,7 +387,7 @@ export function billingFromEnv(
         }
       : rest.healthChecks,
   });
-  return { billing, config, problems, enforce, transport };
+  return { billing, config, problems, enforce, transport, ...(products ? { products } : {}) };
 }
 
 /** Owned ids from the store. None yet throws (the webhook answers 503 and Paddle retries): never "not ours" by default. */

@@ -1,5 +1,10 @@
 # Upgrading paddle-kit
 
+## 0.8.3 (from 0.8.2)
+
+Nothing to do. Optional: replace a hand-built `entitlements` map with `products: { pro: { features: ['pro'] } }` and
+open checkout with `products.checkoutPriceId(...)`. When you replace a price, move the old id to `retiredPriceIds`.
+
 ## 0.8.2 (from 0.8.1)
 
 No migration. Install `#v0.8.2`. Nothing else to do. Optional: add `readiness: { cronSecret: process.env.CRON_SECRET }` to `billingFromEnv` (add
