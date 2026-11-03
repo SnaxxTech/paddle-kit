@@ -118,6 +118,11 @@ export interface OwnedIds {
   priceIds?: readonly string[];
   productIds?: readonly string[];
 }
+/** Owned ids as the store keeps them: both lists always present, sorted. */
+export interface OwnedIdSet {
+  priceIds: string[];
+  productIds: string[];
+}
 export type OwnsPredicate = (x: { kind: 'subscription' | 'transaction'; items: LineItem[]; customData: Record<string, unknown> | null }) => boolean;
 /**
  * `owns` found at run time (`readBillingEnv` with `resolvePrices`, since v0.7.0): owned ids, or a predicate built from
@@ -218,6 +223,14 @@ export interface Store {
    */
   recordTransaction?(t: SeenTransaction & { subscriptionId: string | null; customerId: string | null; occurredAt: string; receivedAt: string }): Promise<void>;
   getTransaction?(transactionId: string): Promise<SeenTransaction | null>;
+  /**
+   * Since v0.8.0 (migration 004): the price and product ids this app owns, kept for good, including prices it no
+   * longer sells (archived or replaced), so a late payment on one is still recognised. Filled by `syncOwnership` (the
+   * recovery job runs it); never shrinks. `billingFromEnv` with `resolvePrices` decides ownership from these alone, so
+   * the webhook path never asks Paddle. Optional so custom stores keep compiling.
+   */
+  addOwnedIds?(ids: OwnedIdSet, at: string): Promise<void>;
+  getOwnedIds?(): Promise<OwnedIdSet>;
   /** Built-in stores support durable recovery after migration 003. Custom stores may supply their own adapter. */
   recovery?: RecoveryStore;
 }

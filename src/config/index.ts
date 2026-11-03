@@ -2,7 +2,9 @@
 // Problem strings name variables (and caller-supplied price keys) only, never values.
 import { PriceError, findPriceMap, type FetchLike } from '../price';
 import { createBilling, type Billing, type BillingConfig } from '../core/billing';
-import type { OwnsResolver } from '../core/types';
+import { isOwnsResolver } from '../core/owns';
+import { createPaddleTransport, type PaddleTransport } from '../core/transport';
+import type { OwnsResolver, Store } from '../core/types';
 
 /** key -> price id, or key -> { billing cycle -> price id }. */
 export type PriceMap = Record<string, string | Record<string, string>>;
@@ -261,10 +263,14 @@ function memo<T>(fn: () => Promise<T>, ms: number): () => Promise<T> {
 }
 
 export type BillingFromEnvOptions = ReadBillingEnvOptions &
-  Omit<BillingConfig, 'environment' | 'webhookSecret' | 'healthToken' | 'owns' | 'entitlements'> & {
+  Omit<BillingConfig, 'environment' | 'webhookSecret' | 'healthToken' | 'owns' | 'entitlements' | 'catalogApp'> & {
     /** Price id → features, or a function of the config that builds it from the price ids. Default `{}` (one-time sales only). */
     entitlements?: BillingConfig['entitlements'] | ((config: BillingEnv | BillingEnvWithLookup) => BillingConfig['entitlements']);
-    /** Default `config.owns` (every id in PADDLE_PRICES, or the resolver with `resolvePrices`). */
+    /**
+     * Default: every id in PADDLE_PRICES; with `resolvePrices` (PADDLE_PRICES unset), the ids kept in the store
+     * (`syncOwnership`, run by the recovery job: archived prices included), or the live resolver for a store without
+     * `getOwnedIds`.
+     */
     owns?: BillingConfig['owns'];
   };
 
@@ -273,24 +279,47 @@ export type BillingFromEnvOptions = ReadBillingEnvOptions &
  * environment, every webhook secret, the health token and `owns` filled in. `billing` is null while billing is off or
  * misconfigured (then `problems` names the variables), so it is safe at module scope in a build without secrets:
  * `export const { billing, config, problems } = billingFromEnv(process.env, { requiredPrices: ['pro'], store, … })`.
+ * Since v0.8.0 the safe path is the default: price lookups and `recoverBilling` go through one resilient transport
+ * (`transport`, also `billing.config.paddleFetch`), and with `resolvePrices` ownership is read from the store.
  */
 export function billingFromEnv(
   env: Record<string, string | undefined>,
   opts: BillingFromEnvOptions,
-): { billing: Billing | null; config: BillingEnv | BillingEnvWithLookup | null; problems: string[] } {
-  const { requiredPrices, requiredCycles, requireLaunchAt, resolvePrices, entitlements, owns, ...rest } = opts;
+): { billing: Billing | null; config: BillingEnv | BillingEnvWithLookup | null; problems: string[]; transport?: PaddleTransport } {
+  const { requiredPrices, requiredCycles, requireLaunchAt, resolvePrices: lookup, entitlements, owns, ...rest } = opts;
+  // One resilient transport for this app and environment: price lookups and recovery share its circuit breaker.
+  const transport = createPaddleTransport();
+  const resolvePrices = lookup && { ...lookup, fetch: lookup.fetch ?? transport.fetch };
   const { config, problems } = readBillingEnv(env, { requiredPrices, requiredCycles, requireLaunchAt, resolvePrices }) as {
     config: BillingEnv | BillingEnvWithLookup | null;
     problems: string[];
   };
   if (!config) return { billing: null, config: null, problems };
+  // Prices found by label: ownership comes from the ids kept in the store (historical ones too, filled by the recovery
+  // job), so a late payment on a retired price is still ours and the webhook path never asks Paddle.
+  const durable = !owns && isOwnsResolver(config.owns) && rest.store.getOwnedIds ? storedOwnership(rest.store) : undefined;
   const billing = createBilling({
+    paddleFetch: transport.fetch,
     ...rest,
     environment: config.environment,
     webhookSecret: config.webhookSecrets ?? config.webhookSecret,
     healthToken: config.healthToken,
-    owns: owns ?? config.owns,
+    owns: owns ?? durable ?? config.owns,
+    catalogApp: resolvePrices?.app,
     entitlements: typeof entitlements === 'function' ? entitlements(config) : (entitlements ?? {}),
   });
-  return { billing, config, problems };
+  return { billing, config, problems, transport };
+}
+
+/** Owned ids from the store. None yet throws (the webhook answers 503 and Paddle retries): never "not ours" by default. */
+function storedOwnership(store: Store): OwnsResolver {
+  return {
+    async resolve() {
+      const ids = await store.getOwnedIds!();
+      if (ids.priceIds.length === 0 && ids.productIds.length === 0) {
+        throw new Error('paddle-kit: no owned price or product ids in the store yet: run the recovery job (or syncOwnership) once');
+      }
+      return ids;
+    },
+  };
 }

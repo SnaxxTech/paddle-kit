@@ -40,6 +40,14 @@ export function runStoreContract(name: string, makeStore: () => Promise<Store>):
       expect(await claim('2026-10-15T10:01:03.000Z', '2026-10-15T10:00:03.000Z', 'tok_d')).toEqual({ alreadyDone: true });
     });
 
+    it('keeps owned ids for good: adds only, sorted, idempotent', async () => {
+      expect(await store.getOwnedIds!()).toEqual({ priceIds: [], productIds: [] });
+      await store.addOwnedIds!({ priceIds: ['pri_b', 'pri_a'], productIds: ['pro_1'] }, '2026-11-01T00:00:00.000Z');
+      await store.addOwnedIds!({ priceIds: ['pri_a', 'pri_c'], productIds: [] }, '2026-11-02T00:00:00.000Z');
+      await store.addOwnedIds!({ priceIds: [], productIds: [] }, '2026-11-03T00:00:00.000Z');
+      expect(await store.getOwnedIds!()).toEqual({ priceIds: ['pri_a', 'pri_b', 'pri_c'], productIds: ['pro_1'] });
+    });
+
     it('round-trips a subscription', async () => {
       const s = sub({ scheduledChange: { action: 'cancel', effectiveAt: '2026-11-01T00:00:00.000Z' }, priceIds: ['a', 'b'] });
       expect(await store.upsertSubscription(s)).toEqual({ applied: true });

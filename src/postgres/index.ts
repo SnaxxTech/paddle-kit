@@ -166,6 +166,23 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
         [t.transactionId, t.owned, t.subscriptionId, t.customerId, t.occurredAt, t.receivedAt],
       );
     },
+    async addOwnedIds(ids, at) {
+      const rows = [...ids.priceIds.map((id) => ({ id, kind: 'price' })), ...ids.productIds.map((id) => ({ id, kind: 'product' }))];
+      if (rows.length === 0) return;
+      await query(
+        `INSERT INTO paddle_owned_ids (id, kind, first_seen_at)
+         SELECT x.id, x.kind, ${ms(2)} FROM jsonb_to_recordset($1::jsonb) AS x(id text, kind text)
+         ON CONFLICT (id) DO NOTHING`,
+        [jsonParam(rows), at],
+      );
+    },
+    async getOwnedIds() {
+      const { rows } = await query(`SELECT id, kind FROM paddle_owned_ids ORDER BY id`);
+      return {
+        priceIds: rows.filter((r) => r.kind === 'price').map((r) => r.id as string),
+        productIds: rows.filter((r) => r.kind === 'product').map((r) => r.id as string),
+      };
+    },
     async getTransaction(id) {
       const { rows } = await query(`SELECT transaction_id, owned FROM paddle_transactions WHERE transaction_id = $1`, [id]);
       return rows[0] ? { transactionId: rows[0].transaction_id as string, owned: rows[0].owned === true } : null;

@@ -85,6 +85,12 @@ CREATE INDEX IF NOT EXISTS paddle_events_unfinished_idx ON paddle_events (receiv
   claimed_at timestamptz NOT NULL,
   claim_token text
 );
+
+CREATE TABLE IF NOT EXISTS paddle_owned_ids (
+  id text PRIMARY KEY,
+  kind text NOT NULL,
+  first_seen_at timestamptz NOT NULL
+);
 `,
   },
 ];

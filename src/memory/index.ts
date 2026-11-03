@@ -14,6 +14,8 @@ export function memoryStore(): Store {
   const claims = new Map<string, { at: string; token?: string }>(); // eventId -> claim
   const recoveries = new Map<string, RecoveryState>();
   const transactions = new Map<string, boolean>(); // transactionId -> owned
+  const ownedPrices = new Set<string>();
+  const ownedProducts = new Set<string>();
 
   return {
     async recordEvent(e) {
@@ -83,6 +85,13 @@ export function memoryStore(): Store {
     },
     async recordTransaction(t) {
       transactions.set(t.transactionId, (transactions.get(t.transactionId) ?? false) || t.owned);
+    },
+    async addOwnedIds(ids) {
+      for (const id of ids.priceIds) ownedPrices.add(id);
+      for (const id of ids.productIds) ownedProducts.add(id);
+    },
+    async getOwnedIds() {
+      return { priceIds: [...ownedPrices].sort(), productIds: [...ownedProducts].sort() };
     },
     async getTransaction(id) {
       const owned = transactions.get(id);

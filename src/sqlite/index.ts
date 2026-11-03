@@ -86,6 +86,11 @@ CREATE INDEX IF NOT EXISTS paddle_events_unfinished_idx ON paddle_events (receiv
   event_id TEXT PRIMARY KEY,
   claimed_at INTEGER NOT NULL,
   claim_token TEXT
+);
+CREATE TABLE IF NOT EXISTS paddle_owned_ids (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  first_seen_at INTEGER NOT NULL
 );`,
   },
 ];
@@ -227,6 +232,18 @@ export function sqliteStore({ db }: { db: SqliteDatabase }): Store {
          ON CONFLICT (transaction_id) DO UPDATE SET owned = MAX(paddle_transactions.owned, excluded.owned)`).run(
         t.transactionId, t.owned ? 1 : 0, t.subscriptionId, t.customerId, ms(t.occurredAt), ms(t.receivedAt),
       );
+    },
+    async addOwnedIds(ids, at) {
+      const insert = q(`INSERT INTO paddle_owned_ids (id, kind, first_seen_at) VALUES (?, ?, ?) ON CONFLICT (id) DO NOTHING`);
+      for (const id of ids.priceIds) insert.run(id, 'price', ms(at));
+      for (const id of ids.productIds) insert.run(id, 'product', ms(at));
+    },
+    async getOwnedIds() {
+      const rows = q(`SELECT id, kind FROM paddle_owned_ids ORDER BY id`).all() as Row[];
+      return {
+        priceIds: rows.filter((r) => r.kind === 'price').map((r) => r.id as string),
+        productIds: rows.filter((r) => r.kind === 'product').map((r) => r.id as string),
+      };
     },
     async getTransaction(id) {
       const r = q(`SELECT transaction_id, owned FROM paddle_transactions WHERE transaction_id = ?`).get(id) as Row | undefined;

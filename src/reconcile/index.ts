@@ -54,7 +54,31 @@ function apiFor(billing: Billing, opts: { apiKey: string; fetch?: FetchLike; sig
     throw new Error(`paddle-kit: API key does not match environment "${billing.config.environment}"`);
   }
   const base = billing.config.environment === 'production' ? LIVE_BASE : SANDBOX_BASE;
-  return paddleClient(base, opts.apiKey, opts.fetch ?? ((url, init) => fetch(url, init)), [opts.apiKey], opts.signal);
+  return paddleClient(base, opts.apiKey, opts.fetch ?? billing.config.paddleFetch ?? ((url, init) => fetch(url, init)), [opts.apiKey], opts.signal);
+}
+
+/**
+ * Keeps every price and product of `app` (the catalog CLI's product label), active AND archived, in the store's owned
+ * ids, so a late payment or renewal on a price the app no longer sells is still recognised as its own. Adds only:
+ * an id once owned stays owned. `recoverBilling` runs it first when `billing.config.catalogApp` is set.
+ */
+export async function syncOwnership(
+  billing: Billing,
+  opts: { apiKey: string; app: string; fetch?: FetchLike; signal?: AbortSignal },
+): Promise<{ priceIds: number; productIds: number }> {
+  const store = billing.store;
+  if (!store.addOwnedIds) throw new Error('paddle-kit: syncOwnership needs a store with addOwnedIds (built-in stores: migration 004)');
+  const api = apiFor(billing, opts);
+  const prices = new Set<string>();
+  const products = new Set<string>();
+  for (const p of await api.list('/prices?status=active,archived&include=product&per_page=200', 50)) {
+    opts.signal?.throwIfAborted();
+    if (p.product?.custom_data?.paddle_kit !== opts.app || typeof p.id !== 'string' || typeof p.product.id !== 'string') continue;
+    prices.add(p.id);
+    products.add(p.product.id);
+  }
+  await store.addOwnedIds({ priceIds: [...prices].sort(), productIds: [...products].sort() }, new Date().toISOString());
+  return { priceIds: prices.size, productIds: products.size };
 }
 
 export interface PaymentCounts {
@@ -151,7 +175,9 @@ export type RecoveryResult =
   | { status: 'busy' }
   | { status: 'failed'; reason: 'incomplete' | 'timeout' | 'recovery_error' | 'api_error' | 'network' | 'circuit_open'; httpStatus?: number }
   | { status: 'done'; since: string; subscriptions: Awaited<ReturnType<typeof reconcile>>;
-      payments: Awaited<ReturnType<typeof reconcilePayments>>; events: { applied: number; failed: number } };
+      payments: Awaited<ReturnType<typeof reconcilePayments>>; events: { applied: number; failed: number };
+      /** Since v0.8.0, when `billing.config.catalogApp` is set: the owned ids `syncOwnership` found. */
+      ownership?: { priceIds: number; productIds: number } };
 
 /**
  * Durable self-repair: reclaim an expired job lease, replay unfinished original events, repair snapshots/payments,
@@ -182,6 +208,15 @@ export async function recoverBilling(billing: Billing, opts: RecoveryOptions): P
     controller.signal.throwIfAborted();
     if (!claimed) return { status: 'busy' };
     const state = await store.getRecovery(name);
+    // Owned ids first: the replays below decide ownership from them.
+    const app = billing.config.catalogApp;
+    const ownership = app && billing.store.addOwnedIds
+      ? await syncOwnership(billing, { apiKey: opts.apiKey, app, fetch: opts.fetch, signal: controller.signal })
+      : null;
+    controller.signal.throwIfAborted();
+    // None found for the app (a wrong label, or an empty catalog): webhooks would keep answering 503. Not done.
+    const noOwnedIds = ownership !== null && ownership.priceIds + ownership.productIds === 0
+      && ((await billing.store.getOwnedIds?.())?.priceIds.length ?? 0) === 0;
     const since = new Date(Math.max(initial.getTime(), state?.checkpointAt ? Date.parse(state.checkpointAt) - overlapMs : initial.getTime()));
     const api = apiFor(billing, { ...opts, signal: controller.signal });
     const process = processorOf(billing);
@@ -216,11 +251,11 @@ export async function recoverBilling(billing: Billing, opts: RecoveryOptions): P
     controller.signal.throwIfAborted();
     const remaining = await store.getPendingEvents({ before: new Date(startedAt.getTime() - pendingAgeMs).toISOString(), limit: 1 });
     controller.signal.throwIfAborted();
-    incomplete = subscriptions.invalid > 0 || events.failed > 0 || remaining.length > 0 || payments.transactions.failed > 0 || payments.adjustments.failed > 0;
+    incomplete = noOwnedIds || subscriptions.invalid > 0 || events.failed > 0 || remaining.length > 0 || payments.transactions.failed > 0 || payments.adjustments.failed > 0;
     if (incomplete) throw new Error('incomplete recovery');
     completed = await store.finishRecovery({ name, runId, status: 'succeeded', finishedAt: now().toISOString(), reason: null });
     if (!completed) throw new Error('recovery lease lost');
-    return { status: 'done', since: since.toISOString(), subscriptions, payments, events };
+    return { status: 'done', since: since.toISOString(), subscriptions, payments, events, ...(ownership ? { ownership } : {}) };
   };
   try {
     return await within(work(), timeoutMs, 'billing recovery');
