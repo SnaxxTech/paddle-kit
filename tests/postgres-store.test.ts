@@ -84,3 +84,16 @@ it("never stores another app's customer: customer.* is acked 200 as ignored, 0 r
     { event_id: 'evt_ctm_1', status: 'ignored', reason: 'unknown_event' },
   ]);
 });
+
+it('reads a row an older version wrote through postgres-js (JSON text stored as a jsonb string) as its value', async () => {
+  // Before v0.9.0, postgres-js JSON-encoded the kit's JSON text again: price_ids held the *string* '["pri_pro"]'.
+  const db = await freshDb();
+  await db.query(`INSERT INTO paddle_subscriptions (subscription_id, customer_id, user_id, status, price_ids, current_period_end, scheduled_change,
+      canceled_at, past_due_since, last_event_at, raw, updated_at)
+    VALUES ('sub_old', 'ctm_1', 'u1', 'active', to_jsonb('["pri_pro"]'::text), now(), to_jsonb('{"action":"cancel"}'::text), NULL, NULL, now(), to_jsonb('{"id":"sub_old"}'::text), now())`);
+  const store = postgresStore({ query: (t, p) => db.query(t, p) as any });
+  const s = await store.getSubscription('sub_old');
+  expect(s?.priceIds).toEqual(['pri_pro']);
+  expect(s?.scheduledChange).toEqual({ action: 'cancel' });
+  expect(s?.raw).toEqual({ id: 'sub_old' });
+});

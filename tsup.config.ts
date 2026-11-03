@@ -16,6 +16,7 @@ export default defineConfig({
     'price/index': 'src/price/index.ts',
     'server/index': 'src/server/index.ts',
     'fulfil/index': 'src/fulfil/index.ts',
+    'db/index': 'src/db/index.ts',
     'doctor/cli': 'src/doctor/cli.ts',
   },
   format: ['esm'],

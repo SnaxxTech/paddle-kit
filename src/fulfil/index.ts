@@ -4,6 +4,7 @@
 import { adjustmentEffect, paymentRevoked } from '../core/adjustments';
 import type { BillingConfig } from '../core/billing';
 import type { CheckResult, Transaction } from '../core/types';
+import { jsonValue } from '../core/json';
 import { redactSecrets } from '../core/paddle-api';
 
 /** One query on the app's Postgres client: pg, @neondatabase/serverless Pool, postgres-js wrapper, PGlite. */
@@ -97,7 +98,7 @@ export async function fulfilmentState(q: SqlTx, transactionId: string): Promise<
   const row = (await q.query('SELECT user_id, grants, state, taken FROM paddle_fulfilments WHERE transaction_id = $1', [transactionId])).rows[0];
   if (!row) return null;
   const adjustments = (await q.query('SELECT action, type, status FROM paddle_fulfilment_adjustments WHERE transaction_id = $1 ORDER BY adjustment_id', [transactionId])).rows as AdjustmentRow[];
-  return { state: row.state, userId: row.user_id, grants: row.grants, taken: row.taken ?? null, revokedBy: revokedByOf(adjustments), adjustments };
+  return { state: row.state, userId: row.user_id, grants: jsonValue(row.grants), taken: jsonValue(row.taken) ?? null, revokedBy: revokedByOf(adjustments), adjustments };
 }
 
 /**
@@ -115,7 +116,7 @@ export async function importFulfilment(
   if (o.state === 'revoked' && !o.adjustmentId) throw new Error('paddle-kit: importFulfilment of a revoked payment needs the adjustmentId that revoked it');
   const taken = o.state === 'revoked' && o.taken !== undefined ? JSON.stringify(o.taken) : null;
   const ins = await q.query(
-    `INSERT INTO paddle_fulfilments (transaction_id, user_id, grants, state, taken) VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO paddle_fulfilments (transaction_id, user_id, grants, state, taken) VALUES ($1, $2, $3::text::jsonb, $4, $5::text::jsonb)
      ON CONFLICT (transaction_id) DO NOTHING RETURNING transaction_id`,
     [o.transactionId, o.userId, JSON.stringify(o.grants), o.state, taken],
   );
@@ -160,20 +161,20 @@ export function createFulfilment<G>(db: SqlDb, actions: FulfilmentActions<G>, op
     if (!row || row.state === 'declined') return; // not paid yet (the payment settles when it arrives), or refused
     const adjustments = (await q.query('SELECT action, type, status FROM paddle_fulfilment_adjustments WHERE transaction_id = $1', [transactionId])).rows;
     const revoked = paymentRevoked(adjustments);
-    const f: Fulfilment<G> = { transactionId, userId: row.user_id, grants: row.grants as G };
+    const f: Fulfilment<G> = { transactionId, userId: row.user_id, grants: jsonValue<G>(row.grants) };
     const set = (state: FulfilmentStateName, taken: unknown) =>
-      q.query('UPDATE paddle_fulfilments SET state = $1, taken = $2, updated_at = now() WHERE transaction_id = $3', [state, taken === null || taken === undefined ? null : JSON.stringify(taken), transactionId]);
+      q.query('UPDATE paddle_fulfilments SET state = $1, taken = $2::text::jsonb, updated_at = now() WHERE transaction_id = $3', [state, taken === null || taken === undefined ? null : JSON.stringify(taken), transactionId]);
     // A revoke or restore only ever follows an adjustment, so `cause` is set on those paths.
     if (revoked && row.state === 'granted') {
       await set('revoked', await actions.revoke(q, { ...f, cause: cause! }));
     } else if (!revoked && row.state === 'revoked') {
-      await actions.restore(q, { ...f, taken: row.taken, cause: cause! });
+      await actions.restore(q, { ...f, taken: jsonValue(row.taken), cause: cause! });
       await set('granted', null);
     } else if (!revoked && row.state === 'held') {
       const out = await actions.grant(q, f);
       if (out && typeof out === 'object' && 'declined' in out) {
         await set('declined', null);
-        await review(q, { id: `declined:${transactionId}`, transactionId, kind: `declined:${out.declined}`, detail: JSON.stringify(row.grants) });
+        await review(q, { id: `declined:${transactionId}`, transactionId, kind: `declined:${out.declined}`, detail: JSON.stringify(jsonValue(row.grants)) });
       } else {
         await set('granted', null);
       }
@@ -196,7 +197,7 @@ export function createFulfilment<G>(db: SqlDb, actions: FulfilmentActions<G>, op
         }
         // 'held' until settle decides: a refund that arrived first keeps it from ever being granted.
         const ins = await q.query(
-          `INSERT INTO paddle_fulfilments (transaction_id, user_id, grants, state) VALUES ($1, $2, $3, 'held')
+          `INSERT INTO paddle_fulfilments (transaction_id, user_id, grants, state) VALUES ($1, $2, $3::text::jsonb, 'held')
            ON CONFLICT (transaction_id) DO NOTHING RETURNING transaction_id`,
           [tx.transactionId, order.userId, JSON.stringify(order.grants)],
         );
@@ -233,7 +234,7 @@ export function createFulfilment<G>(db: SqlDb, actions: FulfilmentActions<G>, op
  * commit. `id` is the idempotency key (e.g. `${transactionId}:receipt`): a retried webhook adds nothing.
  */
 export async function enqueue(q: SqlTx, item: { id: string; kind: string; payload: unknown }): Promise<void> {
-  await q.query('INSERT INTO paddle_outbox (id, kind, payload) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING', [item.id, item.kind, JSON.stringify(item.payload ?? null)]);
+  await q.query('INSERT INTO paddle_outbox (id, kind, payload) VALUES ($1, $2, $3::text::jsonb) ON CONFLICT (id) DO NOTHING', [item.id, item.kind, JSON.stringify(item.payload ?? null)]);
 }
 
 export interface OutboxHandlers {
@@ -290,7 +291,7 @@ export async function drainOutbox(
     const handler = handlers[item.kind];
     try {
       if (!handler) throw new Error(`no handler for kind "${item.kind}"`);
-      await handler(item.payload, { id: item.id, attempts: attempts - 1 });
+      await handler(jsonValue(item.payload), { id: item.id, attempts: attempts - 1 });
       // Sent is final and true whoever holds the lease now: marked even after a takeover, so it is not sent again.
       await query('UPDATE paddle_outbox SET sent_at = clock_timestamp(), last_error = NULL WHERE id = $1 AND sent_at IS NULL', [item.id]);
       out.sent++;

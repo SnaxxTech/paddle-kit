@@ -1,4 +1,5 @@
 import { missingSchema } from '../core/schema';
+import { jsonValue } from '../core/json';
 import type { EventStatus, Health, ReasonCode, Store, Subscription, RecoveryState, RecoveryProgress } from '../core/types';
 
 export { MIGRATIONS } from './migrations';
@@ -7,6 +8,8 @@ export type SqlQuery = (text: string, params?: unknown[]) => Promise<{ rows: Rec
 
 const iso = (v: unknown): string | null => (v == null ? null : new Date(v as string | Date).toISOString());
 // jsonb rejects \u0000; drop NUL escapes (but keep an escaped backslash followed by "u0000" intact).
+// JSON text, sent as `$n::text::jsonb`: every driver sends text and Postgres parses it (postgres-js JSON-encodes a
+// parameter typed jsonb, which stored our text as a jsonb string before v0.9.0).
 const jsonParam = (v: unknown) =>
   v == null ? null : JSON.stringify(v).replace(/\\\\|\\u0000/g, (m) => (m === '\\\\' ? m : ''));
 // Timestamps are stored at millisecond precision so stored values compare equal to the JS-Date-derived ISO strings read back.
@@ -20,13 +23,13 @@ function toSubscription(r: Record<string, unknown>): Subscription {
     customerId: r.customer_id as string,
     userId: (r.user_id as string | null) ?? null,
     status: r.status as Subscription['status'],
-    priceIds: r.price_ids as string[],
+    priceIds: jsonValue<string[]>(r.price_ids),
     currentPeriodEnd: iso(r.current_period_end),
-    scheduledChange: (r.scheduled_change as Subscription['scheduledChange']) ?? null,
+    scheduledChange: jsonValue<Subscription['scheduledChange']>(r.scheduled_change) ?? null,
     canceledAt: iso(r.canceled_at),
     pastDueSince: iso(r.past_due_since),
     lastEventAt: iso(r.last_event_at)!,
-    raw: r.raw,
+    raw: jsonValue(r.raw),
   };
 }
 
@@ -36,7 +39,7 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
       `INSERT INTO paddle_subscriptions
          (subscription_id, customer_id, user_id, status, price_ids, current_period_end, scheduled_change,
           canceled_at, past_due_since, last_event_at, raw)
-       VALUES ($1, $2, $3, $4, $5::jsonb, ${ms(6)}, $7::jsonb, ${ms(8)}, ${ms(9)}, ${ms(10)}, $11::jsonb)
+       VALUES ($1, $2, $3, $4, $5::text::jsonb, ${ms(6)}, $7::text::jsonb, ${ms(8)}, ${ms(9)}, ${ms(10)}, $11::text::jsonb)
        ON CONFLICT (subscription_id) DO UPDATE SET
          customer_id = EXCLUDED.customer_id,
          user_id = COALESCE(EXCLUDED.user_id, paddle_subscriptions.user_id),
@@ -186,7 +189,7 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
       if (rows.length === 0) return;
       await query(
         `INSERT INTO paddle_owned_ids (id, kind, first_seen_at)
-         SELECT x.id, x.kind, ${ms(2)} FROM jsonb_to_recordset($1::jsonb) AS x(id text, kind text)
+         SELECT x.id, x.kind, ${ms(2)} FROM jsonb_to_recordset($1::text::jsonb) AS x(id text, kind text)
          ON CONFLICT (id) DO NOTHING`,
         [jsonParam(rows), at],
       );

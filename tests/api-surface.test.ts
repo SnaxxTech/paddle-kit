@@ -14,7 +14,7 @@ import * as fulfil from '../src/fulfil';
 // billingFromEnv to ./config).
 it('package.json exports exactly the v0.7 subpaths (unchanged since v0.6) and bins', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-  expect(Object.keys(pkg.exports)).toEqual(['./core', './memory', './postgres', './sqlite', './next', './client', './reconcile', './plan', './config', './catalog', './price', './server', './fulfil']);
+  expect(Object.keys(pkg.exports)).toEqual(['./core', './memory', './postgres', './sqlite', './next', './client', './reconcile', './plan', './config', './catalog', './price', './server', './fulfil', './db']);
   expect(pkg.bin).toEqual({ 'paddle-kit-catalog': './dist/catalog/cli.js', 'paddle-kit-doctor': './dist/doctor/cli.js' });
   for (const e of Object.values(pkg.exports) as Record<string, string>[]) expect(Object.keys(e)).toEqual(['types', 'default']);
   expect(Object.keys(pkg.peerDependencies ?? {})).toEqual(['@paddle/paddle-js']);
