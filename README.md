@@ -1,5 +1,152 @@
 # paddle-kit
 
+## Standard setup (since v0.8.0)
+
+Every app uses the same four pieces. Nothing else is needed: no billing service, no queue, no Redis.
+
+1. **One config** (`lib/billing.ts`): `billingFromEnv`.
+2. **One webhook route** (`app/api/paddle/route.ts`): `createWebhookRoute`.
+3. **One scheduled recovery job** (`app/api/cron/billing-recovery/route.ts`): `recoverBilling`.
+4. **One app policy module** (`lib/policy.ts`): the only place that decides what a user may do.
+
+Run migrations `001`–`004` (Run the migrations) before the first deploy of this version.
+
+`lib/billing.ts`
+
+```ts
+import { Pool } from '@neondatabase/serverless';
+import { billingFromEnv } from 'paddle-kit/config';
+import { postgresStore } from 'paddle-kit/postgres';
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+export const { billing, config, problems, enforce } = billingFromEnv(process.env, {
+  requiredPrices: ['pro'],
+  store: postgresStore({ query: (text, params) => pool.query(text, params) }),
+  // price id -> features. Keep a retired price here while subscriptions on it still renew.
+  entitlements: (c) => Object.fromEntries(Object.values(c.prices.pro as Record<string, string>).map((id) => [id, ['pro']])),
+  onError: (error, ctx) => console.error('paddle-kit failure', ctx, error), // may hold secrets: your error tracker only
+});
+if (problems.length > 0) console.error('billing misconfigured:', problems.join('; ')); // names only, never values
+```
+
+What `billingFromEnv` now does by default:
+
+- **Resilient Paddle calls.** One `createPaddleTransport()` per app and environment (returned as `transport`, and set as `billing.config.paddleFetch`). Price lookups, `reconcile`, `reconcilePayments` and `recoverBilling` use it unless a call passes its own `fetch`: bounded GET retries with backoff and jitter, `Retry-After`, a circuit breaker, no automatic retry of a mutation.
+- **Explicit, historical ownership.** With `PADDLE_PRICES` set (subscription apps: `entitlements` needs the ids when billing is built), `owns` is every id in it. With `resolvePrices: { app }` and no `PADDLE_PRICES` (one-time sales), `owns` is read from the store's owned ids: every price and product of the app, archived ones included, so a late payment or renewal on a retired price is still yours. The webhook path never asks Paddle. Until the recovery job has filled the ids once, events answer **503** `prices_unavailable` (Paddle retries); they are never acked as `not_ours`. On a shared seller account never leave `owns` unset: unset means "every event is mine".
+- **`enforce`** is `BILLING_ENFORCE === '1'`, read even when the rest of the env is broken.
+
+`app/api/paddle/route.ts`
+
+```ts
+import { createWebhookRoute } from 'paddle-kit/next';
+import { billing, problems } from '@/lib/billing';
+
+export const { POST, GET } = createWebhookRoute({ billing, problems, healthToken: process.env.PADDLE_HEALTH_TOKEN });
+```
+
+`app/api/cron/billing-recovery/route.ts`
+
+```ts
+import { recoverBilling } from 'paddle-kit/reconcile';
+import { billing, config } from '@/lib/billing';
+
+export const maxDuration = 60; // the job's own budget is 45 s
+
+export async function GET(req: Request) {
+  // Vercel Cron sends this header; anyone else gets 401.
+  if (req.headers.get('authorization') !== `Bearer ${process.env.CRON_SECRET}`) return new Response(null, { status: 401 });
+  if (!billing || !config?.apiKey) return Response.json({ status: 'off' });
+  const result = await recoverBilling(billing, { apiKey: config.apiKey });
+  // A failed run answers 500 so the cron's own monitoring sees it; the health route shows it too.
+  return Response.json(result, { status: result.status === 'failed' ? 500 : 200 });
+}
+```
+
+`vercel.json`: `{ "crons": [{ "path": "/api/cron/billing-recovery", "schedule": "0 * * * *" }] }`. Hourly on Vercel Pro; the Hobby plan allows one run a day, which is still enough (the doctor flags a job with no success for 26 h). The job:
+
+1. keeps the owned price and product ids (`syncOwnership`, with `resolvePrices`);
+2. replays unfinished webhook events by their original ids;
+3. repairs subscriptions and payments through the same hooks and claims as webhooks;
+4. moves its checkpoint only when every step succeeded. A record it cannot judge (for example an adjustment without a valid date) makes the run `failed` / `incomplete`, with the counts in the result, and keeps the checkpoint.
+
+The health route reports the job under `recovery`: latest status and reason, `lastSucceededAt`, `checkpointAt` and `checkpointAgeSeconds`, next to the unresolved work (`unresolvedFailed`, `oldestPendingAt`). `paddle-kit-doctor` turns red when the job never completed or has not completed for 26 h.
+
+`lib/policy.ts`
+
+```ts
+import { billing, enforce } from '@/lib/billing';
+
+/** The only place that decides whether `userId` may use `feature`. Reads the app's own database: no Paddle call. */
+export async function canUse(userId: string | null, feature: string): Promise<boolean> {
+  if (!userId) return false;
+  // Billing not set up and not enforced (before launch): the free experience. Broken config with enforcement on: refuse.
+  if (!billing) return !enforce;
+  return billing.hasAccess(userId, feature);
+}
+```
+
+Rules for every app:
+
+- **Checkout is bound to the signed-in user on the server.** Render the checkout button from a server component and pass it the user id from your server session (`createCheckout(...).open({ userId })`), never from a form field or a URL. `custom_data` still comes back from the browser: the most a user can do is pay for someone else.
+- **Broken config never unlocks paid operations when enforcement is on** (`canUse` above). Show the problem names only on the authenticated health route.
+- **Separate sandbox and live keys.** `PADDLE_ENV=sandbox` with `test_` / `pdl_sdbx_` credentials (Vercel Preview and Development), `PADDLE_ENV=production` with `live_` / `pdl_live_` (Vercel Production only). `readBillingEnv` refuses a mix, and `recoverBilling` refuses an API key of the other environment.
+- **Business effects deduplicate by Paddle's ids, not by event ids.** A recovery replay of a payment or refund carries a new event id (`reconcile_txn_…`, `reconcile_adj_…`), so grant on `transactionId` and keep adjustments by `adjustmentId` (see One-time purchases and refunds, Example).
+
+## Resilience: the transport and the recovery job (since v0.8.0)
+
+`billingFromEnv` wires both (Standard setup). With `createBilling` directly, keep one transport per app and Paddle
+account/environment and pass it, or set `paddleFetch`:
+
+```ts
+import { createPaddleTransport } from 'paddle-kit/core';
+import { recoverBilling } from 'paddle-kit/reconcile';
+
+const paddle = createPaddleTransport();
+// getPrice(priceId, { apiKey, environment, fetch: paddle.fetch });
+const result = await recoverBilling(billing, { apiKey, fetch: paddle.fetch });
+if (result.status === 'failed') throw new Error(`Billing recovery: ${result.reason}`);
+```
+
+`createPaddleTransport` bounds each full JSON attempt to 4 seconds and the operation (including backoff) to 10 seconds.
+GETs retry at most twice on network failures, timeouts, and HTTP 408/429/500/502/503/504. Mutations are never retried
+implicitly; 401/403 and other permanent errors return immediately. `Retry-After` controls the delay; if it will not fit
+in the budget the caller gets the response and retries in a later job. Requests cannot follow redirects or leave the
+Paddle API origins. Error messages contain no credentials or original network error text.
+
+After three failed operations the circuit opens for 30 seconds. A 429 starts a provider cooldown immediately. Once
+cooldown expires, exactly one request probes Paddle: success closes the circuit; failure opens it again. `paddle.state()`
+reports `closed`, `open`, or `half_open`, failure count and retry time. This state belongs to one warm process; it is
+**not** a fleet-wide rate limit. Incoming verified webhooks and local access reads do not depend on the circuit.
+A serverless restart resets the circuit, so durable recovery and provider-side limits are still needed.
+
+`recoverBilling` uses `billing.store.recovery` (all built-in stores; custom stores may provide `opts.store`). One database
+lease prevents overlapping jobs; an expired lease can be reclaimed, and a replaced worker cannot overwrite its successor's
+checkpoint. The default job budget is 45 seconds. Call it from an authenticated cron with a function budget of at least
+60 seconds. It does not create a scheduler.
+
+The first run scans all payment history by default (`initialSince` may explicitly set a later boundary). Later runs resume
+from the last successful **start** time with an hour's overlap, including after outages longer than seven days. It retries
+unfinished original events through Paddle's documented time/type-filtered event stream, repairs subscriptions, and replays
+payments/adjustments through the same hooks/claims as webhooks. The checkpoint advances only after every phase succeeds.
+A partial result, malformed page, page limit, timeout, or remaining eligible unfinished event keeps recovery failed.
+Hook side effects remain at least once and must be idempotent. Timed-out work is aborted where the driver supports it;
+non-cancellable in-flight writes may finish, so recovery never promises exactly-once execution.
+
+Paddle retains original events for 90 days. An original event outside retention, a permanent payload problem, missing API
+permissions, or a persistent business hook failure requires human attention; recovery leaves it visible instead of dropping
+it. Recovery requires `notification.read`, `subscription.read`, `transaction.read` and `adjustment.read` API permissions.
+Health now includes durable `unresolvedFailed` and `oldestPendingAt` signals. Doctor treats unresolved failures and events
+unfinished for over five minutes as problems independently of the latest failure reason. With `staleHours`, other products'
+traffic no longer hides stale owned traffic.
+
+Built-in stores expose `applySubscription` for atomic grace transitions. A newer overdue snapshot preserves the current
+clock; a recovery clears it; a later delinquency starts a fresh clock. Older snapshots never backdate it. This deliberately
+permits extra grace when the first overdue event arrives out of order, rather than inferring an episode from stale data.
+The low-level `upsertSubscription` API is unchanged. Custom stores without `applySubscription` retain read/write behavior
+and must provide their own concurrency guarantees.
+
+
 Billing for SnaxxTech web apps that sell with **Paddle Billing** (v2, not Paddle Classic).
 
 > **Team status:** what is done, what is next and who does it → [STATUS.md](STATUS.md).
@@ -128,6 +275,7 @@ Rules:
 2. The migrations use `CREATE TABLE IF NOT EXISTS`. If your database already has a table with one of these names but a different shape, the migration does nothing. Check for tables with these names before you migrate.
 3. We never edit a migration after we ship it. A change comes as a new numbered migration.
 4. `MIGRATIONS` is the only copy. The `migrations/*.sql` files were removed in v0.4.0.
+5. **v0.8.0 adds `003_recovery` and `004_claim_tokens_owned_ids`** (new tables `paddle_recovery`, `paddle_event_leases`, `paddle_owned_ids`; nothing is altered or dropped). Run both before deploying v0.8.0: without `004` every event answers 500 `store_error` (Paddle retries, nothing is lost). `paddle_event_claims` is no longer used; drop it by hand later if you like.
 
 Timestamps are kept to the millisecond (Paddle sends microseconds). When two events for one subscription have the same millisecond, the later delivery wins.
 
@@ -460,7 +608,8 @@ The kit calls a hook after it records the event and before it marks the event `p
    - the payment is older than v0.4.0;
    - the store cannot record transactions.
 
-   **Record a `known: false` refund. Never drop it.** For example, write a resolved review row. Then your payment code can refuse a payment that was already taken back.
+   **Keep every adjustment against its transaction, `known: false` ones too. Never drop it.** Then your payment code checks it: a payment whose refund arrived first grants nothing (the Example's `adjustments` table and `settle`).
+9. **Derive what a payment grants from all its adjustments, never by counting events (v0.8.0).** Refunds and chargebacks overlap: a won chargeback must not give back credits while a separate full refund still stands. `paymentRevoked(adjustments)` says whether the payment stands taken back. Run one payment's changes one at a time (the Example locks per transaction).
 4. **`custom_data` comes from the browser, so do not trust it.** Check the order with `tx.items` (`priceId`, `quantity`). The catalog price sets the amount.
 5. **Do not compare amounts or currency with your list price.** Paddle can show a local price (EUR for a USD list price). Discounts and tax also change the amounts. Record `tx.currency`, `tx.subtotal` (before discount and tax) and `tx.total` (with tax). Amounts are strings in the lowest unit (cents).
 6. **Give the item in one database transaction.** Insert the order and give the credits together. If you insert the order first and the grant then fails, the retry sees "already done", and the customer paid for nothing.
@@ -469,17 +618,46 @@ The kit calls a hook after it records the event and before it marks the event `p
 
 ### Example
 
+A credit pack, refunds and chargebacks included. The tables (Postgres):
+
+```sql
+CREATE TABLE orders (id text PRIMARY KEY, user_id text NOT NULL, credits int NOT NULL, granted int NOT NULL DEFAULT 0,
+  currency text, total text);
+-- Every adjustment, kept against its transaction even before the payment arrives (a refund can come first).
+CREATE TABLE adjustments (id text PRIMARY KEY, transaction_id text NOT NULL, action text NOT NULL, type text,
+  status text NOT NULL, rank int NOT NULL);
+CREATE INDEX adjustments_transaction_id_idx ON adjustments (transaction_id);
+CREATE TABLE reviews (id text PRIMARY KEY, kind text NOT NULL, detail text);
+CREATE TABLE accounts (user_id text PRIMARY KEY, credits int NOT NULL CHECK (credits >= 0));
+```
+
 ```ts
-import { adjustmentEffect, type BillingConfig } from 'paddle-kit/core';
+import { adjustmentEffect, paymentRevoked, type BillingConfig } from 'paddle-kit/core';
 
 type Tx = { query(text: string, params?: unknown[]): Promise<{ rows: any[] }> };
 declare const db: { transaction<T>(fn: (q: Tx) => Promise<T>): Promise<T> };
 
 // `db` is your Postgres client with real transactions (pg, @neondatabase/serverless Pool, PGlite, ...).
-// Tables: orders(id PRIMARY KEY, user_id, credits, currency, total), applied(id PRIMARY KEY, order_id, effect),
-//         reviews(id PRIMARY KEY, kind, detail), accounts(user_id PRIMARY KEY, credits CHECK (credits >= 0)).
 const review = (q: Tx, id: string, kind: string, detail: string) =>
   q.query('INSERT INTO reviews (id, kind, detail) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [id, kind, detail]);
+
+// One payment's changes run one at a time: its payment and adjustments can arrive in any order, and at the same moment.
+const lockPayment = (q: Tx, transactionId: string) => q.query('SELECT pg_advisory_xact_lock(hashtext($1))', [transactionId]);
+
+// Grants what the order should grant now: its credits, unless an adjustment that still stands took the payment back.
+// Derived from all the adjustments, never counted event by event, so replays, reorderings and overlapping refunds
+// and chargebacks all end in the same balance.
+async function settle(q: Tx, transactionId: string) {
+  const order = (await q.query('SELECT user_id, credits, granted FROM orders WHERE id = $1', [transactionId])).rows[0];
+  if (!order) return; // not paid yet: the payment settles when it arrives
+  const adjustments = (await q.query('SELECT action, type, status FROM adjustments WHERE transaction_id = $1', [transactionId])).rows;
+  const target = paymentRevoked(adjustments) ? 0 : order.credits;
+  if (target === order.granted) return;
+  await q.query('UPDATE orders SET granted = $1 WHERE id = $2', [target, transactionId]);
+  await q.query('INSERT INTO accounts (user_id, credits) VALUES ($1, 0) ON CONFLICT DO NOTHING', [order.user_id]);
+  // Never below zero: credits already spent are gone (a person decides, e.g. from the reviews table).
+  await q.query('UPDATE accounts SET credits = GREATEST(credits + $1, 0) WHERE user_id = $2', [target - order.granted, order.user_id]);
+}
 
 export function packHooks(packPriceId: string, creditsPerUnit = 5): Pick<BillingConfig, 'onTransaction' | 'onAdjustment'> {
   return {
@@ -495,44 +673,34 @@ export function packHooks(packPriceId: string, creditsPerUnit = 5): Pick<Billing
           await review(q, `txn:${tx.transactionId}`, 'unfulfilled_order', `${tx.currency} ${tx.total}`);
           return;
         }
+        await lockPayment(q, tx.transactionId);
         const credits = creditsPerUnit * tx.items.reduce((n, i) => n + i.quantity, 0); // grant by quantity
         // The currency is recorded, not required: Paddle can localise the price (EUR for a USD list price).
         const ins = await q.query(
           'INSERT INTO orders (id, user_id, credits, currency, total) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING RETURNING id',
           [tx.transactionId, userId, credits, tx.currency, tx.total],
         );
-        if (ins.rows.length === 0) return; // replay of a transaction already fulfilled
-        await q.query(
-          'INSERT INTO accounts (user_id, credits) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET credits = accounts.credits + EXCLUDED.credits',
-          [userId, credits],
-        );
+        if (ins.rows.length === 0) return; // replay of a transaction already recorded
+        await settle(q, tx.transactionId); // a refund that arrived first is already in `adjustments`: then nothing is granted
       });
     },
     onAdjustment: async (adj) => {
       // revoke (approved full refund, chargeback) · restore (chargeback won, refund or chargeback reversed)
       // review (partial refund, chargeback warning, unknown action) · none (pending, rejected, credits)
       const effect = adjustmentEffect(adj);
-      if (effect === 'none') return;
       await db.transaction(async (q) => {
-        const order = (await q.query('SELECT id, user_id, credits FROM orders WHERE id = $1', [adj.transactionId])).rows[0];
-        if (effect === 'review' || !order) {
-          // A partial refund does not say which credits to take back; a warning may still turn into a refund: a human decides.
-          await review(q, `adj:${adj.adjustmentId}:${adj.status}`, `${adj.action}${order ? '' : '_unknown_order'}`, `${adj.currency} ${adj.total}`);
-          return;
-        }
-        if (effect === 'restore') {
-          // Give back only what was taken back: a reversed partial refund, reviewed by hand, restores nothing here.
-          const open = (await q.query(
-            "SELECT count(*) FILTER (WHERE effect = 'revoke') - count(*) FILTER (WHERE effect = 'restore') AS n FROM applied WHERE order_id = $1",
-            [order.id],
-          )).rows[0];
-          if (Number(open?.n ?? 0) <= 0) return;
-        }
-        // One row per adjustment and status: a redelivery or a reconcilePayments replay changes nothing.
-        const ins = await q.query('INSERT INTO applied (id, order_id, effect) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING RETURNING id', [`${adj.adjustmentId}:${adj.status}`, order.id, effect]);
-        if (ins.rows.length === 0) return;
-        const delta = effect === 'revoke' ? -order.credits : order.credits;
-        await q.query('UPDATE accounts SET credits = GREATEST(credits + $1, 0) WHERE user_id = $2', [delta, order.user_id]);
+        await lockPayment(q, adj.transactionId);
+        // Kept whatever the effect, even for a payment not seen yet (`ctx.known === false`). A status only moves
+        // forward (pending_approval → approved / rejected → reversed), so a late, older delivery changes nothing.
+        await q.query(
+          `INSERT INTO adjustments (id, transaction_id, action, type, status, rank)
+           VALUES ($1, $2, $3, $4, $5, CASE $5 WHEN 'pending_approval' THEN 0 WHEN 'reversed' THEN 2 ELSE 1 END)
+           ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, rank = EXCLUDED.rank WHERE adjustments.rank < EXCLUDED.rank`,
+          [adj.adjustmentId, adj.transactionId, adj.action, adj.type, adj.status],
+        );
+        // A partial refund does not say which credits to take back; a warning may still turn into a refund: a human decides.
+        if (effect === 'review') await review(q, `adj:${adj.adjustmentId}:${adj.status}`, adj.action, `${adj.currency} ${adj.total}`);
+        await settle(q, adj.transactionId);
       });
     },
   };
@@ -555,7 +723,7 @@ We ran this example against a real SQL database (PGlite), through the built pack
 - Two partial refunds did not change the balance.
 - An approved full refund took the credits back one time, and never below zero.
 
-Since v0.7.0 the example itself is a test (`tests/readme-hooks.test.ts`, on PGlite): a chargeback took the credits and a won dispute gave them back one time; a refund that was approved and then reversed took them and gave them back; a give-back with nothing taken back gave nothing; redeliveries changed nothing; a partial refund, a chargeback warning and an unknown order became review rows. Not yet seen from real Paddle: a chargeback, its reversal, or a reversed refund.
+The example itself is a test (`tests/readme-hooks.test.ts`, on PGlite): the test reads the SQL and TypeScript blocks above out of this file and runs them as written. Since v0.8.0 it also covers the two cases the v0.7 example got wrong: a full refund that arrived **before** its payment (the payment now grants nothing), and a won chargeback while a separate full refund still stands (nothing is given back). A chargeback took the credits and a won dispute gave them back one time; a refund that was approved and then reversed took them and gave them back; a give-back with nothing taken back gave nothing; redeliveries and older, late statuses changed nothing; a partial refund and a chargeback warning became review rows. Not yet seen from real Paddle: a chargeback, its reversal, or a reversed refund.
 
 ### Refunds, chargebacks and reversals (`adjustmentEffect`, since v0.7.0)
 
@@ -964,13 +1132,10 @@ Do these steps one time for each app: first in sandbox, then again for live.
     - Run the CLI with `--live` and a **separate env file** (`--env-file .env.production.local`, never the dev `.env.local`). Then a live key and a `test_` token cannot be in one file.
     - Use `PADDLE_ENV=production` and a `live_` client token.
 
-## Known issues (still open in v0.7.0)
+## Known limitations
 
-- **The past_due grace period can move.** The kit calculates the grace start from the stored row.
-  - Two `past_due` events at the same time can make the grace longer, by the time between them.
-  - A lost or late recovery event can join two `past_due` periods into one. Then the grace ends too early, and the customer loses access.
-  - `reconcile` does **not** correct this, because it keeps the stored value.
-  - Fix it by hand: `UPDATE paddle_subscriptions SET past_due_since = '<first past_due time>' WHERE subscription_id = '<sub_id>'`. Or wait until the subscription is no longer `past_due`.
+- **Grace depends on seeing recovery transitions.** Built-in stores now apply the grace transition atomically and ignore stale overdue events. If an entire recovery transition was never observed before another delinquency, a current snapshot alone cannot reconstruct the intervening episode. Review provider history when that happens. Custom stores without `applySubscription` also need their own atomic transition implementation.
+  A current snapshot repairs the current status, but cannot prove the history of missed episodes. Inspect provider history before correcting that clock manually.
 - **Health does not count stored failures per reason.** `failedLast24h` is one total, and health shows only the last reason. (`unverified.byReason` does count refusals per reason, per instance.)
 - **`unverified` is per instance and resets on restart.** On a serverless host, health may be answered by an instance that saw none of the refused requests. Judge a wrong secret by `lastEventAt`, not by `unverified`.
 

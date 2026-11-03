@@ -60,4 +60,37 @@ CREATE TABLE IF NOT EXISTS paddle_transactions (
 );
 `,
   },
+  {
+    name: '003_recovery',
+    sql: `CREATE TABLE IF NOT EXISTS paddle_recovery (
+  name text PRIMARY KEY,
+  run_id text NOT NULL,
+  status text NOT NULL,
+  started_at timestamptz NOT NULL,
+  finished_at timestamptz,
+  last_succeeded_at timestamptz,
+  checkpoint_at timestamptz,
+  lease_until timestamptz,
+  reason text
+);
+CREATE INDEX IF NOT EXISTS paddle_events_unfinished_idx ON paddle_events (received_at)
+  WHERE status IN ('received', 'failed');
+`,
+  },
+  {
+    name: '004_claim_tokens_owned_ids',
+    // A new claims table instead of ALTER TABLE: migrations stay CREATE-only. paddle_event_claims is no longer used.
+    sql: `CREATE TABLE IF NOT EXISTS paddle_event_leases (
+  event_id text PRIMARY KEY,
+  claimed_at timestamptz NOT NULL,
+  claim_token text
+);
+
+CREATE TABLE IF NOT EXISTS paddle_owned_ids (
+  id text PRIMARY KEY,
+  kind text NOT NULL,
+  first_seen_at timestamptz NOT NULL
+);
+`,
+  },
 ];

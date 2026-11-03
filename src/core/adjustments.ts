@@ -32,3 +32,16 @@ export function adjustmentEffect(adj: Pick<Adjustment, 'action' | 'status' | 'ty
       return 'review';
   }
 }
+
+/**
+ * Whether a payment stands taken back, judged from EVERY adjustment of its transaction in its latest status: an
+ * approved full refund, or more approved chargebacks than approved chargeback reversals. A reversed refund or
+ * chargeback no longer counts; a partial refund never does (a person reviews it). Keep each adjustment against its
+ * transaction (keyed on `adjustmentId`, even before the payment arrives) and grant what the payment bought only while
+ * this is false: deduplicating events cannot do it, because a replay of the same adjustment has another event id.
+ */
+export function paymentRevoked(adjustments: ReadonlyArray<Pick<Adjustment, 'action' | 'status' | 'type'>>): boolean {
+  const approved = adjustments.filter((a) => a.status === 'approved');
+  const count = (action: string) => approved.filter((a) => a.action === action).length;
+  return approved.some((a) => a.action === 'refund' && a.type === 'full') || count('chargeback') > count('chargeback_reverse');
+}

@@ -3,6 +3,7 @@ import { createWebhookHandler, report, timedStore, unverifiedCounter, within, ty
 import { isOwnsResolver, ownershipPredicate } from './owns';
 import { safeEqual } from './signature';
 import { version as kitVersion } from '../../package.json';
+import type { FetchLike } from './paddle-api';
 import type { Adjustment, AdjustmentContext, CheckResult, ErrorContext, HealthReport, HookContext, Logger, Owns, Store, Transaction } from './types';
 
 export interface BillingConfig {
@@ -55,6 +56,17 @@ export interface BillingConfig {
    * a failed lookup answers 503 `prices_unavailable` instead of marking anything `not_ours`.
    */
   owns?: Owns;
+  /**
+   * Since v0.8.0: the catalog CLI's `app` label (`billingFromEnv` sets it with `resolvePrices`). `recoverBilling` then
+   * first runs `syncOwnership`, keeping every price and product of the app (archived ones too) in the store.
+   */
+  catalogApp?: string;
+  /**
+   * Since v0.8.0: the fetch `reconcile`, `reconcilePayments` and `recoverBilling` use for the Paddle API when the call
+   * passes none. `billingFromEnv` sets a resilient transport (`createPaddleTransport`): bounded GET retries, backoff,
+   * Retry-After and a circuit breaker. Unset: plain `fetch`.
+   */
+  paddleFetch?: FetchLike;
   /**
    * Largest webhook body read, in bytes; a bigger one gets 413 `body_too_large` and is not read past the cap.
    * Default 4 MB (`MAX_WEBHOOK_BODY_BYTES`), just under Vercel's request limit. Paddle events are a few KB plus ~2 KB per
@@ -161,7 +173,15 @@ export function createBilling(config: BillingConfig): Billing {
         ? Promise.all(Object.entries(config.healthChecks).map(async ([name, check]) => [name, await runCheck(name, check)] as const))
         : null;
       try {
-        const body: HealthReport = { ...(await store.health(now())), kitVersion, environment: config.environment, unverified: unverified.stats() };
+        const at = now();
+        const body: HealthReport = { ...(await store.health(at)), kitVersion, environment: config.environment, unverified: unverified.stats() };
+        if (store.recovery) {
+          const r = await within(store.recovery.getRecovery(config.environment), config.storeTimeoutMs, 'store.recovery.getRecovery');
+          body.recovery = r && {
+            name: r.name, status: r.status, reason: r.reason, lastSucceededAt: r.lastSucceededAt, checkpointAt: r.checkpointAt,
+            checkpointAgeSeconds: r.checkpointAt ? Math.max(0, Math.floor((at.getTime() - Date.parse(r.checkpointAt)) / 1000)) : null,
+          };
+        }
         if (checks) body.checks = Object.fromEntries(await checks);
         return Response.json(body);
       } catch (error) {

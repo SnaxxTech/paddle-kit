@@ -1,76 +1,23 @@
 import { PGlite } from '@electric-sql/pglite';
 import { describe, expect, it } from 'vitest';
-import { adjustmentEffect, type BillingConfig } from '../src/core';
-import type { Adjustment, Transaction } from '../src/core/types';
+import * as core from '../src/core';
+import type { Adjustment, Transaction } from '../src/core';
+import { readmePackHooks, readmeSql, type Tx } from './helpers/readme-example';
 
-// The README's "One-time purchases and refunds" example, verbatim apart from `db`, run against real SQL (PGlite).
-type Tx = { query(text: string, params?: unknown[]): Promise<{ rows: any[] }> };
+// The README's "One-time purchases and refunds" example, read out of README.md and run as written on real SQL (PGlite).
 async function setup() {
   const pg = new PGlite();
-  await pg.exec(`CREATE TABLE orders (id text PRIMARY KEY, user_id text, credits int, currency text, total text);
-    CREATE TABLE applied (id text PRIMARY KEY, order_id text, effect text);
-    CREATE TABLE reviews (id text PRIMARY KEY, kind text, detail text);
-    CREATE TABLE accounts (user_id text PRIMARY KEY, credits int CHECK (credits >= 0));`);
+  await pg.exec(readmeSql);
   const db = { transaction: <T>(fn: (q: Tx) => Promise<T>) => pg.transaction((t) => fn(t as unknown as Tx)) };
-  const review = (q: Tx, id: string, kind: string, detail: string) =>
-    q.query('INSERT INTO reviews (id, kind, detail) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [id, kind, detail]);
-
-  function packHooks(packPriceId: string, creditsPerUnit = 5): Pick<BillingConfig, 'onTransaction' | 'onAdjustment'> {
-    return {
-      onTransaction: async (tx) => {
-        if (tx.subscriptionId !== null) return;
-        const userId = tx.customData?.userId;
-        const known = tx.items.length > 0 && tx.items.every((i) => i.priceId === packPriceId);
-        await db.transaction(async (q) => {
-          if (typeof userId !== 'string' || !known) {
-            await review(q, `txn:${tx.transactionId}`, 'unfulfilled_order', `${tx.currency} ${tx.total}`);
-            return;
-          }
-          const credits = creditsPerUnit * tx.items.reduce((n, i) => n + i.quantity, 0);
-          const ins = await q.query(
-            'INSERT INTO orders (id, user_id, credits, currency, total) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING RETURNING id',
-            [tx.transactionId, userId, credits, tx.currency, tx.total],
-          );
-          if (ins.rows.length === 0) return;
-          await q.query(
-            'INSERT INTO accounts (user_id, credits) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET credits = accounts.credits + EXCLUDED.credits',
-            [userId, credits],
-          );
-        });
-      },
-      onAdjustment: async (adj) => {
-        const effect = adjustmentEffect(adj);
-        if (effect === 'none') return;
-        await db.transaction(async (q) => {
-          const order = (await q.query('SELECT id, user_id, credits FROM orders WHERE id = $1', [adj.transactionId])).rows[0];
-          if (effect === 'review' || !order) {
-            await review(q, `adj:${adj.adjustmentId}:${adj.status}`, `${adj.action}${order ? '' : '_unknown_order'}`, `${adj.currency} ${adj.total}`);
-            return;
-          }
-          if (effect === 'restore') {
-            const open = (await q.query(
-              "SELECT count(*) FILTER (WHERE effect = 'revoke') - count(*) FILTER (WHERE effect = 'restore') AS n FROM applied WHERE order_id = $1",
-              [order.id],
-            )).rows[0];
-            if (Number(open?.n ?? 0) <= 0) return;
-          }
-          const ins = await q.query('INSERT INTO applied (id, order_id, effect) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING RETURNING id', [`${adj.adjustmentId}:${adj.status}`, order.id, effect]);
-          if (ins.rows.length === 0) return;
-          const delta = effect === 'revoke' ? -order.credits : order.credits;
-          await q.query('UPDATE accounts SET credits = GREATEST(credits + $1, 0) WHERE user_id = $2', [delta, order.user_id]);
-        });
-      },
-    };
-  }
-  const hooks = packHooks('pri_pack');
+  const hooks = readmePackHooks(db)('pri_pack');
   const ctx = { eventId: 'e', eventType: 't', store: {} as any, known: true };
   const pay = (id: string, quantity = 1) =>
     hooks.onTransaction!({ transactionId: id, status: 'completed', customerId: null, subscriptionId: null, customData: { userId: 'u1' }, items: [{ priceId: 'pri_pack', productId: null, quantity }], currency: 'USD', total: '1500', subtotal: '1500', occurredAt: '', raw: {} } as Transaction, ctx);
   const adjust = (adjustmentId: string, transactionId: string, action: string, status: string, type: 'full' | 'partial' = 'full') =>
     hooks.onAdjustment!({ adjustmentId, transactionId, action, status, type, subscriptionId: null, customerId: null, currency: 'USD', total: '1500', subtotal: '1500', occurredAt: '', raw: {} } as Adjustment, ctx);
-  const credits = async () => (await pg.query<{ credits: number }>('SELECT credits FROM accounts WHERE user_id = $1', ['u1'])).rows[0]?.credits;
+  const credits = async () => (await pg.query<{ credits: number }>('SELECT credits FROM accounts WHERE user_id = $1', ['u1'])).rows[0]?.credits ?? 0;
   const reviews = async () => (await pg.query<{ kind: string }>('SELECT kind FROM reviews ORDER BY id')).rows.map((r) => r.kind);
-  return { pay, adjust, credits, reviews };
+  return { pg, pay, adjust, credits, reviews };
 }
 
 describe('README hooks example on real SQL', () => {
@@ -99,13 +46,59 @@ describe('README hooks example on real SQL', () => {
     expect(await t.credits()).toBe(5);
   });
 
-  it('partial refund, chargeback warning and an unknown order go to review; credits never go below zero', async () => {
+  it('partial refund and chargeback warning go to review; credits never go below zero', async () => {
     const t = await setup();
     await t.pay('txn_1');
     await t.adjust('adj_p', 'txn_1', 'refund', 'approved', 'partial');
     await t.adjust('adj_w', 'txn_1', 'chargeback_warning', 'approved');
-    await t.adjust('adj_u', 'txn_unknown', 'refund', 'approved');
     expect(await t.credits()).toBe(5);
-    expect((await t.reviews()).sort()).toEqual(['chargeback_warning', 'refund', 'refund_unknown_order']);
+    expect((await t.reviews()).sort()).toEqual(['chargeback_warning', 'refund']);
+    await t.pg.query(`UPDATE accounts SET credits = 2 WHERE user_id = 'u1'`); // 3 credits spent
+    await t.adjust('adj_r', 'txn_1', 'refund', 'approved');
+    expect(await t.credits()).toBe(0);
+  });
+
+  it('a refund that arrived before its payment: the payment grants nothing, and is kept against the transaction', async () => {
+    const t = await setup();
+    await t.adjust('adj_r', 'txn_1', 'refund', 'approved');
+    await t.pay('txn_1');
+    await t.pay('txn_1'); // replay
+    expect(await t.credits()).toBe(0);
+    expect((await t.pg.query('SELECT granted FROM orders')).rows).toEqual([{ granted: 0 }]);
+    await t.adjust('adj_r', 'txn_1', 'refund', 'reversed'); // and a refund reversed later still gives them
+    expect(await t.credits()).toBe(5);
+  });
+
+  it('a won chargeback restores nothing while a separate full refund still stands', async () => {
+    const t = await setup();
+    await t.pay('txn_1');
+    await t.adjust('adj_r', 'txn_1', 'refund', 'approved');
+    await t.adjust('adj_cb', 'txn_1', 'chargeback', 'approved');
+    await t.adjust('adj_cbr', 'txn_1', 'chargeback_reverse', 'approved');
+    expect(await t.credits()).toBe(0);
+    await t.adjust('adj_r', 'txn_1', 'refund', 'reversed'); // the refund undone too: now nothing takes it back
+    expect(await t.credits()).toBe(5);
+  });
+
+  it('an older status delivered late changes nothing', async () => {
+    const t = await setup();
+    await t.pay('txn_1');
+    await t.adjust('adj_r', 'txn_1', 'refund', 'reversed');
+    await t.adjust('adj_r', 'txn_1', 'refund', 'approved'); // late redelivery of the earlier status
+    expect(await t.credits()).toBe(5);
+  });
+
+});
+
+describe('paymentRevoked', () => {
+  const a = (action: string, status: string, type: 'full' | 'partial' | null = 'full') => ({ action, status, type });
+  it('counts what still stands', () => {
+    expect(core.paymentRevoked([])).toBe(false);
+    expect(core.paymentRevoked([a('refund', 'approved')])).toBe(true);
+    expect(core.paymentRevoked([a('refund', 'approved', 'partial')])).toBe(false);
+    expect(core.paymentRevoked([a('refund', 'pending_approval'), a('refund', 'rejected'), a('refund', 'reversed')])).toBe(false);
+    expect(core.paymentRevoked([a('chargeback', 'approved', null), a('chargeback_reverse', 'approved', null)])).toBe(false);
+    expect(core.paymentRevoked([a('chargeback', 'approved', null), a('chargeback', 'approved', null), a('chargeback_reverse', 'approved', null)])).toBe(true);
+    expect(core.paymentRevoked([a('refund', 'approved'), a('chargeback', 'approved', null), a('chargeback_reverse', 'approved', null)])).toBe(true);
   });
 });

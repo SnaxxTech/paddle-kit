@@ -52,7 +52,7 @@ describe('webhook handler', () => {
   it('acks a duplicate without reprocessing', async () => {
     const body = JSON.stringify(subscriptionEvent({ eventId: 'evt_dup' }));
     await handle(post(body));
-    const spy = vi.spyOn(store, 'upsertSubscription');
+    const spy = vi.spyOn(store, 'applySubscription');
     const res = await handle(post(body));
     expect(res.status).toBe(200);
     expect(spy).not.toHaveBeenCalled();
@@ -81,12 +81,12 @@ describe('webhook handler', () => {
     expect((await store.getSubscription(id))?.pastDueSince).toBe('2026-10-10T00:00:00Z');
   });
 
-  it('keeps the earliest past_due start when events arrive out of order', async () => {
+  it('leaves the grace clock unchanged when an older past_due event arrives', async () => {
     const id = loadFixture('subscription.created').data.id;
     await handle(post(JSON.stringify(subscriptionEvent({ eventId: 'o1', eventType: 'subscription.updated', occurredAt: '2026-10-12T00:00:00Z', data: { status: 'past_due' } }))));
     await handle(post(JSON.stringify(subscriptionEvent({ eventId: 'o2', eventType: 'subscription.past_due', occurredAt: '2026-10-10T00:00:00Z', data: { status: 'past_due' } }))));
     const sub = await store.getSubscription(id);
-    expect(sub?.pastDueSince).toBe('2026-10-10T00:00:00Z');
+    expect(sub?.pastDueSince).toBe('2026-10-12T00:00:00Z');
     expect(sub?.status).toBe('past_due');
   });
 
@@ -163,8 +163,8 @@ describe('webhook handler', () => {
     });
 
     it('store failure → 500, event marked failed, retry succeeds', async () => {
-      const real = store.upsertSubscription.bind(store);
-      const spy = vi.spyOn(store, 'upsertSubscription').mockRejectedValueOnce(new Error('connection reset'));
+      const real = store.applySubscription!.bind(store);
+      const spy = vi.spyOn(store, 'applySubscription').mockRejectedValueOnce(new Error('connection reset'));
       expect((await handle(post(body))).status).toBe(500);
       expect((await store.health(NOW)).lastFailureReason).toBe('store_error');
       expect((await store.health(NOW)).failedLast24h).toBe(1);
@@ -331,11 +331,11 @@ describe('webhook handler', () => {
 
     it('without hooks a transaction.completed is processed (v0.2 behaviour: no state change)', async () => {
       const raw = loadFixture('transaction.completed');
-      const spies = [vi.spyOn(store, 'upsertSubscription'), vi.spyOn(store, 'upsertCustomer')];
+      const spies = [vi.spyOn(store, 'applySubscription'), vi.spyOn(store, 'upsertCustomer')];
       const markEvent = vi.spyOn(store, 'markEvent');
       const res = await handle(post(txBody()));
       expect(res.status).toBe(200);
-      expect(markEvent).toHaveBeenCalledWith(raw.event_id, 'processed', null);
+      expect(markEvent).toHaveBeenCalledWith(raw.event_id, 'processed', null, expect.any(String));
       for (const spy of spies) expect(spy).not.toHaveBeenCalled();
       expect(await store.getSubscription(raw.data.subscription_id)).toBeNull();
       expect((await store.health(NOW)).failedLast24h).toBe(0);

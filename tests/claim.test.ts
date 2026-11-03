@@ -69,4 +69,43 @@ describe('event claim (concurrent duplicate deliveries)', () => {
     expect((await handle(post(body))).status).toBe(200);
     expect(calls).toBe(2);
   });
+
+  it('an expired attempt that fails late cannot hand the event to a third delivery while its replacement runs', async () => {
+    const store = memoryStore();
+    let now = NOW;
+    let running = 0;
+    let maxRunning = 0;
+    const gates: Array<{ release: (fail: boolean) => void }> = [];
+    const handle = createWebhookHandler({
+      store, secret: SECRET, toleranceSeconds: 5, log: () => {}, now: () => now, leaseSeconds: 60,
+      onTransaction: () => {
+        running++;
+        maxRunning = Math.max(maxRunning, running);
+        return new Promise<void>((resolve, reject) => gates.push({ release: (fail) => { running--; if (fail) reject(new Error('late failure')); else resolve(); } }));
+      },
+    });
+    const raw = loadFixture('transaction.completed');
+    const deliver = () => {
+      const body = JSON.stringify(raw);
+      return handle(new Request('https://app.test/api/paddle', { method: 'POST', headers: { 'paddle-signature': sign(body, SECRET, Math.floor(now.getTime() / 1000)) }, body }));
+    };
+    const until = async (n: number) => { for (let i = 0; i < 400 && gates.length < n; i++) await tick(); };
+    const a = deliver();
+    await until(1);
+    now = new Date(NOW.getTime() + 61_000); // A's lease expired
+    const b = deliver();
+    await until(2);
+    expect(gates).toHaveLength(2);
+    gates[0]!.release(true); // A fails late
+    expect((await a).status).toBe(500);
+    const c = deliver(); // B still runs: C must wait, not start a third run
+    await Promise.race([c, until(3)]);
+    expect(gates).toHaveLength(2);
+    expect((await c).status).toBe(409);
+    expect(maxRunning).toBe(2);
+    gates[1]!.release(false);
+    expect((await b).status).toBe(200);
+    expect(await (await deliver()).json()).toEqual({ received: true, duplicate: true });
+  });
 });
+

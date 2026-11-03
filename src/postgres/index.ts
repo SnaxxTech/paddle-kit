@@ -1,4 +1,4 @@
-import type { EventStatus, Health, ReasonCode, Store, Subscription } from '../core/types';
+import type { EventStatus, Health, ReasonCode, Store, Subscription, RecoveryState } from '../core/types';
 
 export { MIGRATIONS } from './migrations';
 
@@ -30,7 +30,68 @@ function toSubscription(r: Record<string, unknown>): Subscription {
 }
 
 export function postgresStore({ query }: { query: SqlQuery }): Store {
+  async function writeSubscription(s: Subscription, deriveGrace = false) {
+    const { rows } = await query(
+      `INSERT INTO paddle_subscriptions
+         (subscription_id, customer_id, user_id, status, price_ids, current_period_end, scheduled_change,
+          canceled_at, past_due_since, last_event_at, raw)
+       VALUES ($1, $2, $3, $4, $5::jsonb, ${ms(6)}, $7::jsonb, ${ms(8)}, ${ms(9)}, ${ms(10)}, $11::jsonb)
+       ON CONFLICT (subscription_id) DO UPDATE SET
+         customer_id = EXCLUDED.customer_id,
+         user_id = COALESCE(EXCLUDED.user_id, paddle_subscriptions.user_id),
+         status = EXCLUDED.status,
+         price_ids = EXCLUDED.price_ids,
+         current_period_end = EXCLUDED.current_period_end,
+         scheduled_change = EXCLUDED.scheduled_change,
+         canceled_at = EXCLUDED.canceled_at,
+         past_due_since = CASE WHEN $12::boolean THEN
+           CASE WHEN EXCLUDED.status <> 'past_due' THEN NULL
+             WHEN paddle_subscriptions.status = 'past_due' THEN COALESCE(paddle_subscriptions.past_due_since, EXCLUDED.last_event_at)
+             ELSE EXCLUDED.last_event_at END
+           ELSE EXCLUDED.past_due_since END,
+         last_event_at = EXCLUDED.last_event_at,
+         raw = EXCLUDED.raw,
+         updated_at = now()
+       WHERE paddle_subscriptions.last_event_at <= EXCLUDED.last_event_at
+       RETURNING subscription_id`,
+      [
+        s.subscriptionId, s.customerId, s.userId, s.status, jsonParam(s.priceIds), s.currentPeriodEnd,
+        jsonParam(s.scheduledChange), s.canceledAt, s.pastDueSince, s.lastEventAt, jsonParam(s.raw ?? {}), deriveGrace,
+      ],
+    );
+    return { applied: rows.length > 0 };
+  }
   return {
+    recovery: {
+      async getRecovery(name) {
+        const { rows: [r] } = await query('SELECT * FROM paddle_recovery WHERE name = $1', [name]);
+        return r ? { name: r.name as string, runId: r.run_id as string, status: r.status as RecoveryState['status'],
+          startedAt: iso(r.started_at)!, finishedAt: iso(r.finished_at), lastSucceededAt: iso(r.last_succeeded_at),
+          checkpointAt: iso(r.checkpoint_at), leaseUntil: iso(r.lease_until), reason: r.reason as RecoveryState['reason'] } : null;
+      },
+      async claimRecovery(e) {
+        const { rows } = await query(`INSERT INTO paddle_recovery (name, run_id, status, started_at, lease_until)
+          VALUES ($1, $2, 'running', ${ms(3)}, ${ms(4)})
+          ON CONFLICT (name) DO UPDATE SET run_id = EXCLUDED.run_id, status = 'running', started_at = EXCLUDED.started_at,
+            lease_until = EXCLUDED.lease_until, finished_at = NULL, reason = NULL
+          WHERE paddle_recovery.lease_until IS NULL OR paddle_recovery.lease_until <= EXCLUDED.started_at
+          RETURNING name`, [e.name, e.runId, e.startedAt, e.leaseUntil]);
+        return rows.length > 0;
+      },
+      async finishRecovery(e) {
+        const { rows } = await query(`UPDATE paddle_recovery SET status = $3, finished_at = ${ms(4)}, lease_until = NULL, reason = $5,
+          last_succeeded_at = CASE WHEN $3 = 'succeeded' THEN ${ms(4)} ELSE last_succeeded_at END,
+          checkpoint_at = CASE WHEN $3 = 'succeeded' THEN started_at ELSE checkpoint_at END
+          WHERE name = $1 AND run_id = $2 AND status = 'running' RETURNING name`, [e.name, e.runId, e.status, e.finishedAt, e.reason]);
+        return rows.length > 0;
+      },
+      async getPendingEvents(e) {
+        const { rows } = await query(`SELECT e.event_id, e.event_type, e.occurred_at FROM paddle_events e WHERE e.status IN ('received','failed')
+          AND e.received_at <= $1 AND NOT EXISTS (SELECT 1 FROM paddle_event_leases c WHERE c.event_id = e.event_id AND c.claimed_at > $1)
+          ORDER BY e.received_at, e.event_id LIMIT $2`, [e.before, e.limit]);
+        return rows.map(r => ({ eventId: r.event_id as string, eventType: r.event_type as string, occurredAt: iso(r.occurred_at)! }));
+      },
+    },
     async recordEvent(e) {
       const { rows } = await query(
         `INSERT INTO paddle_events (event_id, event_type, occurred_at, received_at, status)
@@ -44,24 +105,36 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
       // The claim row is separate from the ledger row, so a retry never hides a failed event from health.
       // A concurrent claimer blocks on the row lock, then re-checks the WHERE against the winner's committed claim.
       const claim = await query(
-        `INSERT INTO paddle_event_claims (event_id, claimed_at) VALUES ($1, ${ms(2)})
-         ON CONFLICT (event_id) DO UPDATE SET claimed_at = EXCLUDED.claimed_at
-           WHERE paddle_event_claims.claimed_at < $3::timestamptz
+        `INSERT INTO paddle_event_leases (event_id, claimed_at, claim_token) VALUES ($1, ${ms(2)}, $4)
+         ON CONFLICT (event_id) DO UPDATE SET claimed_at = EXCLUDED.claimed_at, claim_token = EXCLUDED.claim_token
+           WHERE paddle_event_leases.claimed_at < $3::timestamptz
          RETURNING event_id`,
-        [e.eventId, e.receivedAt, e.leaseExpiredBefore],
+        [e.eventId, e.receivedAt, e.leaseExpiredBefore, e.claimToken ?? null],
       );
       if (claim.rows.length === 0) return { alreadyDone: false, inProgress: true };
       // markEvent writes the status before it releases the claim: a claim won just after a release sees the status.
       const { rows: [now] } = await query(`SELECT status FROM paddle_events WHERE event_id = $1`, [e.eventId]);
       if (isDone(now?.status)) {
-        await query(`DELETE FROM paddle_event_claims WHERE event_id = $1`, [e.eventId]);
+        await query(`DELETE FROM paddle_event_leases WHERE event_id = $1`, [e.eventId]);
         return { alreadyDone: true };
       }
       return { alreadyDone: false };
     },
-    async markEvent(eventId, status, reason) {
-      await query(`UPDATE paddle_events SET status = $2, reason = $3 WHERE event_id = $1`, [eventId, status, reason]);
-      await query(`DELETE FROM paddle_event_claims WHERE event_id = $1`, [eventId]);
+    async markEvent(eventId, status, reason, claimToken) {
+      if (claimToken === undefined) {
+        await query(`UPDATE paddle_events SET status = $2, reason = $3 WHERE event_id = $1`, [eventId, status, reason]);
+        await query(`DELETE FROM paddle_event_leases WHERE event_id = $1`, [eventId]);
+        return;
+      }
+      // One statement: the claim is released and the status written only while this token still owns the claim. A
+      // takeover in between (its UPDATE of the claim row) either commits first, so nothing matches here, or waits on
+      // the row lock until this commits and then finds the row gone and the status written.
+      const { rows } = await query(
+        `WITH released AS (DELETE FROM paddle_event_leases WHERE event_id = $1 AND claim_token = $4 RETURNING event_id)
+         UPDATE paddle_events SET status = $2, reason = $3 WHERE event_id = (SELECT event_id FROM released) RETURNING event_id`,
+        [eventId, status, reason, claimToken],
+      );
+      return rows.length > 0;
     },
     async recordFailure(reason, at) {
       await query(
@@ -83,33 +156,8 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
       );
       return { applied: rows.length > 0 };
     },
-    async upsertSubscription(s) {
-      const { rows } = await query(
-        `INSERT INTO paddle_subscriptions
-           (subscription_id, customer_id, user_id, status, price_ids, current_period_end, scheduled_change,
-            canceled_at, past_due_since, last_event_at, raw)
-         VALUES ($1, $2, $3, $4, $5::jsonb, ${ms(6)}, $7::jsonb, ${ms(8)}, ${ms(9)}, ${ms(10)}, $11::jsonb)
-         ON CONFLICT (subscription_id) DO UPDATE SET
-           customer_id = EXCLUDED.customer_id,
-           user_id = COALESCE(EXCLUDED.user_id, paddle_subscriptions.user_id),
-           status = EXCLUDED.status,
-           price_ids = EXCLUDED.price_ids,
-           current_period_end = EXCLUDED.current_period_end,
-           scheduled_change = EXCLUDED.scheduled_change,
-           canceled_at = EXCLUDED.canceled_at,
-           past_due_since = EXCLUDED.past_due_since,
-           last_event_at = EXCLUDED.last_event_at,
-           raw = EXCLUDED.raw,
-           updated_at = now()
-         WHERE paddle_subscriptions.last_event_at <= EXCLUDED.last_event_at
-         RETURNING subscription_id`,
-        [
-          s.subscriptionId, s.customerId, s.userId, s.status, jsonParam(s.priceIds), s.currentPeriodEnd,
-          jsonParam(s.scheduledChange), s.canceledAt, s.pastDueSince, s.lastEventAt, jsonParam(s.raw ?? {}),
-        ],
-      );
-      return { applied: rows.length > 0 };
-    },
+    upsertSubscription: writeSubscription,
+    applySubscription: s => writeSubscription({ ...s, pastDueSince: s.status === 'past_due' ? s.lastEventAt : null }, true),
     async recordTransaction(t) {
       await query(
         `INSERT INTO paddle_transactions (transaction_id, owned, subscription_id, customer_id, occurred_at, received_at)
@@ -117,6 +165,23 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
          ON CONFLICT (transaction_id) DO UPDATE SET owned = paddle_transactions.owned OR EXCLUDED.owned`,
         [t.transactionId, t.owned, t.subscriptionId, t.customerId, t.occurredAt, t.receivedAt],
       );
+    },
+    async addOwnedIds(ids, at) {
+      const rows = [...ids.priceIds.map((id) => ({ id, kind: 'price' })), ...ids.productIds.map((id) => ({ id, kind: 'product' }))];
+      if (rows.length === 0) return;
+      await query(
+        `INSERT INTO paddle_owned_ids (id, kind, first_seen_at)
+         SELECT x.id, x.kind, ${ms(2)} FROM jsonb_to_recordset($1::jsonb) AS x(id text, kind text)
+         ON CONFLICT (id) DO NOTHING`,
+        [jsonParam(rows), at],
+      );
+    },
+    async getOwnedIds() {
+      const { rows } = await query(`SELECT id, kind FROM paddle_owned_ids ORDER BY id`);
+      return {
+        priceIds: rows.filter((r) => r.kind === 'price').map((r) => r.id as string),
+        productIds: rows.filter((r) => r.kind === 'product').map((r) => r.id as string),
+      };
     },
     async getTransaction(id) {
       const { rows } = await query(`SELECT transaction_id, owned FROM paddle_transactions WHERE transaction_id = $1`, [id]);
@@ -140,7 +205,9 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
            (SELECT coalesce(sum(hits), 0)::int FROM paddle_failures WHERE last_at > $1 AND last_at <= $2) AS failed_requests,
            (SELECT count(*)::int FROM paddle_events WHERE reason = 'no_user_id' AND received_at > $1 AND received_at <= $2) AS unlinked,
            (SELECT max(received_at) FROM paddle_events WHERE status = 'processed' AND (reason IS NULL OR reason = 'no_user_id')) AS last_owned_at,
-           (SELECT count(*)::int FROM paddle_events WHERE reason = 'not_ours' AND received_at > $1 AND received_at <= $2) AS not_ours`,
+           (SELECT count(*)::int FROM paddle_events WHERE reason = 'not_ours' AND received_at > $1 AND received_at <= $2) AS not_ours,
+           (SELECT count(*)::int FROM paddle_events WHERE status = 'failed') AS unresolved_failed,
+           (SELECT min(received_at) FROM paddle_events WHERE status = 'received') AS oldest_pending`,
         [since, until],
       );
       const { rows: [last] } = await query(
@@ -152,6 +219,8 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
       );
       return {
         lastEventAt: iso(agg?.last_event_at),
+        unresolvedFailed: Number(agg?.unresolved_failed ?? 0),
+        oldestPendingAt: iso(agg?.oldest_pending),
         lastFailureAt: iso(last?.at),
         lastFailureReason: (last?.reason as ReasonCode | undefined) ?? null,
         failedLast24h: Number(agg?.failed_events ?? 0) + Number(agg?.failed_requests ?? 0),

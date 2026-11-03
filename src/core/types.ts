@@ -118,6 +118,11 @@ export interface OwnedIds {
   priceIds?: readonly string[];
   productIds?: readonly string[];
 }
+/** Owned ids as the store keeps them: both lists always present, sorted. */
+export interface OwnedIdSet {
+  priceIds: string[];
+  productIds: string[];
+}
 export type OwnsPredicate = (x: { kind: 'subscription' | 'transaction'; items: LineItem[]; customData: Record<string, unknown> | null }) => boolean;
 /**
  * `owns` found at run time (`readBillingEnv` with `resolvePrices`, since v0.7.0): owned ids, or a predicate built from
@@ -159,6 +164,30 @@ export interface Health {
   lastOwnedAt?: string | null;
   /** Events acked as `not_ours` in the last 24 hours. Normal on a shared seller account; alert only together with an old `lastOwnedAt`. */
   notOursLast24h?: number;
+  /** Unresolved event failures, including ones older than the provider's retry window. */
+  unresolvedFailed?: number;
+  oldestPendingAt?: string | null;
+}
+
+export type RecoveryFailureReason = 'incomplete' | 'timeout' | 'recovery_error' | 'api_error' | 'network' | 'circuit_open';
+
+export interface RecoveryState {
+  name: string;
+  runId: string;
+  status: 'running' | 'succeeded' | 'failed';
+  startedAt: string;
+  finishedAt: string | null;
+  lastSucceededAt: string | null;
+  checkpointAt: string | null;
+  leaseUntil: string | null;
+  reason: RecoveryFailureReason | null;
+}
+
+export interface RecoveryStore {
+  getRecovery(name: string): Promise<RecoveryState | null>;
+  claimRecovery(input: { name: string; runId: string; startedAt: string; leaseUntil: string }): Promise<boolean>;
+  finishRecovery(input: { name: string; runId: string; finishedAt: string; status: 'succeeded' | 'failed'; reason: RecoveryFailureReason | null }): Promise<boolean>;
+  getPendingEvents(input: { before: string; limit: number }): Promise<Array<{ eventId: string; eventType: string; occurredAt: string }>>;
 }
 
 export interface Store {
@@ -167,9 +196,15 @@ export interface Store {
    * attempt holds a live claim (`received` at or after `leaseExpiredBefore`), so this delivery must not run the hooks.
    * Otherwise the row is (re)claimed: inserted, or a `failed` / expired `received` row is set to `received` at `receivedAt`.
    * Without `leaseExpiredBefore` a `received` row is always reclaimable (the v0.3 behaviour).
+   * `claimToken` (since v0.8.0, the handler always sends a fresh one) names the claim's owner, for `markEvent`.
    */
-  recordEvent(e: { eventId: string; eventType: string; occurredAt: string; receivedAt: string; leaseExpiredBefore?: string }): Promise<{ alreadyDone: boolean; inProgress?: boolean }>;
-  markEvent(eventId: string, status: EventStatus, reason: ReasonCode | null): Promise<void>;
+  recordEvent(e: { eventId: string; eventType: string; occurredAt: string; receivedAt: string; leaseExpiredBefore?: string; claimToken?: string }): Promise<{ alreadyDone: boolean; inProgress?: boolean }>;
+  /**
+   * Writes the event's status and releases its claim. With `claimToken` (since v0.8.0) both happen only if that claim
+   * still owns the event, atomically, and the answer is whether it did: an attempt whose lease expired and was taken
+   * over gets `false`, and changes neither the status nor its replacement's claim. Without it: unconditional (v0.7).
+   */
+  markEvent(eventId: string, status: EventStatus, reason: ReasonCode | null, claimToken?: string): Promise<void | boolean>;
   recordFailure(reason: ReasonCode, at: Date): Promise<void>;
   /**
    * @deprecated since v0.5.0: the kit no longer calls it (customer.* events are ignored). Still required, so custom
@@ -177,6 +212,8 @@ export interface Store {
    */
   upsertCustomer(c: Customer): Promise<{ applied: boolean }>;
   upsertSubscription(s: Subscription): Promise<{ applied: boolean }>;
+  /** Provider snapshot application with an atomic grace transition. Older snapshots never change the grace clock. */
+  applySubscription?(s: Omit<Subscription, 'pastDueSince'>): Promise<{ applied: boolean }>;
   getSubscription(subscriptionId: string): Promise<Subscription | null>;
   getSubscriptionsByUser(userId: string): Promise<Subscription[]>;
   health(now: Date): Promise<Health>;
@@ -186,6 +223,16 @@ export interface Store {
    */
   recordTransaction?(t: SeenTransaction & { subscriptionId: string | null; customerId: string | null; occurredAt: string; receivedAt: string }): Promise<void>;
   getTransaction?(transactionId: string): Promise<SeenTransaction | null>;
+  /**
+   * Since v0.8.0 (migration 004): the price and product ids this app owns, kept for good, including prices it no
+   * longer sells (archived or replaced), so a late payment on one is still recognised. Filled by `syncOwnership` (the
+   * recovery job runs it); never shrinks. `billingFromEnv` with `resolvePrices` decides ownership from these alone, so
+   * the webhook path never asks Paddle. Optional so custom stores keep compiling.
+   */
+  addOwnedIds?(ids: OwnedIdSet, at: string): Promise<void>;
+  getOwnedIds?(): Promise<OwnedIdSet>;
+  /** Built-in stores support durable recovery after migration 003. Custom stores may supply their own adapter. */
+  recovery?: RecoveryStore;
 }
 
 export interface LogEntry {
@@ -226,6 +273,23 @@ export interface HealthReport extends Health {
   unverified: UnverifiedStats;
   /** Since v0.7.0, only when `createBilling({ healthChecks })` is set: each check by name. A timeout or a throw is `ok: false`. */
   checks?: Record<string, CheckResult>;
+  /**
+   * Since v0.8.0, when the store supports recovery: the recovery job named after the environment (`recoverBilling`'s
+   * default name). `null`: it never ran. With `unresolvedFailed` and `oldestPendingAt` it shows unresolved work.
+   */
+  recovery?: RecoveryHealth | null;
+}
+
+export interface RecoveryHealth {
+  name: string;
+  /** The latest run: `running`, `succeeded`, or `failed` with `reason`. */
+  status: RecoveryState['status'];
+  reason: RecoveryFailureReason | null;
+  lastSucceededAt: string | null;
+  /** Where the next run resumes (the last successful run's start). */
+  checkpointAt: string | null;
+  /** Seconds since `checkpointAt`, at the time of the report. */
+  checkpointAgeSeconds: number | null;
 }
 
 /** What `createBilling({ onError })` gets with the error. */

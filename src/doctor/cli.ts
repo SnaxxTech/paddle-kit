@@ -62,7 +62,7 @@ export interface Diagnosis {
 }
 
 /** Turns one health-route answer into plain lines. `body` is the raw text; it is parsed here. */
-export function diagnose(status: number, body: string, opts: { now?: number; sentToken?: boolean; staleHours?: number } = {}): Diagnosis {
+export function diagnose(status: number, body: string, opts: { now?: number; sentToken?: boolean; staleHours?: number; recoveryStaleHours?: number } = {}): Diagnosis {
   const now = opts.now ?? Date.now();
   let data: any = null;
   try {
@@ -88,6 +88,12 @@ export function diagnose(status: number, body: string, opts: { now?: number; sen
   const h = data as Partial<HealthReport> & Pick<HealthReport, 'lastEventAt' | 'lastFailureAt' | 'lastFailureReason' | 'failedLast24h' | 'unlinkedLast24h'>;
   const lines = ['Reachable: yes', `Billing: on${h.environment ? ` (${h.environment})` : ''}${h.kitVersion ? `, paddle-kit ${h.kitVersion}` : ''}`];
   const problems: string[] = [];
+  if ((h.unresolvedFailed ?? 0) > 0) problems.push(`${h.unresolvedFailed} unresolved webhook event(s): run billing recovery and inspect any remaining failures`);
+  if (h.oldestPendingAt && now - Date.parse(h.oldestPendingAt) > 300000) problems.push('a webhook event has been unfinished for more than 5 minutes: run billing recovery');
+  if (opts.staleHours !== undefined && (h.notOursLast24h ?? 0) > 0 && h.lastOwnedAt !== undefined
+      && (!h.lastOwnedAt || now - Date.parse(h.lastOwnedAt) > opts.staleHours * HOUR)) {
+    problems.push('other products are delivering events but owned traffic is stale: check the app price ids and owns configuration');
+  }
   lines.push(`Last event: ${h.lastEventAt ? ago(h.lastEventAt, now) : 'none yet (normal right after the first deploy; send a simulator event)'}`);
   if (opts.staleHours !== undefined && (!h.lastEventAt || now - Date.parse(h.lastEventAt) > opts.staleHours * HOUR)) {
     problems.push(`no verified event for more than ${opts.staleHours} h: check the webhook secret and the Paddle notification destination`);
@@ -108,6 +114,15 @@ export function diagnose(status: number, body: string, opts: { now?: number; sen
     lines.push(`Refused before the signature check: ${u.count} since ${u.since}, on the server instance that answered (${reasons})`);
     if (u.byReason.signature_mismatch)
       lines.push('WARNING: signature_mismatch: a request was signed with another secret. If Paddle sent it, the host has the wrong secret (no new verified event confirms it).');
+  }
+  // The recovery job (v0.8.0+ health): it repairs missed events and keeps owned ids; a silent stop is a problem.
+  if (h.recovery === null) problems.push('billing recovery has never completed: schedule the recovery job (README, Standard setup)');
+  else if (h.recovery) {
+    const r = h.recovery;
+    lines.push(`Recovery: last success ${r.lastSucceededAt ? ago(r.lastSucceededAt, now) : 'never'}; latest run ${r.status}${r.reason ? ` (${r.reason})` : ''}`);
+    const staleMs = (opts.recoveryStaleHours ?? 26) * HOUR;
+    if (!r.lastSucceededAt) problems.push(`billing recovery has never completed${r.reason ? ` (latest run: ${r.reason})` : ''}: check the recovery job's output`);
+    else if (now - Date.parse(r.lastSucceededAt) > staleMs) problems.push(`billing recovery has not completed for more than ${staleMs / HOUR} h${r.reason ? ` (latest run: ${r.reason})` : ''}: check the recovery job`);
   }
   for (const [name, c] of Object.entries(h.checks ?? {})) {
     if (c.ok) lines.push(`Check ${name}: ok${c.detail ? ` (${c.detail})` : ''}`);

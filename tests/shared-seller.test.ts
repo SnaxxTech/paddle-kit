@@ -43,7 +43,7 @@ function setup(o: Partial<BillingConfig> = {}, store: Store = memoryStore()) {
     const at = Math.floor((o.now ?? (() => NOW))().getTime() / 1000);
     return billing.handleWebhook(new Request('https://app.test/', { method: 'POST', headers: { 'paddle-signature': sign(body, SECRET, at) }, body }));
   };
-  const reasonOf = (eventId: string) => mark.mock.calls.filter((c) => c[0] === eventId).at(-1)?.slice(1);
+  const reasonOf = (eventId: string) => mark.mock.calls.filter((c) => c[0] === eventId).at(-1)?.slice(1, 3);
   return { billing, store, send, txs, adjs, logs, reasonOf };
 }
 

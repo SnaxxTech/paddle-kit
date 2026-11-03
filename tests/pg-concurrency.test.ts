@@ -9,6 +9,8 @@ import { createBilling } from '../src/core/billing';
 import { MIGRATIONS, postgresStore, type SqlQuery } from '../src/postgres';
 import { sign } from './helpers/sign';
 import { loadFixture, subscriptionEvent } from './helpers/fixtures';
+import { readmePackHooks, readmeSql, type Tx } from './helpers/readme-example';
+import type { Adjustment, Transaction } from '../src/core/types';
 
 type Pool = { query: SqlQuery; end(): Promise<void>; on(event: 'error', fn: (e: Error) => void): void };
 type PgModule = { default: { Pool: new (o: Record<string, unknown>) => Pool } };
@@ -128,7 +130,7 @@ describe.skipIf(!live)('real Postgres: concurrency', () => {
     expect(tally.other).toBe(0);
     const { rows } = await pool.query(`SELECT status, reason FROM paddle_events WHERE event_id = $1`, [event.event_id]);
     expect(rows).toEqual([{ status: 'processed', reason: null }]);
-    expect((await pool.query(`SELECT count(*)::int AS n FROM paddle_event_claims`)).rows[0]!.n).toBe(0);
+    expect((await pool.query(`SELECT count(*)::int AS n FROM paddle_event_leases`)).rows[0]!.n).toBe(0);
   });
 
   it('N=50 parallel deliveries of one adjustment: onAdjustment runs once', async () => {
@@ -191,8 +193,64 @@ describe.skipIf(!live)('real Postgres: concurrency', () => {
     expect(calls).toBeGreaterThanOrEqual(10);
     const ledger = await pool.query(`SELECT event_id, status FROM paddle_events ORDER BY event_id`);
     expect(ledger.rows).toEqual(events.map((e) => ({ event_id: e.event_id, status: 'processed' })).sort((a, b) => a.event_id.localeCompare(b.event_id)));
-    expect((await pool.query(`SELECT count(*)::int AS n FROM paddle_event_claims`)).rows[0]!.n).toBe(0);
+    expect((await pool.query(`SELECT count(*)::int AS n FROM paddle_event_leases`)).rows[0]!.n).toBe(0);
     expect((await pool.query(`SELECT transaction_id, owned FROM paddle_transactions`)).rows).toEqual([{ transaction_id: base.data.id, owned: true }]);
+  });
+
+  it('claim ownership: an expired attempt failing late cannot free the event for a third delivery (real connections)', async () => {
+    const store = postgresStore({ query: (t, p) => pool.query(t, p) });
+    const ev = { eventId: 'evt_own', eventType: 'transaction.completed', occurredAt: NOW.toISOString() };
+    const at = (s: number) => new Date(NOW.getTime() + s * 1000).toISOString();
+    expect(await store.recordEvent({ ...ev, receivedAt: at(0), leaseExpiredBefore: at(-60), claimToken: 'a' })).toEqual({ alreadyDone: false });
+    expect(await store.recordEvent({ ...ev, receivedAt: at(61), leaseExpiredBefore: at(1), claimToken: 'b' })).toEqual({ alreadyDone: false });
+    // A's late failure races C's delivery and B's success, 20 times over, each on its own connection
+    for (let i = 0; i < 20; i++) {
+      const [lateA, c] = await Promise.all([
+        store.markEvent(ev.eventId, 'failed', 'hook_error', 'a'),
+        store.recordEvent({ ...ev, receivedAt: at(62), leaseExpiredBefore: at(2), claimToken: `c${i}` }),
+      ]);
+      expect(lateA).toBe(false);
+      expect(c).toEqual({ alreadyDone: false, inProgress: true });
+    }
+    const [b, d] = await Promise.all([
+      store.markEvent(ev.eventId, 'processed', null, 'b'),
+      store.recordEvent({ ...ev, receivedAt: at(63), leaseExpiredBefore: at(3), claimToken: 'd' }),
+    ]);
+    expect(b).toBe(true);
+    // D either lost to B's live claim, or ran after B committed and saw it done; it never owns the event
+    expect([{ alreadyDone: false, inProgress: true }, { alreadyDone: true }]).toContainEqual(d);
+    expect((await pool.query(`SELECT status FROM paddle_events WHERE event_id = 'evt_own'`)).rows).toEqual([{ status: 'processed' }]);
+  });
+
+  it('README credit-pack example: a payment and its refund and chargeback racing on separate connections end at 0 credits (20 rounds)', async () => {
+    await pool.query(readmeSql);
+    const db = {
+      async transaction<T>(fn: (q: Tx) => Promise<T>): Promise<T> {
+        const client = await (pool as unknown as { connect(): Promise<Tx & { release(): void }> }).connect();
+        try {
+          await client.query('BEGIN');
+          const out = await fn(client);
+          await client.query('COMMIT');
+          return out;
+        } catch (e) {
+          await client.query('ROLLBACK');
+          throw e;
+        } finally {
+          client.release();
+        }
+      },
+    };
+    const hooks = readmePackHooks(db)('pri_pack');
+    const ctx = { eventId: 'e', eventType: 't', store: {} as never, known: true };
+    for (let round = 0; round < 20; round++) {
+      const txn = `txn_${round}`;
+      const user = `u_${round}`;
+      const pay = () => hooks.onTransaction!({ transactionId: txn, status: 'completed', customerId: null, subscriptionId: null, customData: { userId: user }, items: [{ priceId: 'pri_pack', productId: null, quantity: 1 }], currency: 'USD', total: '1500', subtotal: '1500', occurredAt: '', raw: {} } as Transaction, ctx);
+      const adjust = (id: string, action: string) => hooks.onAdjustment!({ adjustmentId: id, transactionId: txn, action, status: 'approved', type: 'full', subscriptionId: null, customerId: null, currency: 'USD', total: '1500', subtotal: '1500', occurredAt: '', raw: {} } as Adjustment, ctx);
+      await Promise.all(shuffle([pay, pay, () => adjust(`r_${round}`, 'refund'), () => adjust(`cb_${round}`, 'chargeback'), () => adjust(`cbr_${round}`, 'chargeback_reverse')]).map((f) => f()));
+      const { rows } = await pool.query('SELECT credits FROM accounts WHERE user_id = $1', [user]);
+      expect(rows[0]?.credits ?? 0).toBe(0);
+    }
   });
 
   it('load: 1,000 events through handleWebhook — p95 latency and error count, samples reconciled against sent', async () => {

@@ -8,8 +8,8 @@ export const PADDLE_API_VERSION = 1;
 
 export type FetchLike = (
   url: string,
-  init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal },
-) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+  init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal; redirect?: 'error' },
+) => Promise<{ ok: boolean; status: number; headers?: { get(name: string): string | null }; json(): Promise<unknown> }>;
 
 export class PaddleError extends Error {
   override name = 'PaddleError';
@@ -61,15 +61,18 @@ export function paddleClient(base: string, apiKey: string, fetchImpl: FetchLike,
     let next: string | null = apiPath;
     for (let page = 0; next && page < maxPages; page++) {
       const res: Json = await call('GET', next);
-      items.push(...((res.data as Json[]) ?? []));
+      if (!Array.isArray(res.data)) throw new PaddleError('pagination response has no data array');
+      items.push(...res.data);
       const pagination = res.meta?.pagination;
       next = null;
-      if (pagination?.has_more && pagination.next) {
+      if (pagination?.has_more) {
+        if (!pagination.next) throw new PaddleError('pagination response has_more without a next page');
         const u = new URL(String(pagination.next), base);
         if (u.origin !== new URL(base).origin || u.protocol !== 'https:') throw new PaddleError('pagination link points to another host');
         next = u.pathname + u.search;
       }
     }
+    if (next) throw new PaddleError('pagination limit reached: result is incomplete');
     return items;
   }
   return { call, list };

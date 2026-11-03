@@ -26,6 +26,28 @@ export function runStoreContract(name: string, makeStore: () => Promise<Store>):
       }
     });
 
+    it('a claim is released only by its owner: an expired worker cannot release its replacement', async () => {
+      const claim = (receivedAt: string, leaseExpiredBefore: string, claimToken: string) =>
+        store.recordEvent({ ...ev('evt_c', receivedAt), leaseExpiredBefore, claimToken });
+      expect(await claim('2026-10-15T10:00:00.000Z', '2026-10-15T09:59:00.000Z', 'tok_a')).toEqual({ alreadyDone: false });
+      // A's lease expired: B takes the event over
+      expect(await claim('2026-10-15T10:01:01.000Z', '2026-10-15T10:00:01.000Z', 'tok_b')).toEqual({ alreadyDone: false });
+      // A finally fails: its late mark must neither record a status nor release B's claim
+      expect(await store.markEvent('evt_c', 'failed', 'hook_error', 'tok_a')).toBe(false);
+      expect(await claim('2026-10-15T10:01:02.000Z', '2026-10-15T10:00:02.000Z', 'tok_c')).toEqual({ alreadyDone: false, inProgress: true });
+      expect((await store.health(new Date('2026-10-15T10:01:03.000Z'))).unresolvedFailed).toBe(0);
+      expect(await store.markEvent('evt_c', 'processed', null, 'tok_b')).toBe(true);
+      expect(await claim('2026-10-15T10:01:03.000Z', '2026-10-15T10:00:03.000Z', 'tok_d')).toEqual({ alreadyDone: true });
+    });
+
+    it('keeps owned ids for good: adds only, sorted, idempotent', async () => {
+      expect(await store.getOwnedIds!()).toEqual({ priceIds: [], productIds: [] });
+      await store.addOwnedIds!({ priceIds: ['pri_b', 'pri_a'], productIds: ['pro_1'] }, '2026-11-01T00:00:00.000Z');
+      await store.addOwnedIds!({ priceIds: ['pri_a', 'pri_c'], productIds: [] }, '2026-11-02T00:00:00.000Z');
+      await store.addOwnedIds!({ priceIds: [], productIds: [] }, '2026-11-03T00:00:00.000Z');
+      expect(await store.getOwnedIds!()).toEqual({ priceIds: ['pri_a', 'pri_b', 'pri_c'], productIds: ['pro_1'] });
+    });
+
     it('round-trips a subscription', async () => {
       const s = sub({ scheduledChange: { action: 'cancel', effectiveAt: '2026-11-01T00:00:00.000Z' }, priceIds: ['a', 'b'] });
       expect(await store.upsertSubscription(s)).toEqual({ applied: true });
@@ -56,6 +78,41 @@ export function runStoreContract(name: string, makeStore: () => Promise<Store>):
       expect((await store.getSubscription('sub_1'))?.userId).toBe('user_1');
     });
 
+    it('atomically preserves the current grace episode and ignores stale overdue snapshots', async () => {
+      expect(store.applySubscription).toBeTypeOf('function');
+      await store.applySubscription!(sub({ status: 'past_due', lastEventAt: '2026-10-10T00:00:00.000Z' }));
+      await store.applySubscription!(sub({ status: 'past_due', lastEventAt: '2026-10-11T00:00:00.000Z' }));
+      expect((await store.getSubscription('sub_1'))?.pastDueSince).toBe('2026-10-10T00:00:00.000Z');
+      await store.applySubscription!(sub({ status: 'active', lastEventAt: '2026-10-12T00:00:00.000Z' }));
+      await store.applySubscription!(sub({ status: 'past_due', lastEventAt: '2026-10-13T00:00:00.000Z' }));
+      await store.applySubscription!(sub({ status: 'past_due', lastEventAt: '2026-10-11T00:00:00.000Z' }));
+      expect((await store.getSubscription('sub_1'))?.pastDueSince).toBe('2026-10-13T00:00:00.000Z');
+    });
+
+    it('recovery checkpoints survive failures and a replaced lease fences out the old worker', async () => {
+      const r = store.recovery!;
+      expect(await r.getRecovery('sandbox')).toBeNull();
+      const claim = { name: 'sandbox', runId: 'run_1', startedAt: '2026-10-10T00:00:00.000Z', leaseUntil: '2026-10-10T00:01:00.000Z' };
+      expect(await r.claimRecovery(claim)).toBe(true);
+      expect(await r.claimRecovery({ ...claim, runId: 'duplicate' })).toBe(false);
+      expect(await r.claimRecovery({ ...claim, runId: 'run_2', startedAt: claim.leaseUntil, leaseUntil: '2026-10-10T00:02:00.000Z' })).toBe(true);
+      expect(await r.finishRecovery({ name: 'sandbox', runId: 'run_1', status: 'succeeded', finishedAt: '2026-10-10T00:01:10.000Z', reason: null })).toBe(false);
+      expect(await r.finishRecovery({ name: 'sandbox', runId: 'run_2', status: 'succeeded', finishedAt: '2026-10-10T00:01:20.000Z', reason: null })).toBe(true);
+      expect(await r.getRecovery('sandbox')).toMatchObject({ checkpointAt: claim.leaseUntil, status: 'succeeded', leaseUntil: null });
+      expect(await r.claimRecovery({ ...claim, runId: 'run_3', startedAt: '2026-10-11T00:00:00.000Z' })).toBe(true);
+      await r.finishRecovery({ name: 'sandbox', runId: 'run_3', status: 'failed', finishedAt: '2026-10-11T00:01:00.000Z', reason: 'incomplete' });
+      expect(await r.getRecovery('sandbox')).toMatchObject({ checkpointAt: claim.leaseUntil, status: 'failed', reason: 'incomplete' });
+    });
+
+    it('finds unfinished events across retry windows but excludes live claims', async () => {
+      await store.recordEvent(ev('evt_failed', '2026-10-01T00:00:00.000Z'));
+      await store.markEvent('evt_failed', 'failed', 'hook_error');
+      await store.recordEvent({ ...ev('evt_busy', '2026-10-01T00:00:00.000Z'), leaseExpiredBefore: '2026-09-30T23:59:00.000Z' });
+      await store.recordEvent({ ...ev('evt_busy', '2026-10-10T00:00:00.000Z'), leaseExpiredBefore: '2026-10-09T23:59:00.000Z' });
+      expect((await store.recovery!.getPendingEvents({ before: '2026-10-09T00:00:00.000Z', limit: 10 })).map(e => e.eventId)).toEqual(['evt_failed']);
+      expect(await store.health(new Date('2026-10-15T00:00:00.000Z'))).toMatchObject({ unresolvedFailed: 1, oldestPendingAt: '2026-10-01T00:00:00.000Z' });
+    });
+
     it('applies customers with the same ordering rule', async () => {
       expect(await store.upsertCustomer({ customerId: 'ctm_1', email: 'a@x.com', lastEventAt: '2026-10-10T00:00:00.000Z' })).toEqual({ applied: true });
       expect(await store.upsertCustomer({ customerId: 'ctm_1', email: 'old@x.com', lastEventAt: '2026-10-09T00:00:00.000Z' })).toEqual({ applied: false });
@@ -63,7 +120,7 @@ export function runStoreContract(name: string, makeStore: () => Promise<Store>):
 
     it('reports health over a 24h window', async () => {
       const now = new Date('2026-10-15T12:00:00.000Z');
-      expect(await store.health(now)).toEqual({ lastEventAt: null, lastFailureAt: null, lastFailureReason: null, failedLast24h: 0, unlinkedLast24h: 0, lastOwnedAt: null, notOursLast24h: 0 });
+      expect(await store.health(now)).toEqual({ lastEventAt: null, lastFailureAt: null, lastFailureReason: null, failedLast24h: 0, unlinkedLast24h: 0, lastOwnedAt: null, notOursLast24h: 0, unresolvedFailed: 0, oldestPendingAt: null });
 
       await store.recordEvent(ev('evt_ok', '2026-10-15T10:00:00.000Z'));
       await store.markEvent('evt_ok', 'processed', null);
@@ -82,6 +139,8 @@ export function runStoreContract(name: string, makeStore: () => Promise<Store>):
         unlinkedLast24h: 1,
         lastOwnedAt: '2026-10-15T10:30:00.000Z',
         notOursLast24h: 0,
+        unresolvedFailed: 1,
+        oldestPendingAt: null,
       });
     });
 
