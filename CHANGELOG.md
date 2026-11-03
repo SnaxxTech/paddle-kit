@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.0-qr.2 (unreleased candidate; proposed release: 0.8.0)
+## 0.8.0 (2026-11-03)
 
 Fixes the four gaps the 2026-11-03 review of 0.8.0-qr.1 reproduced, each with a test that failed before and passes
 after, and makes the safe path the default. **New migration `004_claim_tokens_owned_ids`** (CREATE-only). Upgrade steps:

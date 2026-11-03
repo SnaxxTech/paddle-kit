@@ -1,6 +1,6 @@
 # Upgrading paddle-kit
 
-## 0.8.0-qr.2 candidate (from v0.6/v0.7 or 0.8.0-qr.1)
+## 0.8.0 (from v0.6/v0.7 or 0.8.0-qr.1)
 
 1. **Run migrations `003_recovery` and `004_claim_tokens_owned_ids` before deploying.** Both only create tables. Code
    of this version on a database without `004` answers 500 `store_error` to every event (Paddle retries).
@@ -56,7 +56,7 @@ Check first that your database has no tables of the new names with a different s
 ## 3. Bump the tag
 
 ```bash
-npm i github:SnaxxTech/paddle-kit#v0.7.0
+npm i github:SnaxxTech/paddle-kit#v0.8.0
 ```
 
 Commit the `package.json` and lockfile change. Since v0.5.0 the repository is public, so CI needs no token (README checklist, step 7). Then run the app's own tests and its sandbox end-to-end check.
