@@ -1,9 +1,12 @@
 # Changelog
 
-## 0.8.1 (unreleased)
+## 0.8.1 (2026-11-03)
 
 Fixes the README copy-paste traps the second review of 0.8.0 found. Each fix has a test that runs the README block as
-written and failed before. No migration; no behaviour change for apps that did not copy these examples.
+written and failed before. **No `paddle_*` migration**, and no behaviour change for apps that did not copy these
+examples. **Apps that copied the credit-pack example need an app-side schema change:** add `orders.revoked` and
+`orders.taken`, adopt the new `settle`, and review orders revoked under the old example (UPGRADING 0.8.1, step 3).
+The Quickstart imports `priceIds` and `createRecoveryRoute`, which exist from 0.8.1 on.
 
 ### Fixes
 - **Price maps (README Quickstart).** The entitlements example split a flat `PADDLE_PRICES` entry (`{ "pro": "pri_pro" }`)

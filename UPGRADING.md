@@ -2,7 +2,7 @@
 
 ## 0.8.1 (from 0.8.0)
 
-No migration. Only if you copied these README examples:
+No `paddle_*` migration. Install `#v0.8.1`: the Quickstart imports `priceIds` and `createRecoveryRoute`, which 0.8.0 does not have. Only if you copied these README examples:
 
 1. **Entitlements from `PADDLE_PRICES`:** replace `Object.values(c.prices.pro as Record<string, string>)` with
    `priceIds(c.prices.pro)` (from `paddle-kit/config`), and `config.prices.x as string` with `priceIdOf(config.prices, 'x')`.
@@ -70,7 +70,7 @@ Check first that your database has no tables of the new names with a different s
 ## 3. Bump the tag
 
 ```bash
-npm i github:SnaxxTech/paddle-kit#v0.8.0
+npm i github:SnaxxTech/paddle-kit#v0.8.1
 ```
 
 Commit the `package.json` and lockfile change. Since v0.5.0 the repository is public, so CI needs no token (README checklist, step 7). Then run the app's own tests and its sandbox end-to-end check.
