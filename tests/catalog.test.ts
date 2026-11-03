@@ -435,6 +435,37 @@ describe('syncCatalog', () => {
     expect(envLines(file3)).toContain('NEXT_PUBLIC_PADDLE_CLIENT_TOKEN=live_realtoken123');
   });
 
+  test('traffic_source: live destinations take platform events only (created and moved on re-run); sandbox keeps all', async () => {
+    const live = fakePaddle({ token: 'live_realtoken123' });
+    const viaLive: FetchLike = (url, init) =>
+      live.fetch(url.replace('https://api.paddle.com', 'https://sandbox-api.paddle.com'), { ...init, headers: { ...init.headers, Authorization: `Bearer ${KEY}` } });
+    const run = () => syncCatalog({ apiKey: 'pdl_live_abc', catalog: CATALOG, envFile: tmpEnv(ENV0), webhookUrl: HOOK, live: true, fetch: viaLive, log: () => {} });
+    await run();
+    expect(live.writes().find((c) => c.method === 'POST' && c.path === '/notification-settings')!.body.traffic_source).toBe('platform');
+
+    // A live destination made by 0.6.x (traffic_source "all") is moved to "platform", and only that changes.
+    live.settings[0].traffic_source = 'all';
+    live.calls.length = 0;
+    await run();
+    expect(live.writes().filter((c) => c.path.startsWith('/notification-settings'))).toEqual([
+      { method: 'PATCH', path: `/notification-settings/${live.settings[0].id}`, body: { traffic_source: 'platform' } },
+    ]);
+    live.calls.length = 0;
+    await run();
+    expect(live.writes().filter((c) => c.path.startsWith('/notification-settings'))).toEqual([]);
+
+    // Sandbox: "all" on create, and a sandbox destination set to "platform" by hand is set back so the simulator works.
+    const sandbox = fakePaddle();
+    await syncCatalog({ apiKey: KEY, catalog: CATALOG, webhookUrl: HOOK, fetch: sandbox.fetch, log: () => {} });
+    expect(sandbox.settings[0].traffic_source).toBe('all');
+    sandbox.settings[0].traffic_source = 'platform';
+    sandbox.calls.length = 0;
+    await syncCatalog({ apiKey: KEY, catalog: CATALOG, webhookUrl: HOOK, fetch: sandbox.fetch, log: () => {} });
+    expect(sandbox.writes().filter((c) => c.path.startsWith('/notification-settings'))).toEqual([
+      { method: 'PATCH', path: `/notification-settings/${sandbox.settings[0].id}`, body: { traffic_source: 'all' } },
+    ]);
+  });
+
   test('does not follow a pagination link to another host', async () => {
     const evil: FetchLike = async () => ({
       ok: true,
@@ -714,7 +745,7 @@ describe('npx hint', () => {
   test('only from the npx cache, and only outside an app that depends on the kit', () => {
     const hint = npxHint(NPX, app(null));
     expect(hint).toMatch(/^Note: paddle-kit runs from the npx cache, and .+ is not an app that depends on it/);
-    expect(hint).toContain('npm i github:SnaxxTech/paddle-kit#v0.6.0');
+    expect(hint).toContain('npm i github:SnaxxTech/paddle-kit#v0.7.0');
     expect(hint!.split('\n')).toHaveLength(1);
     expect(npxHint(NPX, app({ name: 'other', dependencies: { next: '16' } }))).not.toBeNull();
     expect(npxHint('C:\\Users\\u\\AppData\\Local\\npm-cache\\_npx\\3f2a\\node_modules\\paddle-kit\\dist\\catalog\\cli.js', app(null))).not.toBeNull();

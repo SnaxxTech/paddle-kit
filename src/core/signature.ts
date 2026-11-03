@@ -2,7 +2,7 @@ import type { ReasonCode } from './types';
 
 export type VerifyResult =
   | { ok: true }
-  | { ok: false; reason: Extract<ReasonCode, 'bad_signature_header' | 'signature_mismatch' | 'stale_timestamp'> };
+  | { ok: false; reason: Extract<ReasonCode, 'bad_signature_header' | 'signature_mismatch' | 'stale_timestamp' | 'future_timestamp'> };
 
 const encoder = new TextEncoder();
 
@@ -23,23 +23,29 @@ export function parseSignatureHeader(header: string): { ts: number; h1: string[]
 export async function verifySignature(input: {
   rawBody: string;
   header: string | null;
-  secret: string;
+  /** One secret, or several during a rotation (any one may match). */
+  secret: string | readonly string[];
   toleranceSeconds?: number;
+  /** How far ahead of `now` the timestamp may be. Default 60. */
+  futureSkewSeconds?: number;
   now?: number;
 }): Promise<VerifyResult> {
   const parsed = input.header ? parseSignatureHeader(input.header) : null;
   if (!parsed) return { ok: false, reason: 'bad_signature_header' };
 
-  const key = await crypto.subtle.importKey('raw', encoder.encode(input.secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(`${parsed.ts}:${input.rawBody}`)));
-  const expected = Array.from(mac, (b) => b.toString(16).padStart(2, '0')).join('');
-  if (!parsed.h1.some((candidate) => constantTimeEqual(candidate, expected))) {
-    return { ok: false, reason: 'signature_mismatch' };
+  let matched = false;
+  for (const secret of typeof input.secret === 'string' ? [input.secret] : input.secret) {
+    const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(`${parsed.ts}:${input.rawBody}`)));
+    const expected = Array.from(mac, (b) => b.toString(16).padStart(2, '0')).join('');
+    if (parsed.h1.some((candidate) => constantTimeEqual(candidate, expected))) matched = true;
   }
+  if (!matched) return { ok: false, reason: 'signature_mismatch' };
 
   const tolerance = input.toleranceSeconds ?? 5;
   const now = input.now ?? Date.now();
   if (now > (parsed.ts + tolerance) * 1000) return { ok: false, reason: 'stale_timestamp' };
+  if (parsed.ts * 1000 > now + (input.futureSkewSeconds ?? 60) * 1000) return { ok: false, reason: 'future_timestamp' };
   return { ok: true };
 }
 
@@ -48,5 +54,13 @@ export function constantTimeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   let diff = 0;
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+/** Equal strings, in time that depends on neither their content nor their length: both are hashed (SHA-256) first. */
+export async function safeEqual(a: string, b: string): Promise<boolean> {
+  const [x, y] = await Promise.all([a, b].map(async (v) => new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(v)))));
+  let diff = 0;
+  for (let i = 0; i < x!.length; i++) diff |= x![i]! ^ y![i]!;
   return diff === 0;
 }

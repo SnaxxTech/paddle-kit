@@ -1,12 +1,25 @@
 // Billing environment validation. Pure and edge-safe (no node: imports, no runtime deps).
 // Problem strings name variables (and caller-supplied price keys) only, never values.
+import { PriceError, findPriceMap, type FetchLike } from '../price';
+import { createBilling, type Billing, type BillingConfig } from '../core/billing';
+import type { OwnsResolver } from '../core/types';
 
 /** key -> price id, or key -> { billing cycle -> price id }. */
 export type PriceMap = Record<string, string | Record<string, string>>;
 
 export interface BillingEnv {
   environment: 'sandbox' | 'production';
+  /** The first (or only) secret in PADDLE_NOTIFICATION_WEBHOOK_SECRET. */
   webhookSecret: string;
+  /**
+   * Every secret in PADDLE_NOTIFICATION_WEBHOOK_SECRET (comma-separated during a rotation), for
+   * `createBilling({ webhookSecret: config.webhookSecrets })`. Since v0.7.0; always set by `readBillingEnv`.
+   */
+  webhookSecrets?: string[];
+  /**
+   * PADDLE_PRICES. Empty (`{}`) when `resolvePrices` is on and PADDLE_PRICES is unset: then read the ids with
+   * `await config.resolvePrices()`.
+   */
   prices: PriceMap;
   clientToken: string;
   /** Epoch ms, or null when BILLING_LAUNCH_AT is unset and not required. */
@@ -21,6 +34,31 @@ export interface BillingEnv {
   owns?: { priceIds: string[] };
 }
 
+/** What `readBillingEnv` returns with the `resolvePrices` option (since v0.7.0). */
+export interface BillingEnvWithLookup extends Omit<BillingEnv, 'owns'> {
+  /**
+   * PADDLE_PRICES set: every id in it, as without the option. Unset: a resolver over `resolvePrices`, which
+   * `createBilling` awaits per event (a failed lookup answers 503, never `not_ours`). Pass it the same way: `owns: config.owns`.
+   */
+  owns?: { priceIds: string[] } | OwnsResolver;
+  /**
+   * The price map: PADDLE_PRICES when it is set (no request), else found in Paddle by label (`findPriceMap`) and checked
+   * against `requiredPrices` / `requiredCycles`. A found map is kept for `cacheSeconds` in this server instance; a
+   * failure is not kept, so the next call asks again. Throws `PriceError`.
+   */
+  resolvePrices: () => Promise<PriceMap>;
+}
+
+export interface ResolvePricesOptions {
+  /** The catalog's `app`. */
+  app: string;
+  /** How long a found map is kept in this server instance. Default 600 (10 min). */
+  cacheSeconds?: number;
+  fetch?: FetchLike;
+  /** Per lookup. Default 5000. */
+  timeoutMs?: number;
+}
+
 export interface ReadBillingEnvOptions {
   /** Price keys that must be present in PADDLE_PRICES with non-empty ids. */
   requiredPrices: string[];
@@ -31,6 +69,12 @@ export interface ReadBillingEnvOptions {
   requiredCycles?: string[];
   /** Make BILLING_LAUNCH_AT mandatory. */
   requireLaunchAt?: boolean;
+  /**
+   * Since v0.7.0: PADDLE_PRICES may be unset. The prices are then found in Paddle by the labels the catalog CLI gives
+   * them (product `custom_data.paddle_kit = app`, price `custom_data.paddle_kit_price = "<key>-<cycle>"`), with
+   * PADDLE_API_KEY, which becomes required. A set PADDLE_PRICES still wins: it is the override.
+   */
+  resolvePrices?: ResolvePricesOptions;
 }
 
 // Not watched: PADDLE_HEALTH_TOKEN and PADDLE_API_KEY (alone they do not mean "billing is being set up").
@@ -66,8 +110,13 @@ function parsePrice(v: unknown): string | Record<string, string> | null {
  */
 export function readBillingEnv(
   env: Record<string, string | undefined>,
+  opts: ReadBillingEnvOptions & { resolvePrices: ResolvePricesOptions },
+): { config: BillingEnvWithLookup | null; problems: string[] };
+export function readBillingEnv(env: Record<string, string | undefined>, opts: ReadBillingEnvOptions): { config: BillingEnv | null; problems: string[] };
+export function readBillingEnv(
+  env: Record<string, string | undefined>,
   opts: ReadBillingEnvOptions,
-): { config: BillingEnv | null; problems: string[] } {
+): { config: BillingEnv | BillingEnvWithLookup | null; problems: string[] } {
   if (!WATCHED.some((name) => env[name])) return { config: null, problems: [] };
   const problems: string[] = [];
 
@@ -78,11 +127,18 @@ export function readBillingEnv(
   }
 
   const webhookSecret = env.PADDLE_NOTIFICATION_WEBHOOK_SECRET;
+  // Several secrets, comma-separated, during a rotation. Paddle secrets never contain a comma.
+  const webhookSecrets = webhookSecret?.split(',') ?? [];
   if (!webhookSecret?.trim()) problems.push('PADDLE_NOTIFICATION_WEBHOOK_SECRET is missing');
-  else if (webhookSecret !== webhookSecret.trim()) problems.push('PADDLE_NOTIFICATION_WEBHOOK_SECRET has leading or trailing whitespace');
+  else if (webhookSecrets.some((x) => x !== x.trim())) problems.push('PADDLE_NOTIFICATION_WEBHOOK_SECRET has leading or trailing whitespace');
+  else if (!webhookSecrets.every(nonEmpty)) problems.push('PADDLE_NOTIFICATION_WEBHOOK_SECRET has an empty entry between commas');
 
+  const resolving = opts.resolvePrices !== undefined && !env.PADDLE_PRICES;
   let prices: PriceMap | null = null;
-  if (!env.PADDLE_PRICES) {
+  if (resolving) {
+    prices = {};
+    if (!env.PADDLE_API_KEY) problems.push('PADDLE_API_KEY is missing (needed to find the prices in Paddle while PADDLE_PRICES is unset)');
+  } else if (!env.PADDLE_PRICES) {
     problems.push('PADDLE_PRICES is missing');
   } else {
     let parsed: unknown;
@@ -148,7 +204,8 @@ export function readBillingEnv(
   if (problems.length > 0 || !nonEmpty(webhookSecret) || !prices) return { config: null, problems };
   const config: BillingEnv = {
     environment,
-    webhookSecret,
+    webhookSecret: webhookSecrets[0]!,
+    webhookSecrets,
     prices,
     clientToken,
     launchAt,
@@ -156,7 +213,84 @@ export function readBillingEnv(
   };
   if (env.PADDLE_HEALTH_TOKEN) config.healthToken = env.PADDLE_HEALTH_TOKEN; // whitespace rejected above
   if (apiKey) config.apiKey = apiKey;
-  const priceIds = [...new Set(Object.values(prices).flatMap((p) => (typeof p === 'string' ? [p] : Object.values(p))))];
-  if (priceIds.length > 0) config.owns = { priceIds };
-  return { config, problems };
+  const priceIds = priceIdsOf(prices);
+  const lookup = opts.resolvePrices;
+  if (!lookup) {
+    if (priceIds.length > 0) config.owns = { priceIds };
+    return { config, problems };
+  }
+  const fixed = prices;
+  const resolvePrices = resolving
+    ? memo(async () => checkRequired(await findPriceMap(lookup.app, { apiKey: apiKey!, environment, fetch: lookup.fetch, timeoutMs: lookup.timeoutMs }), lookup.app, opts), (lookup.cacheSeconds ?? 600) * 1000)
+    : async () => fixed;
+  const withLookup: BillingEnvWithLookup = { ...config, resolvePrices };
+  if (resolving) withLookup.owns = { resolve: async () => ({ priceIds: priceIdsOf(await resolvePrices()) }) };
+  else if (priceIds.length > 0) withLookup.owns = { priceIds };
+  return { config: withLookup, problems };
+}
+
+const priceIdsOf = (prices: PriceMap) => [...new Set(Object.values(prices).flatMap((p) => (typeof p === 'string' ? [p] : Object.values(p))))];
+
+/** The required keys and cycles of a map found in Paddle, checked like PADDLE_PRICES is. */
+function checkRequired(map: PriceMap, app: string, opts: ReadBillingEnvOptions): PriceMap {
+  for (const key of opts.requiredPrices) {
+    const price = map[key];
+    if (price === undefined) throw new PriceError('not_found', `app "${app}" has no active price labelled "${key}-…" in Paddle (run paddle-kit-catalog)`);
+    if (typeof price === 'string') continue;
+    for (const cycle of opts.requiredCycles ?? []) {
+      if (!Object.hasOwn(price, cycle)) throw new PriceError('not_found', `app "${app}" has no active price labelled "${key}-${cycle}" in Paddle`);
+    }
+  }
+  return map;
+}
+
+/** `fn`, with a success kept for `ms` and shared by concurrent callers. A failure is dropped at once, so the next call retries. */
+function memo<T>(fn: () => Promise<T>, ms: number): () => Promise<T> {
+  let kept: { at: number; value: Promise<T> } | null = null;
+  return () => {
+    const at = Date.now();
+    if (kept && at - kept.at < ms) return kept.value;
+    const value = fn();
+    const entry = { at, value };
+    kept = entry;
+    value.catch(() => {
+      if (kept === entry) kept = null;
+    });
+    return value;
+  };
+}
+
+export type BillingFromEnvOptions = ReadBillingEnvOptions &
+  Omit<BillingConfig, 'environment' | 'webhookSecret' | 'healthToken' | 'owns' | 'entitlements'> & {
+    /** Price id → features, or a function of the config that builds it from the price ids. Default `{}` (one-time sales only). */
+    entitlements?: BillingConfig['entitlements'] | ((config: BillingEnv | BillingEnvWithLookup) => BillingConfig['entitlements']);
+    /** Default `config.owns` (every id in PADDLE_PRICES, or the resolver with `resolvePrices`). */
+    owns?: BillingConfig['owns'];
+  };
+
+/**
+ * The whole setup in one call: `readBillingEnv`, then `createBilling` only when the env is valid, with the env's
+ * environment, every webhook secret, the health token and `owns` filled in. `billing` is null while billing is off or
+ * misconfigured (then `problems` names the variables), so it is safe at module scope in a build without secrets:
+ * `export const { billing, config, problems } = billingFromEnv(process.env, { requiredPrices: ['pro'], store, … })`.
+ */
+export function billingFromEnv(
+  env: Record<string, string | undefined>,
+  opts: BillingFromEnvOptions,
+): { billing: Billing | null; config: BillingEnv | BillingEnvWithLookup | null; problems: string[] } {
+  const { requiredPrices, requiredCycles, requireLaunchAt, resolvePrices, entitlements, owns, ...rest } = opts;
+  const { config, problems } = readBillingEnv(env, { requiredPrices, requiredCycles, requireLaunchAt, resolvePrices }) as {
+    config: BillingEnv | BillingEnvWithLookup | null;
+    problems: string[];
+  };
+  if (!config) return { billing: null, config: null, problems };
+  const billing = createBilling({
+    ...rest,
+    environment: config.environment,
+    webhookSecret: config.webhookSecrets ?? config.webhookSecret,
+    healthToken: config.healthToken,
+    owns: owns ?? config.owns,
+    entitlements: typeof entitlements === 'function' ? entitlements(config) : (entitlements ?? {}),
+  });
+  return { billing, config, problems };
 }

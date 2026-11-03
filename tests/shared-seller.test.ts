@@ -12,7 +12,6 @@ import { loadFixture, subscriptionEvent } from './helpers/fixtures';
 
 const SECRET = 'pdl_ntfset_test';
 const NOW = new Date('2026-10-15T12:00:00Z');
-const ts = Math.floor(NOW.getTime() / 1000);
 // Prices and products in the real fixtures (subscription.created and transaction.completed share them).
 const SEAT_PRICE = 'pri_01gsz8x8sawmvhz1pv30nge1ke';
 const SEAT_PRODUCT = 'pro_01gsz4t5hdjse780zja8vvr7jg';
@@ -40,7 +39,9 @@ function setup(o: Partial<BillingConfig> = {}, store: Store = memoryStore()) {
   });
   const send = async (event: unknown) => {
     const body = JSON.stringify(event);
-    return billing.handleWebhook(new Request('https://app.test/', { method: 'POST', headers: { 'paddle-signature': sign(body, SECRET, ts) }, body }));
+    // Signed at the billing's own clock: a signature from the real NOW would be days in its future (future_timestamp).
+    const at = Math.floor((o.now ?? (() => NOW))().getTime() / 1000);
+    return billing.handleWebhook(new Request('https://app.test/', { method: 'POST', headers: { 'paddle-signature': sign(body, SECRET, at) }, body }));
   };
   const reasonOf = (eventId: string) => mark.mock.calls.filter((c) => c[0] === eventId).at(-1)?.slice(1);
   return { billing, store, send, txs, adjs, logs, reasonOf };

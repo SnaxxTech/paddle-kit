@@ -1,5 +1,5 @@
 import type { Billing } from '../core/billing';
-import { constantTimeEqual } from '../core/signature';
+import { safeEqual } from '../core/signature';
 
 /** App Router: `export const { POST, GET } = createNextRoute(billing);` in app/api/paddle/route.ts */
 export function createNextRoute(billing: Billing) {
@@ -41,7 +41,7 @@ export function createWebhookRoute({ billing, problems, healthToken }: WebhookRo
     POST: async (_req: Request) => new Response(null, { status: misconfigured ? 503 : 404 }),
     GET: async (req: Request) => {
       if (!misconfigured) return json(404, { error: 'billing_off' });
-      const authorized = !!healthToken && constantTimeEqual(req.headers.get('authorization') ?? '', `Bearer ${healthToken}`);
+      const authorized = !!healthToken && (await safeEqual(req.headers.get('authorization') ?? '', `Bearer ${healthToken}`));
       return authorized ? json(503, { error: 'misconfigured', problems }) : new Response(null, { status: 503 });
     },
   };

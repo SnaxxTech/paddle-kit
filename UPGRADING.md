@@ -22,12 +22,34 @@ Check first that your database has no tables of the new names with a different s
 ## 3. Bump the tag
 
 ```bash
-npm i github:SnaxxTech/paddle-kit#v0.6.0
+npm i github:SnaxxTech/paddle-kit#v0.7.0
 ```
 
 Commit the `package.json` and lockfile change. Since v0.5.0 the repository is public, so CI needs no token (README checklist, step 7). Then run the app's own tests and its sandbox end-to-end check.
 
 ## Per-version notes
+
+### 0.6.x → 0.7.0
+
+No migration. Steps 1–3 are for every app; 4–7 are optional.
+
+1. **Live destination: run the catalog CLI once more (each app that has a live destination).** 0.6.x made live destinations with `traffic_source: "all"`, so they also accepted simulated events, signed with the real secret. `npx paddle-kit-catalog --live --env-file <live env file> --webhook-url https://<host>/api/paddle` moves the destination to `"platform"` (one PATCH; the secret stays). A destination you made by hand: set its traffic to *Platform* (real events only) in the live dashboard (Developer tools > Notifications). Sandbox destinations stay `"all"`, so the simulator keeps working.
+2. **Monitors and drills that read a wrong secret from the store.** A request refused before the signature check (no body, too large, bad or missing signature, a timestamp out of the window) is no longer written to the store: `lastFailureReason`, `lastFailureAt` and `failedLast24h` no longer show `signature_mismatch`, `bad_signature_header`, `missing_body`, `body_too_large` or `stale_timestamp`. They are in health under `unverified` (memory of the instance that answers; resets on restart). Alert on an old `lastEventAt` instead (`paddle-kit-doctor --stale-hours <h>`, or `staleHours` in an apps file). The wrong-secret drill in the README checklist says what to look for now.
+3. **New `ReasonCode` members: `future_timestamp` and `prices_unavailable`** (and `PriceErrorCode` `ambiguous`). Add the cases to any exhaustive `switch` that ends in a `never` check. A server clock more than 60 s behind Paddle now refuses events with 401 `future_timestamp`: check NTP, or raise `clockSkewSeconds`.
+4. **`onError`.** Pass `onError: (error, ctx) => …` to `createBilling` and send the error to your error tracker, not to a public log (a driver error can carry a connection string). Optional: `hookTimeoutMs` (below 5000) and `storeTimeoutMs`.
+5. **App checks in health (D).** Add `healthChecks: { price: async () => ({ ok, detail }) }` for what only the app knows, for example where its displayed price came from (`"paddle"` or `"fallback: <reason>"`; README, Find prices by their label). A failed check turns `paddle-kit-doctor` red.
+6. **Prices found by label (C), for an app that wants no price ids in its env.** Today a one-time-purchase app (LeakScan); subscription apps keep `PADDLE_PRICES`, because `entitlements` needs the ids when `createBilling` is built. An app with its own `owns` function keeps it: `owns: { resolve: async () => myOwns(await idsFrom(config.resolvePrices())) }` (README, Find prices by their label).
+   1. Make sure the prices were made by `paddle-kit-catalog` (each has the `paddle_kit_price` label) and that each label has exactly one active price. `findPriceMap('<app>', { apiKey, environment })` shows what the kit will find.
+   2. `readBillingEnv(process.env, { requiredPrices: [...], resolvePrices: { app: '<catalog app>' } })`. Keep `owns: config.owns` as it is: it becomes a resolver, and a failed lookup answers 503 so Paddle retries.
+   3. Read ids with `await config.resolvePrices()` (in hooks, in the checkout page), never from `config.prices` (it is `{}` without `PADDLE_PRICES`). Show the price with `findPrice` instead of `getPrice`.
+   4. Put `PADDLE_API_KEY` on the host. Deploy, check with `paddle-kit-doctor`, send a sandbox checkout, and only then remove `PADDLE_PRICES` from the host (while it is set, it wins).
+7. **Rotate the webhook secret without downtime** when needed: `PADDLE_NOTIFICATION_WEBHOOK_SECRET=old,new` and `webhookSecret: config.webhookSecrets ?? config.webhookSecret` (README, Monitoring).
+8. **Chargebacks and reversals.** Handle every adjustment through `adjustmentEffect(adj)` (README, Refunds, chargebacks and reversals): `revoke`, `restore` (only what you revoked for that transaction), `review`, `none`. Before, the README example acted on approved refunds only, so a chargeback kept access and a won dispute never gave it back.
+9. **Reconcile payments.** Call `reconcilePayments(billing, { apiKey, since: <7 days ago> })` from the cron that runs `reconcile`. It needs `PADDLE_API_KEY`; your hooks must be idempotent (they already must be).
+10. **Optional: `billingFromEnv`** replaces the `readBillingEnv` + `createBilling` pair (README, Next.js example).
+11. **Watch every app:** list the apps in an `apps.json` (`name`, `url`, `tokenEnv`, `staleHours`) and run `paddle-kit-doctor --apps apps.json --json` on a schedule; exit 2 means the file is wrong, not that the apps are fine.
+
+A custom `Store` needs no change. `Health` is unchanged; the route adds `unverified` (and `checks`).
 
 ### 0.5.0 → 0.6.0
 
