@@ -10,6 +10,11 @@
   full list (status, price, period end).
 
 ### Fixed (third review, each with a test that failed first; outbox races on real Postgres)
+- **Paddle calls work on Cloudflare Workers.** The transport and the readiness key check sent `redirect: "error"`,
+  which workerd rejects with a TypeError: every call failed there (recovery `network`, readiness "Paddle did not
+  answer", and server checkout and portal helpers through the transport). All Paddle calls now send `manual` and treat
+  a 3xx as an error themselves, so a redirect is never followed and fails the same way on every host. Run in real
+  workerd (Miniflare) before and after: `network` / "did not answer" before, Paddle's own answer after.
 - **`importFulfilment` keeps the real adjustment.** A revoked import was recorded as a synthetic `import:<id>`
   refund, so the real refund's reversal (a status change on its own id) never gave the order back, and a replayed
   chargeback counted twice. **Breaking for revoked imports:** they now need `adjustmentId` (the Paddle adjustment that

@@ -8,7 +8,7 @@ export const PADDLE_API_VERSION = 1;
 
 export type FetchLike = (
   url: string,
-  init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal; redirect?: 'error' },
+  init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal; redirect?: 'manual' },
 ) => Promise<{ ok: boolean; status: number; headers?: { get(name: string): string | null }; json(): Promise<unknown> }>;
 
 export class PaddleError extends Error {
@@ -39,6 +39,9 @@ export function paddleClient(base: string, apiKey: string, fetchImpl: FetchLike,
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'Paddle-Version': String(PADDLE_API_VERSION) },
       body: body === undefined ? undefined : JSON.stringify(body),
       ...(signal ? { signal } : {}),
+      // Never followed (the key would go along): a 3xx, or a browser's opaque redirect (status 0), is not ok and
+      // throws below. `manual`, not `error`: Cloudflare Workers rejects the "error" redirect mode (since v0.8.7).
+      redirect: 'manual',
     });
     let parsed: Json = {};
     try {

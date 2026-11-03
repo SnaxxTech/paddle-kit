@@ -18,7 +18,7 @@ describe('Paddle API transport', () => {
     expect((await pending).status).toBe(200);
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(t.state().state).toBe('closed');
-    expect(fetch.mock.calls[0]![1].redirect).toBe('error');
+    expect(fetch.mock.calls[0]![1].redirect).toBe('manual'); // Workers rejects 'error' (tests/redirect.test.ts)
   });
 
   it('never retries mutations or authentication errors', async () => {
