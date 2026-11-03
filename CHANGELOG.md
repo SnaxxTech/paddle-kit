@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.2 (unreleased)
+## 0.8.2 (2026-11-03)
 
 The second review's next two items: a readiness check, and the Quickstart's three presets as tested examples. No
 migration, nothing changes unless an app opts in.
