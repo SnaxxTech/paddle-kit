@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.9.0 (2026-11-04)
+
+Integration (third review): three starters, database adapters, the outbox's own worker, review health, and a test
+in real workerd. Needs no new migration beyond 0.8.7's `006`.
+
+### Added
+- **Starters** in `examples/`: `subscription`, `unlock` (lifetime licence) and `credits` (packs). Each is a complete
+  set of files (db client, billing config, policy, webhook, recovery and outbox routes, migrations, `vercel.json`).
+  Unlock and credits use `paddle-kit/fulfil`; health covers the API key, migrations, `CRON_SECRET`, outbox and
+  unresolved reviews by default. `tests/starters.test.ts` runs every file as written on real Postgres.
+- **`paddle-kit/db`**: `fromPg` (pg and the `@neondatabase/serverless` Pool), `fromPostgresJs`, `fromPglite` give
+  `{ query, transaction }` for `postgresStore` and `createFulfilment`, each tested on the real client (the whole store
+  contract runs through postgres-js on real Postgres).
+- **`createOutboxRoute({ cronSecret, drain })`**: a bounded worker route for a frequent cron, apart from recovery.
+  `drainOutbox` takes `budgetMs` (default 20 s): no new claim after it.
+- **`reviewsCheck(query)`** (red while a fulfilment review is unresolved) and **`resolveReview(q, id)`**.
+- **`npm run smoke:workerd`** (CI): the built kit in real workerd through Miniflare, offline. Run against the 0.8.6
+  build it fails on the transport and readiness, as QR-Lab did on Workers.
+
+### Fixed
+- **jsonb through postgres-js.** postgres-js JSON-encodes a parameter Postgres types as jsonb, so the kit's JSON text
+  was stored as a jsonb *string* (`price_ids` read back as `'["pri_…"]'`, so `hasAccess` found no plan), with default,
+  `prepare: false` and `fetch_types: false` alike. Every jsonb parameter is now `$n::text::jsonb`, and rows already
+  stored that way are read as their value. Found by running the store contract through `fromPostgresJs`.
+
+### Changed
+- The Quickstart starts from the starters; the hand-written hook examples are marked as the lower-level way.
+
 ## 0.8.7 (2026-11-03)
 
 ### Changed

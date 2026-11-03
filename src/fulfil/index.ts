@@ -4,7 +4,9 @@
 import { adjustmentEffect, paymentRevoked } from '../core/adjustments';
 import type { BillingConfig } from '../core/billing';
 import type { CheckResult, Transaction } from '../core/types';
+import { jsonValue } from '../core/json';
 import { redactSecrets } from '../core/paddle-api';
+import { safeEqual } from '../core/signature';
 
 /** One query on the app's Postgres client: pg, @neondatabase/serverless Pool, postgres-js wrapper, PGlite. */
 export interface SqlTx {
@@ -97,7 +99,7 @@ export async function fulfilmentState(q: SqlTx, transactionId: string): Promise<
   const row = (await q.query('SELECT user_id, grants, state, taken FROM paddle_fulfilments WHERE transaction_id = $1', [transactionId])).rows[0];
   if (!row) return null;
   const adjustments = (await q.query('SELECT action, type, status FROM paddle_fulfilment_adjustments WHERE transaction_id = $1 ORDER BY adjustment_id', [transactionId])).rows as AdjustmentRow[];
-  return { state: row.state, userId: row.user_id, grants: row.grants, taken: row.taken ?? null, revokedBy: revokedByOf(adjustments), adjustments };
+  return { state: row.state, userId: row.user_id, grants: jsonValue(row.grants), taken: jsonValue(row.taken) ?? null, revokedBy: revokedByOf(adjustments), adjustments };
 }
 
 /**
@@ -115,7 +117,7 @@ export async function importFulfilment(
   if (o.state === 'revoked' && !o.adjustmentId) throw new Error('paddle-kit: importFulfilment of a revoked payment needs the adjustmentId that revoked it');
   const taken = o.state === 'revoked' && o.taken !== undefined ? JSON.stringify(o.taken) : null;
   const ins = await q.query(
-    `INSERT INTO paddle_fulfilments (transaction_id, user_id, grants, state, taken) VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO paddle_fulfilments (transaction_id, user_id, grants, state, taken) VALUES ($1, $2, $3::text::jsonb, $4, $5::text::jsonb)
      ON CONFLICT (transaction_id) DO NOTHING RETURNING transaction_id`,
     [o.transactionId, o.userId, JSON.stringify(o.grants), o.state, taken],
   );
@@ -160,20 +162,20 @@ export function createFulfilment<G>(db: SqlDb, actions: FulfilmentActions<G>, op
     if (!row || row.state === 'declined') return; // not paid yet (the payment settles when it arrives), or refused
     const adjustments = (await q.query('SELECT action, type, status FROM paddle_fulfilment_adjustments WHERE transaction_id = $1', [transactionId])).rows;
     const revoked = paymentRevoked(adjustments);
-    const f: Fulfilment<G> = { transactionId, userId: row.user_id, grants: row.grants as G };
+    const f: Fulfilment<G> = { transactionId, userId: row.user_id, grants: jsonValue<G>(row.grants) };
     const set = (state: FulfilmentStateName, taken: unknown) =>
-      q.query('UPDATE paddle_fulfilments SET state = $1, taken = $2, updated_at = now() WHERE transaction_id = $3', [state, taken === null || taken === undefined ? null : JSON.stringify(taken), transactionId]);
+      q.query('UPDATE paddle_fulfilments SET state = $1, taken = $2::text::jsonb, updated_at = now() WHERE transaction_id = $3', [state, taken === null || taken === undefined ? null : JSON.stringify(taken), transactionId]);
     // A revoke or restore only ever follows an adjustment, so `cause` is set on those paths.
     if (revoked && row.state === 'granted') {
       await set('revoked', await actions.revoke(q, { ...f, cause: cause! }));
     } else if (!revoked && row.state === 'revoked') {
-      await actions.restore(q, { ...f, taken: row.taken, cause: cause! });
+      await actions.restore(q, { ...f, taken: jsonValue(row.taken), cause: cause! });
       await set('granted', null);
     } else if (!revoked && row.state === 'held') {
       const out = await actions.grant(q, f);
       if (out && typeof out === 'object' && 'declined' in out) {
         await set('declined', null);
-        await review(q, { id: `declined:${transactionId}`, transactionId, kind: `declined:${out.declined}`, detail: JSON.stringify(row.grants) });
+        await review(q, { id: `declined:${transactionId}`, transactionId, kind: `declined:${out.declined}`, detail: JSON.stringify(jsonValue(row.grants)) });
       } else {
         await set('granted', null);
       }
@@ -196,7 +198,7 @@ export function createFulfilment<G>(db: SqlDb, actions: FulfilmentActions<G>, op
         }
         // 'held' until settle decides: a refund that arrived first keeps it from ever being granted.
         const ins = await q.query(
-          `INSERT INTO paddle_fulfilments (transaction_id, user_id, grants, state) VALUES ($1, $2, $3, 'held')
+          `INSERT INTO paddle_fulfilments (transaction_id, user_id, grants, state) VALUES ($1, $2, $3::text::jsonb, 'held')
            ON CONFLICT (transaction_id) DO NOTHING RETURNING transaction_id`,
           [tx.transactionId, order.userId, JSON.stringify(order.grants)],
         );
@@ -233,7 +235,7 @@ export function createFulfilment<G>(db: SqlDb, actions: FulfilmentActions<G>, op
  * commit. `id` is the idempotency key (e.g. `${transactionId}:receipt`): a retried webhook adds nothing.
  */
 export async function enqueue(q: SqlTx, item: { id: string; kind: string; payload: unknown }): Promise<void> {
-  await q.query('INSERT INTO paddle_outbox (id, kind, payload) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING', [item.id, item.kind, JSON.stringify(item.payload ?? null)]);
+  await q.query('INSERT INTO paddle_outbox (id, kind, payload) VALUES ($1, $2, $3::text::jsonb) ON CONFLICT (id) DO NOTHING', [item.id, item.kind, JSON.stringify(item.payload ?? null)]);
 }
 
 export interface OutboxHandlers {
@@ -247,6 +249,8 @@ export interface DrainOptions {
   maxAttempts?: number;
   /** How long a claimed item is hidden from other runs while it is being sent. Default 120 s. */
   leaseSeconds?: number;
+  /** No item is claimed after this many ms since the run started (since v0.9.0; default 20 s): bounded per run. */
+  budgetMs?: number;
 }
 
 /**
@@ -271,7 +275,9 @@ export async function drainOutbox(
   // clock_timestamp(), never now(): a caller's transaction freezes now() at its start.
   // The token is the claim's next_at in epoch microseconds: exact, and independent of the session's DateStyle.
   const token = `(extract(epoch FROM next_at) * 1000000)::bigint`;
-  for (let n = 0; n < limit; n++) {
+  const started = Date.now();
+  const budgetMs = o.budgetMs ?? 20_000;
+  for (let n = 0; n < limit && Date.now() - started < budgetMs; n++) {
     // One at a time, so an item's lease starts when it is sent, not when the batch began. A claim counts as an
     // attempt, so an item whose handler always outlives its lease still stops at maxAttempts.
     const item = (await query(
@@ -290,7 +296,7 @@ export async function drainOutbox(
     const handler = handlers[item.kind];
     try {
       if (!handler) throw new Error(`no handler for kind "${item.kind}"`);
-      await handler(item.payload, { id: item.id, attempts: attempts - 1 });
+      await handler(jsonValue(item.payload), { id: item.id, attempts: attempts - 1 });
       // Sent is final and true whoever holds the lease now: marked even after a takeover, so it is not sent again.
       await query('UPDATE paddle_outbox SET sent_at = clock_timestamp(), last_error = NULL WHERE id = $1 AND sent_at IS NULL', [item.id]);
       out.sent++;
@@ -326,5 +332,46 @@ export function outboxCheck(query: SqlTx['query'], o: { maxAgeMinutes?: number; 
     )).rows[0];
     if (!r || (r.gave_up === 0 && r.late === 0)) return { ok: true };
     return { ok: false, detail: `${r.gave_up} gave up, ${r.late} waiting over ${o.maxAgeMinutes ?? 60} min (oldest: ${r.oldest_kind})` };
+  };
+}
+
+/**
+ * A health check (since v0.9.0): red while a fulfilment review is unresolved (a paid order nobody fulfilled, a
+ * declined grant, a partial refund or a chargeback warning: each needs a person). `resolveReview` clears one.
+ */
+export function reviewsCheck(query: SqlTx['query']): () => Promise<CheckResult> {
+  return async () => {
+    const rows = (await query(
+      'SELECT kind, count(*)::int AS n FROM paddle_fulfilment_reviews WHERE resolved_at IS NULL GROUP BY kind ORDER BY kind',
+    )).rows as Array<{ kind: string; n: number }>;
+    const total = rows.reduce((sum, r) => sum + Number(r.n), 0);
+    if (total === 0) return { ok: true };
+    return { ok: false, detail: `${total} unresolved fulfilment review${total === 1 ? '' : 's'} (${rows.map((r) => r.kind).join(', ')})` };
+  };
+}
+
+/** Marks a review handled (since v0.9.0). False when it does not exist or was already resolved. */
+export async function resolveReview(q: SqlTx, id: string): Promise<boolean> {
+  return (await q.query('UPDATE paddle_fulfilment_reviews SET resolved_at = now() WHERE id = $1 AND resolved_at IS NULL RETURNING id', [id])).rows.length > 0;
+}
+
+/**
+ * The outbox's own worker route (since v0.9.0), for a frequent cron (every few minutes), separate from the hourly
+ * or daily recovery job: `export const { GET } = createOutboxRoute({ cronSecret, drain: () => drainOutbox(…) })`.
+ * Refuses (401) without `Authorization: Bearer <cronSecret>`, and always when `cronSecret` is unset. Answers the
+ * drain's result, or 500 with the error's name only (a driver message may hold a secret). Bound it with the
+ * drain's `limit` and `budgetMs`, below the route's own time limit.
+ */
+export function createOutboxRoute(opts: { cronSecret: string | undefined; drain: () => Promise<{ sent: number; failed: number; gaveUp: number; lost: number }> }) {
+  return {
+    GET: async (req: Request): Promise<Response> => {
+      const secret = opts.cronSecret;
+      if (!secret || !(await safeEqual(req.headers.get('authorization') ?? '', `Bearer ${secret}`))) return new Response(null, { status: 401 });
+      try {
+        return Response.json(await opts.drain());
+      } catch (error) {
+        return Response.json({ error: (error as Error)?.name ?? 'Error' }, { status: 500 });
+      }
+    },
   };
 }

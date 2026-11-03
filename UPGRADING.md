@@ -1,5 +1,14 @@
 # Upgrading paddle-kit
 
+## 0.9.0 (from 0.8.7)
+
+1. **postgres-js apps (QR-Lab):** nothing to run. Rows the kit wrote before are read correctly; each row is written
+   properly again on its next webhook or recovery run. To check now: `SELECT count(*) FROM paddle_subscriptions WHERE
+   jsonb_typeof(price_ids) = 'string'`.
+2. Optional: replace `{ query: (t, p) => … }` wrappers with `paddle-kit/db` (`fromPostgresJs(sql)` etc.).
+3. One-time sales with the outbox: add the outbox route (`createOutboxRoute`) on its own cron, and
+   `reviews: reviewsCheck(query)` to `healthChecks`.
+
 ## 0.8.7 (from 0.8.6)
 
 1. Run migration `006_recovery_progress` (CREATE-only; Postgres and SQLite). Readiness reports it missing until then.

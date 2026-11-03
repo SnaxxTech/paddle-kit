@@ -7,7 +7,7 @@ const tgz = execFileSync('npm', ['pack', '--silent'], { encoding: 'utf8' }).trim
 const dir = mkdtempSync(join(tmpdir(), 'paddle-kit-smoke-'));
 writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'smoke', type: 'module', private: true }));
 execFileSync('npm', ['i', '--silent', resolve(tgz), '@paddle/paddle-js', 'typescript@5.9.3', '@types/node'], { cwd: dir, stdio: 'inherit' });
-const subpaths = ['core', 'memory', 'postgres', 'sqlite', 'next', 'client', 'reconcile', 'plan', 'config', 'catalog', 'price'];
+const subpaths = ['core', 'memory', 'postgres', 'sqlite', 'next', 'client', 'reconcile', 'plan', 'config', 'catalog', 'price', 'server', 'fulfil', 'db'];
 const code = subpaths.map((p) => `await import('paddle-kit/${p}');`).join('\n') + "\nconsole.log('all subpaths import');";
 // CommonJS-style resolvers (Playwright, tsx, Jest) resolve through the "default" condition.
 const resolveCheck = subpaths.map((p) => `require.resolve('paddle-kit/${p}');`).join('\n') + "\nconsole.log('all subpaths resolve via require');";
