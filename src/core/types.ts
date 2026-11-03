@@ -191,9 +191,15 @@ export interface Store {
    * attempt holds a live claim (`received` at or after `leaseExpiredBefore`), so this delivery must not run the hooks.
    * Otherwise the row is (re)claimed: inserted, or a `failed` / expired `received` row is set to `received` at `receivedAt`.
    * Without `leaseExpiredBefore` a `received` row is always reclaimable (the v0.3 behaviour).
+   * `claimToken` (since v0.8.0, the handler always sends a fresh one) names the claim's owner, for `markEvent`.
    */
-  recordEvent(e: { eventId: string; eventType: string; occurredAt: string; receivedAt: string; leaseExpiredBefore?: string }): Promise<{ alreadyDone: boolean; inProgress?: boolean }>;
-  markEvent(eventId: string, status: EventStatus, reason: ReasonCode | null): Promise<void>;
+  recordEvent(e: { eventId: string; eventType: string; occurredAt: string; receivedAt: string; leaseExpiredBefore?: string; claimToken?: string }): Promise<{ alreadyDone: boolean; inProgress?: boolean }>;
+  /**
+   * Writes the event's status and releases its claim. With `claimToken` (since v0.8.0) both happen only if that claim
+   * still owns the event, atomically, and the answer is whether it did: an attempt whose lease expired and was taken
+   * over gets `false`, and changes neither the status nor its replacement's claim. Without it: unconditional (v0.7).
+   */
+  markEvent(eventId: string, status: EventStatus, reason: ReasonCode | null, claimToken?: string): Promise<void | boolean>;
   recordFailure(reason: ReasonCode, at: Date): Promise<void>;
   /**
    * @deprecated since v0.5.0: the kit no longer calls it (customer.* events are ignored). Still required, so custom

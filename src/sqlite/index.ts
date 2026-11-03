@@ -78,6 +78,16 @@ CREATE TABLE IF NOT EXISTS paddle_transactions (
 );
 CREATE INDEX IF NOT EXISTS paddle_events_unfinished_idx ON paddle_events (received_at) WHERE status IN ('received','failed');`,
   },
+  {
+    name: '004_claim_tokens_owned_ids',
+    // A new claims table, not ALTER TABLE: SQLite has no ADD COLUMN IF NOT EXISTS, and these migrations rerun at startup.
+    // paddle_event_claims is no longer used (a claim lives ~a minute: nothing to copy).
+    sql: `CREATE TABLE IF NOT EXISTS paddle_event_leases (
+  event_id TEXT PRIMARY KEY,
+  claimed_at INTEGER NOT NULL,
+  claim_token TEXT
+);`,
+  },
 ];
 
 const DAY_MS = 86_400_000;
@@ -164,7 +174,7 @@ export function sqliteStore({ db }: { db: SqliteDatabase }): Store {
       },
       async getPendingEvents(e) {
         return (q(`SELECT e.event_id, e.event_type, e.occurred_at FROM paddle_events e WHERE e.status IN ('received','failed') AND e.received_at <= ?
-          AND NOT EXISTS (SELECT 1 FROM paddle_event_claims c WHERE c.event_id = e.event_id AND c.claimed_at > ?)
+          AND NOT EXISTS (SELECT 1 FROM paddle_event_leases c WHERE c.event_id = e.event_id AND c.claimed_at > ?)
           ORDER BY e.received_at, e.event_id LIMIT ?`).all(ms(e.before), ms(e.before), e.limit) as Row[])
           .map(r => ({ eventId: r.event_id as string, eventType: r.event_type as string, occurredAt: iso(r.occurred_at)! }));
       },
@@ -177,14 +187,21 @@ export function sqliteStore({ db }: { db: SqliteDatabase }): Store {
       const row = q(`SELECT status FROM paddle_events WHERE event_id = ?`).get(e.eventId) as { status: EventStatus };
       if (DONE.has(row.status)) return { alreadyDone: true };
       if (e.leaseExpiredBefore === undefined) return { alreadyDone: false };
-      const claim = q(`INSERT INTO paddle_event_claims (event_id, claimed_at) VALUES (?, ?)
-         ON CONFLICT (event_id) DO UPDATE SET claimed_at = excluded.claimed_at
-         WHERE paddle_event_claims.claimed_at < ?`).run(e.eventId, ms(e.receivedAt), ms(e.leaseExpiredBefore));
+      const claim = q(`INSERT INTO paddle_event_leases (event_id, claimed_at, claim_token) VALUES (?, ?, ?)
+         ON CONFLICT (event_id) DO UPDATE SET claimed_at = excluded.claimed_at, claim_token = excluded.claim_token
+         WHERE paddle_event_leases.claimed_at < ?`).run(e.eventId, ms(e.receivedAt), e.claimToken ?? null, ms(e.leaseExpiredBefore));
       return claim.changes > 0 ? { alreadyDone: false } : { alreadyDone: false, inProgress: true };
     },
-    async markEvent(eventId, status, reason) {
+    async markEvent(eventId, status, reason, claimToken) {
+      if (claimToken === undefined) {
+        q(`UPDATE paddle_events SET status = ?, reason = ? WHERE event_id = ?`).run(status, reason, eventId);
+        q(`DELETE FROM paddle_event_leases WHERE event_id = ?`).run(eventId);
+        return;
+      }
+      // Synchronous statements on one connection: nothing runs between the conditional release and the status write.
+      if (q(`DELETE FROM paddle_event_leases WHERE event_id = ? AND claim_token = ?`).run(eventId, claimToken).changes === 0) return false;
       q(`UPDATE paddle_events SET status = ?, reason = ? WHERE event_id = ?`).run(status, reason, eventId);
-      q(`DELETE FROM paddle_event_claims WHERE event_id = ?`).run(eventId);
+      return true;
     },
     async recordFailure(reason, at) {
       const t = at.getTime();

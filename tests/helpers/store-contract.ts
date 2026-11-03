@@ -26,6 +26,20 @@ export function runStoreContract(name: string, makeStore: () => Promise<Store>):
       }
     });
 
+    it('a claim is released only by its owner: an expired worker cannot release its replacement', async () => {
+      const claim = (receivedAt: string, leaseExpiredBefore: string, claimToken: string) =>
+        store.recordEvent({ ...ev('evt_c', receivedAt), leaseExpiredBefore, claimToken });
+      expect(await claim('2026-10-15T10:00:00.000Z', '2026-10-15T09:59:00.000Z', 'tok_a')).toEqual({ alreadyDone: false });
+      // A's lease expired: B takes the event over
+      expect(await claim('2026-10-15T10:01:01.000Z', '2026-10-15T10:00:01.000Z', 'tok_b')).toEqual({ alreadyDone: false });
+      // A finally fails: its late mark must neither record a status nor release B's claim
+      expect(await store.markEvent('evt_c', 'failed', 'hook_error', 'tok_a')).toBe(false);
+      expect(await claim('2026-10-15T10:01:02.000Z', '2026-10-15T10:00:02.000Z', 'tok_c')).toEqual({ alreadyDone: false, inProgress: true });
+      expect((await store.health(new Date('2026-10-15T10:01:03.000Z'))).unresolvedFailed).toBe(0);
+      expect(await store.markEvent('evt_c', 'processed', null, 'tok_b')).toBe(true);
+      expect(await claim('2026-10-15T10:01:03.000Z', '2026-10-15T10:00:03.000Z', 'tok_d')).toEqual({ alreadyDone: true });
+    });
+
     it('round-trips a subscription', async () => {
       const s = sub({ scheduledChange: { action: 'cancel', effectiveAt: '2026-11-01T00:00:00.000Z' }, priceIds: ['a', 'b'] });
       expect(await store.upsertSubscription(s)).toEqual({ applied: true });

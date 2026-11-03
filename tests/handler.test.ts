@@ -335,7 +335,7 @@ describe('webhook handler', () => {
       const markEvent = vi.spyOn(store, 'markEvent');
       const res = await handle(post(txBody()));
       expect(res.status).toBe(200);
-      expect(markEvent).toHaveBeenCalledWith(raw.event_id, 'processed', null);
+      expect(markEvent).toHaveBeenCalledWith(raw.event_id, 'processed', null, expect.any(String));
       for (const spy of spies) expect(spy).not.toHaveBeenCalled();
       expect(await store.getSubscription(raw.data.subscription_id)).toBeNull();
       expect((await store.health(NOW)).failedLast24h).toBe(0);

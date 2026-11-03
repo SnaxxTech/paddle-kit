@@ -87,7 +87,7 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
       },
       async getPendingEvents(e) {
         const { rows } = await query(`SELECT e.event_id, e.event_type, e.occurred_at FROM paddle_events e WHERE e.status IN ('received','failed')
-          AND e.received_at <= $1 AND NOT EXISTS (SELECT 1 FROM paddle_event_claims c WHERE c.event_id = e.event_id AND c.claimed_at > $1)
+          AND e.received_at <= $1 AND NOT EXISTS (SELECT 1 FROM paddle_event_leases c WHERE c.event_id = e.event_id AND c.claimed_at > $1)
           ORDER BY e.received_at, e.event_id LIMIT $2`, [e.before, e.limit]);
         return rows.map(r => ({ eventId: r.event_id as string, eventType: r.event_type as string, occurredAt: iso(r.occurred_at)! }));
       },
@@ -105,24 +105,36 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
       // The claim row is separate from the ledger row, so a retry never hides a failed event from health.
       // A concurrent claimer blocks on the row lock, then re-checks the WHERE against the winner's committed claim.
       const claim = await query(
-        `INSERT INTO paddle_event_claims (event_id, claimed_at) VALUES ($1, ${ms(2)})
-         ON CONFLICT (event_id) DO UPDATE SET claimed_at = EXCLUDED.claimed_at
-           WHERE paddle_event_claims.claimed_at < $3::timestamptz
+        `INSERT INTO paddle_event_leases (event_id, claimed_at, claim_token) VALUES ($1, ${ms(2)}, $4)
+         ON CONFLICT (event_id) DO UPDATE SET claimed_at = EXCLUDED.claimed_at, claim_token = EXCLUDED.claim_token
+           WHERE paddle_event_leases.claimed_at < $3::timestamptz
          RETURNING event_id`,
-        [e.eventId, e.receivedAt, e.leaseExpiredBefore],
+        [e.eventId, e.receivedAt, e.leaseExpiredBefore, e.claimToken ?? null],
       );
       if (claim.rows.length === 0) return { alreadyDone: false, inProgress: true };
       // markEvent writes the status before it releases the claim: a claim won just after a release sees the status.
       const { rows: [now] } = await query(`SELECT status FROM paddle_events WHERE event_id = $1`, [e.eventId]);
       if (isDone(now?.status)) {
-        await query(`DELETE FROM paddle_event_claims WHERE event_id = $1`, [e.eventId]);
+        await query(`DELETE FROM paddle_event_leases WHERE event_id = $1`, [e.eventId]);
         return { alreadyDone: true };
       }
       return { alreadyDone: false };
     },
-    async markEvent(eventId, status, reason) {
-      await query(`UPDATE paddle_events SET status = $2, reason = $3 WHERE event_id = $1`, [eventId, status, reason]);
-      await query(`DELETE FROM paddle_event_claims WHERE event_id = $1`, [eventId]);
+    async markEvent(eventId, status, reason, claimToken) {
+      if (claimToken === undefined) {
+        await query(`UPDATE paddle_events SET status = $2, reason = $3 WHERE event_id = $1`, [eventId, status, reason]);
+        await query(`DELETE FROM paddle_event_leases WHERE event_id = $1`, [eventId]);
+        return;
+      }
+      // One statement: the claim is released and the status written only while this token still owns the claim. A
+      // takeover in between (its UPDATE of the claim row) either commits first, so nothing matches here, or waits on
+      // the row lock until this commits and then finds the row gone and the status written.
+      const { rows } = await query(
+        `WITH released AS (DELETE FROM paddle_event_leases WHERE event_id = $1 AND claim_token = $4 RETURNING event_id)
+         UPDATE paddle_events SET status = $2, reason = $3 WHERE event_id = (SELECT event_id FROM released) RETURNING event_id`,
+        [eventId, status, reason, claimToken],
+      );
+      return rows.length > 0;
     },
     async recordFailure(reason, at) {
       await query(

@@ -77,4 +77,14 @@ CREATE INDEX IF NOT EXISTS paddle_events_unfinished_idx ON paddle_events (receiv
   WHERE status IN ('received', 'failed');
 `,
   },
+  {
+    name: '004_claim_tokens_owned_ids',
+    // A new claims table instead of ALTER TABLE: migrations stay CREATE-only. paddle_event_claims is no longer used.
+    sql: `CREATE TABLE IF NOT EXISTS paddle_event_leases (
+  event_id text PRIMARY KEY,
+  claimed_at timestamptz NOT NULL,
+  claim_token text
+);
+`,
+  },
 ];

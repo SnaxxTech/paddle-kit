@@ -11,7 +11,7 @@ export function memoryStore(): Store {
   const failures: FailureHit[] = [];
   const subs = new Map<string, Subscription>();
   const customers = new Map<string, Customer>();
-  const claims = new Map<string, string>(); // eventId -> claimedAt
+  const claims = new Map<string, { at: string; token?: string }>(); // eventId -> claim
   const recoveries = new Map<string, RecoveryState>();
   const transactions = new Map<string, boolean>(); // transactionId -> owned
 
@@ -22,14 +22,16 @@ export function memoryStore(): Store {
       if (!existing) events.set(e.eventId, { eventId: e.eventId, eventType: e.eventType, occurredAt: e.occurredAt, receivedAt: e.receivedAt, status: 'received', reason: null });
       if (e.leaseExpiredBefore === undefined) return { alreadyDone: false };
       const held = claims.get(e.eventId);
-      if (held !== undefined && Date.parse(held) >= Date.parse(e.leaseExpiredBefore)) return { alreadyDone: false, inProgress: true };
-      claims.set(e.eventId, e.receivedAt);
+      if (held !== undefined && Date.parse(held.at) >= Date.parse(e.leaseExpiredBefore)) return { alreadyDone: false, inProgress: true };
+      claims.set(e.eventId, { at: e.receivedAt, token: e.claimToken });
       return { alreadyDone: false };
     },
-    async markEvent(eventId, status, reason) {
+    async markEvent(eventId, status, reason, claimToken) {
+      if (claimToken !== undefined && claims.get(eventId)?.token !== claimToken) return false;
       const row = events.get(eventId);
       if (row) Object.assign(row, { status, reason });
       claims.delete(eventId);
+      return true;
     },
     async recordFailure(reason, at) {
       failures.push({ at: at.toISOString(), reason });
@@ -74,7 +76,7 @@ export function memoryStore(): Store {
       async getPendingEvents({ before, limit }) {
         return [...events.values()].filter(e => (e.status === 'received' || e.status === 'failed')
           && Date.parse(e.receivedAt) <= Date.parse(before)
-          && (!claims.has(e.eventId) || Date.parse(claims.get(e.eventId)!) <= Date.parse(before)))
+          && (!claims.has(e.eventId) || Date.parse(claims.get(e.eventId)!.at) <= Date.parse(before)))
           .sort((a, b) => Date.parse(a.receivedAt) - Date.parse(b.receivedAt) || a.eventId.localeCompare(b.eventId))
           .slice(0, limit).map(({ eventId, eventType, occurredAt }) => ({ eventId, eventType, occurredAt }));
       },

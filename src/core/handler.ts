@@ -143,6 +143,8 @@ export interface ProcessResult {
   reason: ReasonCode | null;
 }
 
+const IN_PROGRESS: ProcessResult = { http: 409, body: { error: 'in_progress' }, outcome: 'in_progress', reason: null };
+
 export type WebhookHandler = ((req: Request) => Promise<Response>) & { process(ev: NormalisedEvent): Promise<ProcessResult> };
 
 export function createWebhookHandler(d: HandlerDeps): WebhookHandler {
@@ -257,16 +259,20 @@ export function createWebhookHandler(d: HandlerDeps): WebhookHandler {
   async function process(ev: NormalisedEvent): Promise<ProcessResult> {
     const tag = { eventId: ev.eventId, eventType: ev.eventType };
     let recorded = false;
+    // Names this attempt's claim: only the owner may write the outcome and release it (an attempt that outlived its lease
+    // and was taken over must not free the event for a third delivery while its replacement still runs).
+    const claimToken = crypto.randomUUID();
     try {
       const at = d.now();
       const leaseExpiredBefore = new Date(at.getTime() - (d.leaseSeconds ?? 60) * 1000).toISOString();
-      const claim = await d.store.recordEvent({ ...tag, occurredAt: ev.occurredAt, receivedAt: at.toISOString(), leaseExpiredBefore });
+      const claim = await d.store.recordEvent({ ...tag, occurredAt: ev.occurredAt, receivedAt: at.toISOString(), leaseExpiredBefore, claimToken });
       if (claim.alreadyDone) return { http: 200, body: { received: true, duplicate: true }, outcome: 'duplicate', reason: null };
       // Another delivery of this event is running its hooks. Not a 2xx: if that attempt fails, this retry must come back.
-      if (claim.inProgress) return { http: 409, body: { error: 'in_progress' }, outcome: 'in_progress', reason: null };
+      if (claim.inProgress) return IN_PROGRESS;
       recorded = true;
       const outcome = await apply(ev);
-      await d.store.markEvent(ev.eventId, outcome.status, outcome.reason);
+      // Lost the claim: a takeover owns the event now and writes its outcome. Not a 2xx, so Paddle comes back later.
+      if ((await d.store.markEvent(ev.eventId, outcome.status, outcome.reason, claimToken)) === false) return IN_PROGRESS;
       if (outcome.reason && !QUIET.has(outcome.reason)) d.log({ level: 'warn', reason: outcome.reason, ...tag });
       return { http: 200, body: { received: true }, outcome: outcome.status, reason: outcome.reason };
     } catch (err) {
@@ -275,7 +281,8 @@ export function createWebhookHandler(d: HandlerDeps): WebhookHandler {
       report(d.onError, err instanceof Failure ? err.original : err, { reason, ...tag });
       try {
         if (!recorded) throw new Error('event row never written');
-        await d.store.markEvent(ev.eventId, 'failed', reason);
+        // A takeover owns the event: leave its row alone, but keep this failure visible in health.
+        if ((await d.store.markEvent(ev.eventId, 'failed', reason, claimToken)) === false) await d.store.recordFailure(reason, d.now());
       } catch {
         if (reason !== 'store_error') d.log({ level: 'error', reason: 'store_error', ...tag });
         try {
