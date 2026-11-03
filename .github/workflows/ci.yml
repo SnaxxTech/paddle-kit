@@ -28,6 +28,8 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run smoke
+      # The built kit in real workerd (Cloudflare Workers' runtime, Miniflare): catches what check:edge cannot.
+      - run: npm run smoke:workerd
 
   # Concurrency on a real Postgres server. PADDLE_KIT_REQUIRE_PG=1 turns a skip into a failure.
   postgres:

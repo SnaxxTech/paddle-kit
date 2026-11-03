@@ -405,3 +405,45 @@ describe('outbox and import edge cases (third review, independent pass)', () => 
     await expect(imp('txn_2')).rejects.toThrow(/adj_same/);
   });
 });
+
+describe('reviews health and the outbox worker route (since v0.9.0)', () => {
+  it('reviewsCheck is red while a review is unresolved; resolveReview clears it', async () => {
+    const { reviewsCheck, resolveReview } = await import('../src/fulfil');
+    const { pg, db } = await database();
+    const query = (t: string, p?: unknown[]) => pg.query(t, p);
+    expect(await reviewsCheck(query)()).toEqual({ ok: true });
+    const t = harness(pg, db);
+    await t.pay('txn_1', { userId: null }); // paid, but orderOf cannot fulfil it
+    await t.adjust('adj_p', 'txn_1', 'refund', 'approved', 'partial');
+    expect(await reviewsCheck(query)()).toEqual({ ok: false, detail: '2 unresolved fulfilment reviews (refund, unfulfilled_payment)' });
+    expect(await db.transaction((q) => resolveReview(q, 'txn:txn_1'))).toBe(true);
+    expect(await db.transaction((q) => resolveReview(q, 'txn:txn_1'))).toBe(false); // already resolved
+    expect(await reviewsCheck(query)()).toEqual({ ok: false, detail: '1 unresolved fulfilment review (refund)' });
+  });
+
+  it('drainOutbox stops claiming once its time budget is spent; the rest wait for the next run', async () => {
+    const { pg, db } = await database();
+    await db.transaction(async (q) => { for (let i = 0; i < 6; i++) await enqueue(q, { id: `b${i}`, kind: 'email', payload: {} }); });
+    const query = (t: string, p?: unknown[]) => pg.query(t, p);
+    const out = await drainOutbox(query, { email: () => new Promise((r) => setTimeout(r, 60)) }, { limit: 50, budgetMs: 100 });
+    expect(out.sent).toBeGreaterThan(0);
+    expect(out.sent).toBeLessThan(6);
+    const left = (await pg.query<{ n: number }>('SELECT count(*)::int AS n FROM paddle_outbox WHERE sent_at IS NULL AND attempts = 0')).rows[0]!.n;
+    expect(left).toBe(6 - out.sent); // never claimed: no lease to wait out
+  });
+
+  it('createOutboxRoute: cron secret required; answers the drain result; a throw is a 500 with the error name only', async () => {
+    const { createOutboxRoute } = await import('../src/fulfil');
+    const req = (auth?: string) => new Request('https://app.test/api/cron/outbox', { headers: auth ? { authorization: auth } : {} });
+    const ok = createOutboxRoute({ cronSecret: 'cron_s3cret', drain: async () => ({ sent: 2, failed: 0, gaveUp: 0, lost: 0 }) });
+    for (const a of [undefined, 'Bearer wrong', 'Bearer undefined']) expect((await ok.GET(req(a))).status).toBe(401);
+    await expect(createOutboxRoute({ cronSecret: undefined, drain: async () => ({ sent: 0, failed: 0, gaveUp: 0, lost: 0 }) }).GET(req('Bearer undefined')).then((r) => r.status)).resolves.toBe(401);
+    const r = await ok.GET(req('Bearer cron_s3cret'));
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ sent: 2, failed: 0, gaveUp: 0, lost: 0 });
+    const bad = createOutboxRoute({ cronSecret: 'cron_s3cret', drain: async () => { throw new Error('password=hunter2 refused'); } });
+    const b = await bad.GET(req('Bearer cron_s3cret'));
+    expect(b.status).toBe(500);
+    expect(JSON.stringify(await b.json())).not.toContain('hunter2');
+  });
+});

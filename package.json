@@ -1,6 +1,6 @@
 {
   "name": "paddle-kit",
-  "version": "0.8.7",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
   "bin": {
@@ -74,11 +74,12 @@
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
-    "test:pg": "vitest run tests/pg-concurrency.test.ts",
+    "test:pg": "vitest run tests/pg-concurrency.test.ts tests/db-adapters.test.ts tests/starters.test.ts",
     "bench:webhook": "node scripts/bench-webhook.mjs",
     "typecheck": "tsc --noEmit",
     "check:edge": "node scripts/check-edge.mjs",
-    "smoke": "node scripts/smoke-pack.mjs"
+    "smoke": "node scripts/smoke-pack.mjs",
+    "smoke:workerd": "node scripts/smoke-workerd.mjs"
   },
   "peerDependencies": {
     "@paddle/paddle-js": "^1.0.0"
@@ -97,6 +98,7 @@
     "@types/node": "^26.6.5",
     "better-sqlite3": "^13.0.3",
     "embedded-postgres": "17.10.0-beta.17",
+    "esbuild": "^0.28.2",
     "miniflare": "^3.20250718.3",
     "pg": "8.23.1",
     "postgres": "^3.4.9",

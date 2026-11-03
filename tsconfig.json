@@ -9,7 +9,8 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "types": ["node"],
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "paths": { "paddle-kit/*": ["./src/*"] }
   },
-  "include": ["src", "tests", "scripts"]
+  "include": ["src", "tests", "scripts", "examples"]
 }

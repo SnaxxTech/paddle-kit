@@ -6,6 +6,7 @@ import type { BillingConfig } from '../core/billing';
 import type { CheckResult, Transaction } from '../core/types';
 import { jsonValue } from '../core/json';
 import { redactSecrets } from '../core/paddle-api';
+import { safeEqual } from '../core/signature';
 
 /** One query on the app's Postgres client: pg, @neondatabase/serverless Pool, postgres-js wrapper, PGlite. */
 export interface SqlTx {
@@ -248,6 +249,8 @@ export interface DrainOptions {
   maxAttempts?: number;
   /** How long a claimed item is hidden from other runs while it is being sent. Default 120 s. */
   leaseSeconds?: number;
+  /** No item is claimed after this many ms since the run started (since v0.9.0; default 20 s): bounded per run. */
+  budgetMs?: number;
 }
 
 /**
@@ -272,7 +275,9 @@ export async function drainOutbox(
   // clock_timestamp(), never now(): a caller's transaction freezes now() at its start.
   // The token is the claim's next_at in epoch microseconds: exact, and independent of the session's DateStyle.
   const token = `(extract(epoch FROM next_at) * 1000000)::bigint`;
-  for (let n = 0; n < limit; n++) {
+  const started = Date.now();
+  const budgetMs = o.budgetMs ?? 20_000;
+  for (let n = 0; n < limit && Date.now() - started < budgetMs; n++) {
     // One at a time, so an item's lease starts when it is sent, not when the batch began. A claim counts as an
     // attempt, so an item whose handler always outlives its lease still stops at maxAttempts.
     const item = (await query(
@@ -327,5 +332,46 @@ export function outboxCheck(query: SqlTx['query'], o: { maxAgeMinutes?: number; 
     )).rows[0];
     if (!r || (r.gave_up === 0 && r.late === 0)) return { ok: true };
     return { ok: false, detail: `${r.gave_up} gave up, ${r.late} waiting over ${o.maxAgeMinutes ?? 60} min (oldest: ${r.oldest_kind})` };
+  };
+}
+
+/**
+ * A health check (since v0.9.0): red while a fulfilment review is unresolved (a paid order nobody fulfilled, a
+ * declined grant, a partial refund or a chargeback warning: each needs a person). `resolveReview` clears one.
+ */
+export function reviewsCheck(query: SqlTx['query']): () => Promise<CheckResult> {
+  return async () => {
+    const rows = (await query(
+      'SELECT kind, count(*)::int AS n FROM paddle_fulfilment_reviews WHERE resolved_at IS NULL GROUP BY kind ORDER BY kind',
+    )).rows as Array<{ kind: string; n: number }>;
+    const total = rows.reduce((sum, r) => sum + Number(r.n), 0);
+    if (total === 0) return { ok: true };
+    return { ok: false, detail: `${total} unresolved fulfilment review${total === 1 ? '' : 's'} (${rows.map((r) => r.kind).join(', ')})` };
+  };
+}
+
+/** Marks a review handled (since v0.9.0). False when it does not exist or was already resolved. */
+export async function resolveReview(q: SqlTx, id: string): Promise<boolean> {
+  return (await q.query('UPDATE paddle_fulfilment_reviews SET resolved_at = now() WHERE id = $1 AND resolved_at IS NULL RETURNING id', [id])).rows.length > 0;
+}
+
+/**
+ * The outbox's own worker route (since v0.9.0), for a frequent cron (every few minutes), separate from the hourly
+ * or daily recovery job: `export const { GET } = createOutboxRoute({ cronSecret, drain: () => drainOutbox(…) })`.
+ * Refuses (401) without `Authorization: Bearer <cronSecret>`, and always when `cronSecret` is unset. Answers the
+ * drain's result, or 500 with the error's name only (a driver message may hold a secret). Bound it with the
+ * drain's `limit` and `budgetMs`, below the route's own time limit.
+ */
+export function createOutboxRoute(opts: { cronSecret: string | undefined; drain: () => Promise<{ sent: number; failed: number; gaveUp: number; lost: number }> }) {
+  return {
+    GET: async (req: Request): Promise<Response> => {
+      const secret = opts.cronSecret;
+      if (!secret || !(await safeEqual(req.headers.get('authorization') ?? '', `Bearer ${secret}`))) return new Response(null, { status: 401 });
+      try {
+        return Response.json(await opts.drain());
+      } catch (error) {
+        return Response.json({ error: (error as Error)?.name ?? 'Error' }, { status: 500 });
+      }
+    },
   };
 }
