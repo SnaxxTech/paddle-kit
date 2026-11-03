@@ -32,7 +32,7 @@ describe('durable billing recovery', () => {
   it('keeps the checkpoint on partial failure, then self-heals when the hook recovers', async () => {
     let fail = true;
     const b = fixture(() => { if (fail) throw new Error('injected failure'); });
-    expect(await recoverBilling(b, options)).toEqual({ status: 'failed', reason: 'incomplete' });
+    expect(await recoverBilling(b, options)).toMatchObject({ status: 'failed', reason: 'incomplete', payments: { transactions: { failed: 1 } } });
     expect(await b.store.recovery!.getRecovery('sandbox')).toMatchObject({ status: 'failed', checkpointAt: null });
     fail = false;
     expect(await recoverBilling(b, options)).toMatchObject({ status: 'done', since: new Date(0).toISOString() });
@@ -76,4 +76,14 @@ describe('durable billing recovery', () => {
     await stuck.store.recordEvent({ eventId: 'evt_stuck', eventType: 'subscription.created', occurredAt: at.toISOString(), receivedAt: '2026-10-01T00:00:00Z' });
     expect(diagnose(200, JSON.stringify(await stuck.store.health(at)), { now: at.getTime() }).ok).toBe(false);
   });
+
+  it('an adjustment with an invalid timestamp is never skipped silently: recovery is incomplete and the checkpoint holds', async () => {
+    const b = fixture();
+    const broken = { id: 'adj_broken', transaction_id: 'txn_lost', action: 'refund', type: 'full', status: 'approved', updated_at: 'not-a-date', created_at: 'also-not' };
+    const fetch: FetchLike = async (url, init) => new URL(url).pathname === '/adjustments' ? page([broken]) : api(url, init);
+    const result = await recoverBilling(b, { ...options, fetch });
+    expect(result).toMatchObject({ status: 'failed', reason: 'incomplete', payments: { adjustments: { invalid: 1 } } });
+    expect(await b.store.recovery!.getRecovery('sandbox')).toMatchObject({ status: 'failed', checkpointAt: null });
+  });
 });
+

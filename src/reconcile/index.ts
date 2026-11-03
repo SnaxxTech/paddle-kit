@@ -92,6 +92,11 @@ export interface PaymentCounts {
   notOurs: number;
   /** The replay failed (a hook threw, the store or the price lookup failed). Run again later. */
   failed: number;
+  /**
+   * Since v0.8.0: entities that could not be judged (no valid `updated_at` / `created_at`), so they were neither
+   * replayed nor skipped as old. Never silent: `recoverBilling` reports the run incomplete and keeps its checkpoint.
+   */
+  invalid: number;
 }
 
 /**
@@ -112,45 +117,61 @@ export async function reconcilePayments(
   const since = new Date(opts.since);
   if (Number.isNaN(since.getTime())) throw new Error('paddle-kit: reconcilePayments needs a valid `since`');
   const api = apiFor(billing, opts);
-  const counts = (): PaymentCounts => ({ scanned: 0, applied: 0, duplicates: 0, notOurs: 0, failed: 0 });
+  const counts = (): PaymentCounts => ({ scanned: 0, applied: 0, duplicates: 0, notOurs: 0, failed: 0, invalid: 0 });
+  // An entity's time, or null when it has none valid: then it is counted invalid, never compared (NaN >= x is false).
+  const timeOf = (e: Json): string | null => {
+    const at = typeof e.updated_at === 'string' ? e.updated_at : e.created_at;
+    return typeof at === 'string' && Number.isFinite(Date.parse(at)) ? at : null;
+  };
   const tally = (c: PaymentCounts, r: ProcessResult | null) => {
     if (!r || r.outcome === 'failed' || r.outcome === 'in_progress') c.failed++;
     else if (r.outcome === 'duplicate') c.duplicates++;
     else if (r.reason === 'not_ours') c.notOurs++;
     else c.applied++;
   };
-  const replay = (eventId: string, eventType: string, data: Json) => {
+  const replay = (eventId: string, eventType: string, data: Json, at: string) => {
     opts.signal?.throwIfAborted();
-    const at = typeof data.updated_at === 'string' ? data.updated_at : typeof data.created_at === 'string' ? data.created_at : new Date().toISOString();
     const ev = parseEvent({ event_id: eventId, event_type: eventType, occurred_at: at, data });
     return ev ? process(ev) : Promise.resolve(null);
+  };
+  const replayTransaction = async (tx: Json) => {
+    const at = timeOf(tx);
+    if (at === null) transactions.invalid++;
+    else tally(transactions, await replay(`reconcile_txn_${tx.id}`, 'transaction.completed', tx, at));
   };
 
   const transactions = counts();
   const sinceParam = encodeURIComponent(since.toISOString());
   for (const tx of await api.list(`/transactions?status=completed&updated_at%5BGTE%5D=${sinceParam}&order_by=updated_at%5BASC%5D&per_page=30`, 1000)) {
     transactions.scanned++;
-    tally(transactions, await replay(`reconcile_txn_${tx.id}`, 'transaction.completed', tx));
+    await replayTransaction(tx);
   }
 
   const adjustments = counts();
   // GET /adjustments has no date filter: read the list (up to 200 pages of 50) and keep those updated since `since`.
   // ponytail: reads the whole list each run; filter by `transaction_id` in batches if an account passes 10,000 adjustments.
-  const recent = (await api.list('/adjustments?per_page=50', 200))
-    .filter((a) => Date.parse(a.updated_at ?? a.created_at) >= since.getTime())
-    .sort((a, b) => Date.parse(a.updated_at ?? a.created_at) - Date.parse(b.updated_at ?? b.created_at));
-  for (const adj of recent) {
+  // Validated before the date filter: an adjustment without a valid time is counted invalid, never dropped as "old".
+  const recent: Array<{ adj: Json; at: string }> = [];
+  for (const adj of await api.list('/adjustments?per_page=50', 200)) {
+    const at = timeOf(adj);
+    if (at === null) {
+      adjustments.scanned++;
+      adjustments.invalid++;
+    } else if (Date.parse(at) >= since.getTime()) recent.push({ adj, at });
+  }
+  recent.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  for (const { adj, at } of recent) {
     opts.signal?.throwIfAborted();
     adjustments.scanned++;
     if (billing.store.getTransaction && typeof adj.transaction_id === 'string' && !(await billing.store.getTransaction(adj.transaction_id))) {
       try {
         const tx = (await api.call('GET', `/transactions/${encodeURIComponent(adj.transaction_id)}`)).data as Json;
-        if (tx?.status === 'completed') tally(transactions, await replay(`reconcile_txn_${tx.id}`, 'transaction.completed', tx));
+        if (tx?.status === 'completed') await replayTransaction(tx);
       } catch (error) {
         if (!(error instanceof PaddleError && error.status === 404)) throw error;
       }
     }
-    tally(adjustments, await replay(`reconcile_adj_${adj.id}_${adj.status}`, 'adjustment.updated', adj));
+    tally(adjustments, await replay(`reconcile_adj_${adj.id}_${adj.status}`, 'adjustment.updated', adj, at));
   }
   return { transactions, adjustments };
 }
@@ -171,9 +192,22 @@ export interface RecoveryOptions {
   now?: () => Date;
 }
 
+/**
+ * What an incomplete run did, so the reason is visible (since v0.8.0): failed replays, `invalid` records (no valid
+ * time: a person looks), unfinished events still waiting, and no owned ids found (`ownership` all zero).
+ */
+export interface IncompleteDetail {
+  subscriptions: Awaited<ReturnType<typeof reconcile>>;
+  payments: Awaited<ReturnType<typeof reconcilePayments>>;
+  events: { applied: number; failed: number };
+  remainingPending: number;
+  ownership?: { priceIds: number; productIds: number };
+}
+
 export type RecoveryResult =
   | { status: 'busy' }
-  | { status: 'failed'; reason: 'incomplete' | 'timeout' | 'recovery_error' | 'api_error' | 'network' | 'circuit_open'; httpStatus?: number }
+  | ({ status: 'failed'; reason: 'incomplete' | 'timeout' | 'recovery_error' | 'api_error' | 'network' | 'circuit_open'; httpStatus?: number }
+    & Partial<IncompleteDetail>)
   | { status: 'done'; since: string; subscriptions: Awaited<ReturnType<typeof reconcile>>;
       payments: Awaited<ReturnType<typeof reconcilePayments>>; events: { applied: number; failed: number };
       /** Since v0.8.0, when `billing.config.catalogApp` is set: the owned ids `syncOwnership` found. */
@@ -203,6 +237,7 @@ export async function recoverBilling(billing: Billing, opts: RecoveryOptions): P
   let claimed = false;
   let incomplete = false;
   let completed = false;
+  let partial: IncompleteDetail | undefined;
   const work = async (): Promise<RecoveryResult> => {
     claimed = await store.claimRecovery({ name, runId, startedAt: startedAt.toISOString(), leaseUntil: new Date(startedAt.getTime() + timeoutMs + 5000).toISOString() });
     controller.signal.throwIfAborted();
@@ -251,8 +286,13 @@ export async function recoverBilling(billing: Billing, opts: RecoveryOptions): P
     controller.signal.throwIfAborted();
     const remaining = await store.getPendingEvents({ before: new Date(startedAt.getTime() - pendingAgeMs).toISOString(), limit: 1 });
     controller.signal.throwIfAborted();
-    incomplete = noOwnedIds || subscriptions.invalid > 0 || events.failed > 0 || remaining.length > 0 || payments.transactions.failed > 0 || payments.adjustments.failed > 0;
-    if (incomplete) throw new Error('incomplete recovery');
+    incomplete = noOwnedIds || subscriptions.invalid > 0 || events.failed > 0 || remaining.length > 0
+      || payments.transactions.failed > 0 || payments.adjustments.failed > 0
+      || payments.transactions.invalid > 0 || payments.adjustments.invalid > 0;
+    if (incomplete) {
+      partial = { subscriptions, payments, events, remainingPending: remaining.length, ...(ownership ? { ownership } : {}) };
+      throw new Error('incomplete recovery');
+    }
     completed = await store.finishRecovery({ name, runId, status: 'succeeded', finishedAt: now().toISOString(), reason: null });
     if (!completed) throw new Error('recovery lease lost');
     return { status: 'done', since: since.toISOString(), subscriptions, payments, events, ...(ownership ? { ownership } : {}) };
@@ -269,6 +309,6 @@ export async function recoverBilling(billing: Billing, opts: RecoveryOptions): P
       try { await within(store.finishRecovery({ name, runId, status: 'failed', finishedAt: now().toISOString(), reason }), 2000, 'recovery status'); }
       catch { /* The database may be down; the durable lease expires and the next run takes over. */ }
     }
-    return { status: 'failed', reason, ...(error instanceof PaddleError && error.status !== undefined ? { httpStatus: error.status } : {}) };
+    return { status: 'failed', reason, ...(error instanceof PaddleError && error.status !== undefined ? { httpStatus: error.status } : {}), ...(incomplete ? partial : {}) };
   }
 }

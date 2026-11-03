@@ -89,16 +89,17 @@ describe('event claim (concurrent duplicate deliveries)', () => {
       const body = JSON.stringify(raw);
       return handle(new Request('https://app.test/api/paddle', { method: 'POST', headers: { 'paddle-signature': sign(body, SECRET, Math.floor(now.getTime() / 1000)) }, body }));
     };
+    const until = async (n: number) => { for (let i = 0; i < 400 && gates.length < n; i++) await tick(); };
     const a = deliver();
-    await tick();
+    await until(1);
     now = new Date(NOW.getTime() + 61_000); // A's lease expired
     const b = deliver();
-    await tick();
+    await until(2);
     expect(gates).toHaveLength(2);
     gates[0]!.release(true); // A fails late
     expect((await a).status).toBe(500);
     const c = deliver(); // B still runs: C must wait, not start a third run
-    await tick();
+    await Promise.race([c, until(3)]);
     expect(gates).toHaveLength(2);
     expect((await c).status).toBe(409);
     expect(maxRunning).toBe(2);

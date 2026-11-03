@@ -150,12 +150,12 @@ describe('reconcilePayments', () => {
     const { b, txs } = app();
     const api = paddle({ txs: [tx('txn_lost'), theirs('txn_other')] });
     expect(await run(b, api)).toEqual({
-      transactions: { scanned: 2, applied: 1, duplicates: 0, notOurs: 1, failed: 0 },
-      adjustments: { scanned: 0, applied: 0, duplicates: 0, notOurs: 0, failed: 0 },
+      transactions: { scanned: 2, applied: 1, duplicates: 0, notOurs: 1, failed: 0, invalid: 0 },
+      adjustments: { scanned: 0, applied: 0, duplicates: 0, notOurs: 0, failed: 0, invalid: 0 },
     });
     expect(txs.map((t) => t.transactionId)).toEqual(['txn_lost']);
     expect(api.urls[0]).toBe('https://sandbox-api.paddle.com/transactions?status=completed&updated_at%5BGTE%5D=2026-10-01T00%3A00%3A00.000Z&order_by=updated_at%5BASC%5D&per_page=30');
-    expect((await run(b, api)).transactions).toEqual({ scanned: 2, applied: 0, duplicates: 2, notOurs: 0, failed: 0 });
+    expect((await run(b, api)).transactions).toEqual({ scanned: 2, applied: 0, duplicates: 2, notOurs: 0, failed: 0, invalid: 0 });
     expect(txs).toHaveLength(1);
   });
 
@@ -163,7 +163,7 @@ describe('reconcilePayments', () => {
     const { b, txs, adjs } = app();
     const api = paddle({ adjs: [adj('adj_1', 'txn_old')], byId: { txn_old: tx('txn_old', { updated_at: '2026-09-01T00:00:00Z' }) } });
     const out = await run(b, api);
-    expect(out.adjustments).toEqual({ scanned: 1, applied: 1, duplicates: 0, notOurs: 0, failed: 0 });
+    expect(out.adjustments).toEqual({ scanned: 1, applied: 1, duplicates: 0, notOurs: 0, failed: 0, invalid: 0 });
     expect(out.transactions.applied).toBe(1);
     expect(txs.map((t) => t.transactionId)).toEqual(['txn_old']);
     expect(adjs).toHaveLength(1);
