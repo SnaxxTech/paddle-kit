@@ -1,8 +1,14 @@
 # paddle-kit
 
-## Standard setup (since v0.8.0)
+## Quickstart: the standard setup (since v0.8.0)
 
-Every app uses the same four pieces. Nothing else is needed: no billing service, no queue, no Redis.
+This is the one supported setup; start here. Every app uses the same four pieces. Nothing else is needed: no billing
+service, no queue, no Redis. The rest of this file is reference. Notes for older versions are in
+[docs/HISTORY.md](docs/HISTORY.md) and [CHANGELOG.md](CHANGELOG.md).
+
+**One set of billing tables per app and per environment.** The `paddle_*` tables carry no app or environment column:
+two apps, or an app's sandbox and live deployments, sharing one database (and schema) would read each other's events,
+subscriptions and recovery checkpoint. Give each its own database, Neon branch or Postgres schema.
 
 1. **One config** (`lib/billing.ts`): `billingFromEnv`.
 2. **One webhook route** (`app/api/paddle/route.ts`): `createWebhookRoute`.
@@ -15,7 +21,7 @@ Run migrations `001`–`004` (Run the migrations) before the first deploy of thi
 
 ```ts
 import { Pool } from '@neondatabase/serverless';
-import { billingFromEnv } from 'paddle-kit/config';
+import { billingFromEnv, priceIds } from 'paddle-kit/config';
 import { postgresStore } from 'paddle-kit/postgres';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -24,7 +30,8 @@ export const { billing, config, problems, enforce } = billingFromEnv(process.env
   requiredPrices: ['pro'],
   store: postgresStore({ query: (text, params) => pool.query(text, params) }),
   // price id -> features. Keep a retired price here while subscriptions on it still renew.
-  entitlements: (c) => Object.fromEntries(Object.values(c.prices.pro as Record<string, string>).map((id) => [id, ['pro']])),
+  // `priceIds` reads both forms of a PADDLE_PRICES entry: "pri_…" and { "monthly": "pri_…", "yearly": "pri_…" }.
+  entitlements: (c) => Object.fromEntries(priceIds(c.prices.pro).map((id) => [id, ['pro']])),
   onError: (error, ctx) => console.error('paddle-kit failure', ctx, error), // may hold secrets: your error tracker only
 });
 if (problems.length > 0) console.error('billing misconfigured:', problems.join('; ')); // names only, never values
@@ -48,19 +55,15 @@ export const { POST, GET } = createWebhookRoute({ billing, problems, healthToken
 `app/api/cron/billing-recovery/route.ts`
 
 ```ts
-import { recoverBilling } from 'paddle-kit/reconcile';
-import { billing, config } from '@/lib/billing';
+import { createRecoveryRoute } from 'paddle-kit/reconcile';
+import { billing, config, problems } from '@/lib/billing';
 
 export const maxDuration = 60; // the job's own budget is 45 s
 
-export async function GET(req: Request) {
-  // Vercel Cron sends this header; anyone else gets 401.
-  if (req.headers.get('authorization') !== `Bearer ${process.env.CRON_SECRET}`) return new Response(null, { status: 401 });
-  if (!billing || !config?.apiKey) return Response.json({ status: 'off' });
-  const result = await recoverBilling(billing, { apiKey: config.apiKey });
-  // A failed run answers 500 so the cron's own monitoring sees it; the health route shows it too.
-  return Response.json(result, { status: result.status === 'failed' ? 500 : 200 });
-}
+// Vercel Cron sends `Authorization: Bearer $CRON_SECRET`. With CRON_SECRET unset every call is refused (401).
+// A misconfigured app (env problems, or no PADDLE_API_KEY) answers 500 with the problem names, so the cron log shows
+// it; only billing deliberately off (no billing variable at all) answers 200 `off`. A failed run answers 500 too.
+export const { GET } = createRecoveryRoute({ billing, problems, apiKey: config?.apiKey, cronSecret: process.env.CRON_SECRET });
 ```
 
 `vercel.json`: `{ "crons": [{ "path": "/api/cron/billing-recovery", "schedule": "0 * * * *" }] }`. Hourly on Vercel Pro; the Hobby plan allows one run a day, which is still enough (the doctor flags a job with no success for 26 h). The job:
@@ -95,7 +98,7 @@ Rules for every app:
 
 ## Resilience: the transport and the recovery job (since v0.8.0)
 
-`billingFromEnv` wires both (Standard setup). With `createBilling` directly, keep one transport per app and Paddle
+`billingFromEnv` wires both (Quickstart). With `createBilling` directly, keep one transport per app and Paddle
 account/environment and pass it, or set `paddleFetch`:
 
 ```ts
@@ -188,27 +191,15 @@ What it does **not** do: in-app purchases in mobile store apps. Google Play and 
 1. Install: `npm i github:SnaxxTech/paddle-kit#v0.8.0`.
 2. Run one CLI command in the app folder: `npx paddle-kit-catalog --webhook-url https://<host>/api/paddle` (see Catalog CLI). It makes the product, the prices, the webhook destination and the client token, and writes `.env.local`.
 3. Paste the host block that the CLI prints into your host's settings (Vercel: add `--host vercel` to get the commands). Redeploy.
-4. Add `lib/billing.ts` and the route file `app/api/paddle/route.ts` (see Next.js example), and call `billing.hasAccess` where a paid feature starts.
+4. Add the four files of the Quickstart (`lib/billing.ts`, the webhook route, the recovery route with `vercel.json`, `lib/policy.ts`), and call `canUse` where a paid feature starts.
 5. Set the default payment link in the Paddle dashboard (Integration checklist, step 1).
 6. Check the deployed app: `npx paddle-kit-doctor --url https://<host>/api/paddle --token <PADDLE_HEALTH_TOKEN>`.
 
 The full list, with the sandbox test and the go-live steps, is the Integration checklist at the end of this file.
 
-## What v0.7.0 changed (simple words)
+## Version notes
 
-1. **Bots cannot keep the database awake.** A request without a valid Paddle signature is answered and counted in memory only. Before, each one wrote a row, so a bot on the URL kept a serverless Postgres (Neon) running.
-2. **Live apps get real events only.** The catalog CLI sets a live destination to `traffic_source: platform`. Simulated events reach sandbox apps only.
-3. **Prices by name.** An app can find its prices in Paddle by the catalog label (`findPrice`, `resolvePrices`), so its env needs no price ids. If Paddle cannot answer, the webhook asks Paddle to retry (503); it never throws an event away.
-4. **One command checks every app.** `paddle-kit-doctor --apps apps.json --json` gives one result per app, for a job that opens an issue when an app turns red.
-5. **Your own checks in health** (`healthChecks`), the cause of a failure for your error tracker (`onError`), time limits for hooks and the store, and several webhook secrets at once for a rotation.
-
-## What v0.4.0 changed (simple words)
-
-1. **Apps share one seller account safely.** Each app tells the kit which prices are its own (`owns`). The kit ignores other apps' events. It records them as `not_ours`, and they are not errors.
-2. **A refund is never lost.** A refund can arrive before its payment. The kit gives that refund to your app with `known: false`, so that your app can keep a record of it.
-3. **No double processing.** Before v0.4.0, 50 copies of one event sent at the same time ran your hook up to 50 times. Now the hook runs one time. The other copies get HTTP 409 `in_progress`, and Paddle sends them again later. This was tested on a real Postgres 17 server.
-4. **Less code.** We removed the parts that no app used: the Express and Hono adapters, the Paddle Node SDK and some exports. [UPGRADING.md](UPGRADING.md) gives the replacement for each.
-5. **One new migration:** `002_claims_transactions`. Run it **before** you deploy v0.4.0.
+What each version changed, in simple words: [docs/HISTORY.md](docs/HISTORY.md). Every detail: [CHANGELOG.md](CHANGELOG.md). Upgrade steps: [UPGRADING.md](UPGRADING.md).
 
 ## Words used in this file
 
@@ -276,24 +267,28 @@ Rules:
 3. We never edit a migration after we ship it. A change comes as a new numbered migration.
 4. `MIGRATIONS` is the only copy. The `migrations/*.sql` files were removed in v0.4.0.
 5. **v0.8.0 adds `003_recovery` and `004_claim_tokens_owned_ids`** (new tables `paddle_recovery`, `paddle_event_leases`, `paddle_owned_ids`; nothing is altered or dropped). Run both before deploying v0.8.0: without `004` every event answers 500 `store_error` (Paddle retries, nothing is lost). `paddle_event_claims` is no longer used; drop it by hand later if you like.
+6. **One set of tables per app and per environment** (a database, Neon branch or schema each). The tables have no app or environment column, so a shared set mixes events, subscriptions and the recovery checkpoint.
 
 Timestamps are kept to the millisecond (Paddle sends microseconds). When two events for one subscription have the same millisecond, the later delivery wins.
 
-## Next.js (App Router) example
+## Lower-level setup: `createBilling` by hand
+
+Prefer the Quickstart. Building `createBilling` yourself skips two of its defaults: pass
+`paddleFetch: createPaddleTransport().fetch` for resilient Paddle calls, and set `owns` yourself (here from
+`PADDLE_PRICES`; finding prices by label needs the historical ownership `billingFromEnv` wires up).
 
 `lib/billing.ts`
 
 ```ts
 import { Pool } from '@neondatabase/serverless';
-import { readBillingEnv } from 'paddle-kit/config';
-import { createBilling } from 'paddle-kit/core';
+import { priceIds, readBillingEnv } from 'paddle-kit/config';
+import { createBilling, createPaddleTransport } from 'paddle-kit/core';
 import { postgresStore } from 'paddle-kit/postgres';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 export const { config, problems } = readBillingEnv(process.env, { requiredPrices: ['pro'] });
 if (problems.length > 0) console.error('billing misconfigured:', problems.join('; ')); // names only, never values
-// The one-call form (since v0.7.0) does the same in one line: see "The one-call setup" below.
 
 // Built only from a valid config: a CI or preview build without the secrets still builds. null = billing off.
 export const billing = config
@@ -301,10 +296,11 @@ export const billing = config
       environment: config.environment,
       webhookSecret: config.webhookSecret,
       store: postgresStore({ query: (text, params) => pool.query(text, params) }),
-      entitlements: { [config.prices.pro as string]: ['pro'] }, // price id -> features it unlocks (a cycle map: one entry per id)
+      entitlements: Object.fromEntries(priceIds(config.prices.pro).map((id) => [id, ['pro']])), // price id -> features
       owns: config.owns, // the seller account is shared by several apps (see Shared seller accounts)
       pastDueGraceDays: 7,
       healthToken: config.healthToken, // optional, see Monitoring
+      paddleFetch: createPaddleTransport().fetch, // retries, Retry-After and a circuit breaker for calls to Paddle
       // The kit logs only a reason code. This gets the error behind a failed hook, store call or price lookup.
       // It may hold secrets (a driver message with a connection string): send it to your error tracker, not to a public log.
       onError: (error, ctx) => console.error('paddle-kit failure', ctx, error),
@@ -312,20 +308,7 @@ export const billing = config
   : null;
 ```
 
-**The one-call setup (`billingFromEnv`, since v0.7.0).** The same as above, with the secrets (all of them, for a rotation), the health token and `owns` filled in from the env:
-
-```ts
-import { billingFromEnv } from 'paddle-kit/config';
-
-export const { billing, config, problems } = billingFromEnv(process.env, {
-  requiredPrices: ['pro'],
-  store: postgresStore({ query: (text, params) => pool.query(text, params) }),
-  entitlements: (c) => ({ [c.prices.pro as string]: ['pro'] }), // built from the env's price ids
-  onError: (error, ctx) => console.error('paddle-kit failure', ctx, error),
-});
-```
-
-`billing` is null while billing is off or misconfigured, so this is safe at module scope in a build without secrets. Every `createBilling` option (hooks, timeouts, `healthChecks`) can be passed too.
+`billing` is null while billing is off or misconfigured, so this is safe at module scope in a build without secrets.
 
 `app/api/paddle/route.ts`
 
@@ -452,6 +435,7 @@ Next.js 16 with Cache Components (`cacheComponents: true` in `next.config.ts`):
 ```ts
 // lib/price.ts
 import { cacheLife } from 'next/cache';
+import { priceIdOf } from 'paddle-kit/config';
 import { formatPrice, getPrice } from 'paddle-kit/price';
 import { config } from '@/lib/billing';
 
@@ -467,7 +451,7 @@ async function paddlePrice(priceId: string, environment: 'sandbox' | 'production
 export async function proPrice(): Promise<string> {
   if (!config || !process.env.PADDLE_API_KEY) return BUILT_IN_PRICE; // billing off
   try {
-    return await paddlePrice(config.prices.pro as string, config.environment);
+    return await paddlePrice(priceIdOf(config.prices, 'pro'), config.environment); // throws for a missing key
   } catch {
     return BUILT_IN_PRICE; // PriceError: keep the page up
   }
@@ -621,8 +605,10 @@ The kit calls a hook after it records the event and before it marks the event `p
 A credit pack, refunds and chargebacks included. The tables (Postgres):
 
 ```sql
+-- granted: what the payment gave. revoked: a refund or chargeback that still stands took it back. taken: how many credits
+-- that revoke actually removed (credits already spent are gone), so a reversal gives back exactly that many.
 CREATE TABLE orders (id text PRIMARY KEY, user_id text NOT NULL, credits int NOT NULL, granted int NOT NULL DEFAULT 0,
-  currency text, total text);
+  revoked boolean NOT NULL DEFAULT false, taken int NOT NULL DEFAULT 0, currency text, total text);
 -- Every adjustment, kept against its transaction even before the payment arrives (a refund can come first).
 CREATE TABLE adjustments (id text PRIMARY KEY, transaction_id text NOT NULL, action text NOT NULL, type text,
   status text NOT NULL, rank int NOT NULL);
@@ -644,19 +630,28 @@ const review = (q: Tx, id: string, kind: string, detail: string) =>
 // One payment's changes run one at a time: its payment and adjustments can arrive in any order, and at the same moment.
 const lockPayment = (q: Tx, transactionId: string) => q.query('SELECT pg_advisory_xact_lock(hashtext($1))', [transactionId]);
 
-// Grants what the order should grant now: its credits, unless an adjustment that still stands took the payment back.
-// Derived from all the adjustments, never counted event by event, so replays, reorderings and overlapping refunds
-// and chargebacks all end in the same balance.
+// Brings the order in line with its adjustments: grant it, take it back, or give back what was taken. Derived from all
+// the adjustments, never counted event by event, so replays, reorderings and overlapping refunds and chargebacks all
+// end in the same balance.
 async function settle(q: Tx, transactionId: string) {
-  const order = (await q.query('SELECT user_id, credits, granted FROM orders WHERE id = $1', [transactionId])).rows[0];
+  const order = (await q.query('SELECT user_id, credits, granted, revoked, taken FROM orders WHERE id = $1', [transactionId])).rows[0];
   if (!order) return; // not paid yet: the payment settles when it arrives
   const adjustments = (await q.query('SELECT action, type, status FROM adjustments WHERE transaction_id = $1', [transactionId])).rows;
-  const target = paymentRevoked(adjustments) ? 0 : order.credits;
-  if (target === order.granted) return;
-  await q.query('UPDATE orders SET granted = $1 WHERE id = $2', [target, transactionId]);
+  const revoked = paymentRevoked(adjustments);
   await q.query('INSERT INTO accounts (user_id, credits) VALUES ($1, 0) ON CONFLICT DO NOTHING', [order.user_id]);
-  // Never below zero: credits already spent are gone (a person decides, e.g. from the reviews table).
-  await q.query('UPDATE accounts SET credits = GREATEST(credits + $1, 0) WHERE user_id = $2', [target - order.granted, order.user_id]);
+  // The balance is shared by the user's orders, which settle under different payment locks: lock the row.
+  const balance = (await q.query('SELECT credits FROM accounts WHERE user_id = $1 FOR UPDATE', [order.user_id])).rows[0].credits;
+  if (revoked && !order.revoked) {
+    // Take back what is left of this order's credits; spent credits are gone (a person decides, e.g. from `reviews`).
+    const take = Math.min(balance, order.granted);
+    await q.query('UPDATE accounts SET credits = credits - $1 WHERE user_id = $2', [take, order.user_id]);
+    await q.query('UPDATE orders SET revoked = true, taken = $1 WHERE id = $2', [take, transactionId]);
+  } else if (!revoked && (order.revoked || order.granted === 0)) {
+    // The first grant, or a give-back of exactly what the revoke took (all of it if the payment was never granted).
+    const give = order.granted === 0 ? order.credits : order.taken;
+    await q.query('UPDATE accounts SET credits = credits + $1 WHERE user_id = $2', [give, order.user_id]);
+    await q.query('UPDATE orders SET granted = credits, revoked = false, taken = 0 WHERE id = $1', [transactionId]);
+  }
 }
 
 export function packHooks(packPriceId: string, creditsPerUnit = 5): Pick<BillingConfig, 'onTransaction' | 'onAdjustment'> {
@@ -711,7 +706,7 @@ Connect it with the price id from `readBillingEnv`. Do not use `JSON.parse(proce
 
 ```ts
 export const billing = config
-  ? createBilling({ /* environment, webhookSecret, store, entitlements */ ...packHooks(config.prices.pack as string) })
+  ? createBilling({ /* environment, webhookSecret, store, entitlements */ ...packHooks(priceIdOf(config.prices, 'pack')) })
   : null;
 ```
 
@@ -1118,7 +1113,7 @@ Do these steps one time for each app: first in sandbox, then again for live.
 2. **Install the kit in the app:** `npm i github:SnaxxTech/paddle-kit#v0.8.0`. The kit is not on the npm registry, so run the CLIs in the app folder (or see Install for `npx --package=…`).
 3. **Make the catalog.** Run `npx paddle-kit-catalog --webhook-url https://<host>/api/paddle` (see Catalog CLI). Read the table that it shows. Never copy the webhook secret by hand.
 4. **Put the variables on the host.** Paste the host block that the CLI prints (`--host vercel` prints the commands). Add `PADDLE_HEALTH_TOKEN` (any long random value), and `PADDLE_API_KEY` if the app uses `getPrice`, `findPrice`, `resolvePrices` or `reconcile`. Redeploy.
-5. **Add the code:** `lib/billing.ts` with `readBillingEnv`, the route file with `createWebhookRoute` and the checks with `hasAccess` (see Next.js example). Pass `onError` so a failure's cause reaches your error tracker. Optional: show the price with `findPrice` or `getPrice` (see Show the price from Paddle), so that the price lives only in Paddle, and report its source with a `healthChecks` entry. A one-time-purchase app may drop `PADDLE_PRICES` with `resolvePrices` (see Find prices by their label).
+5. **Add the code:** the four Quickstart files: `lib/billing.ts` with `billingFromEnv`, the webhook route, the recovery route with its `vercel.json` cron and `CRON_SECRET`, and `lib/policy.ts` with `canUse`. Pass `onError` so a failure's cause reaches your error tracker. Optional: show the price with `findPrice` or `getPrice` (see Show the price from Paddle), so that the price lives only in Paddle, and report its source with a `healthChecks` entry. A one-time-purchase app may drop `PADDLE_PRICES` with `resolvePrices` (see Find prices by their label).
 6. **Check the deployed app:** `npx paddle-kit-doctor --url https://<host>/api/paddle --token <PADDLE_HEALTH_TOKEN>`. It must say `Billing: on` with the right environment, and `Result: OK`. Do this in each environment that takes payments (preview and production), not only on your computer. Then add the app to the scheduled `--apps` file with a `staleHours` that fits its traffic.
 7. **Install in CI and on the host.** The kit is public since v0.5.0, so `npm ci` needs no token. An app that used the old private-repo recipe can delete the `PADDLE_KIT_READ_TOKEN` secret and its `git config ... insteadOf` step. A lockfile with a `git+ssh://` URL for the kit also installs with no SSH key: npm downloads public GitHub dependencies as a tarball (tested with npm 10.8.2, SSH turned off, no GitHub login). Each host is **UNVERIFIED** until its first install.
 8. **A tunnel restart changes the URL.** A quick tunnel gets a new hostname each time it starts. Run the catalog CLI again with the new `--webhook-url`. It should move the existing destination and keep its secret. **UNVERIFIED**: after a restart, check that `PADDLE_NOTIFICATION_WEBHOOK_SECRET` in the env file still matches the destination.

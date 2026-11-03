@@ -1,5 +1,19 @@
 # Upgrading paddle-kit
 
+## 0.8.1 (from 0.8.0)
+
+No migration. Only if you copied these README examples:
+
+1. **Entitlements from `PADDLE_PRICES`:** replace `Object.values(c.prices.pro as Record<string, string>)` with
+   `priceIds(c.prices.pro)` (from `paddle-kit/config`), and `config.prices.x as string` with `priceIdOf(config.prices, 'x')`.
+2. **Recovery route:** replace the hand-written handler with
+   `export const { GET } = createRecoveryRoute({ billing, problems, apiKey: config?.apiKey, cronSecret: process.env.CRON_SECRET })`.
+   A misconfigured app now answers 500, so the cron log shows it.
+3. **Credit packs:** add the columns and the new `settle` from the README Example:
+   `ALTER TABLE orders ADD COLUMN revoked boolean NOT NULL DEFAULT false, ADD COLUMN taken int NOT NULL DEFAULT 0;`
+   An order revoked under the old example has `granted = 0` and gives back the full pack on a reversal; check those by hand.
+4. **Tables:** make sure each app and each environment has its own `paddle_*` tables.
+
 ## 0.8.0 (from v0.6/v0.7 or 0.8.0-qr.1)
 
 1. **Run migrations `003_recovery` and `004_claim_tokens_owned_ids` before deploying.** Both only create tables. Code
@@ -12,7 +26,7 @@
 4. **Prices found by label (`resolvePrices`, no `PADDLE_PRICES`):** after deploying, run the recovery job once (or
    `syncOwnership`). Until it has stored the app's ids, webhooks answer 503 `prices_unavailable` and Paddle retries; no
    event is acked as `not_ours`. `PADDLE_API_KEY` needs `price.read` and `product.read` too.
-5. **Schedule the recovery job** (README, Standard setup). Health now has `recovery`, and the doctor is red until the job
+5. **Schedule the recovery job** (README, Quickstart). Health now has `recovery`, and the doctor is red until the job
    has completed once and while it has not completed for 26 h.
 6. `billingFromEnv` now uses a resilient transport by default. A custom `Store`: implement `claimToken` in
    `recordEvent` / `markEvent` and `addOwnedIds` / `getOwnedIds` to get the fixes (all optional; without them the v0.7
@@ -80,7 +94,7 @@ No migration. Steps 1–3 are for every app; 4–7 are optional.
 7. **Rotate the webhook secret without downtime** when needed: `PADDLE_NOTIFICATION_WEBHOOK_SECRET=old,new` and `webhookSecret: config.webhookSecrets ?? config.webhookSecret` (README, Monitoring).
 8. **Chargebacks and reversals.** Handle every adjustment through `adjustmentEffect(adj)` (README, Refunds, chargebacks and reversals): `revoke`, `restore` (only what you revoked for that transaction), `review`, `none`. Before, the README example acted on approved refunds only, so a chargeback kept access and a won dispute never gave it back.
 9. **Reconcile payments.** Call `reconcilePayments(billing, { apiKey, since: <7 days ago> })` from the cron that runs `reconcile`. It needs `PADDLE_API_KEY`; your hooks must be idempotent (they already must be).
-10. **Optional: `billingFromEnv`** replaces the `readBillingEnv` + `createBilling` pair (README, Next.js example).
+10. **Optional: `billingFromEnv`** replaces the `readBillingEnv` + `createBilling` pair (README, Quickstart).
 11. **Watch every app:** list the apps in an `apps.json` (`name`, `url`, `tokenEnv`, `staleHours`) and run `paddle-kit-doctor --apps apps.json --json` on a schedule; exit 2 means the file is wrong, not that the apps are fine.
 
 A custom `Store` needs no change. `Health` is unchanged; the route adds `unverified` (and `checks`).
