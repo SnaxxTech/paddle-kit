@@ -231,6 +231,12 @@ export interface Store {
    */
   addOwnedIds?(ids: OwnedIdSet, at: string): Promise<void>;
   getOwnedIds?(): Promise<OwnedIdSet>;
+  /**
+   * Since v0.8.2: the required tables and columns (`REQUIRED_SCHEMA`) this database lacks, as `table` or
+   * `table.column`. Throws when the database does not answer, so a connection failure is never reported as a missing
+   * migration. Built-in Postgres and SQLite stores implement it.
+   */
+  checkSchema?(): Promise<{ missing: string[] }>;
   /** Built-in stores support durable recovery after migration 003. Custom stores may supply their own adapter. */
   recovery?: RecoveryStore;
 }

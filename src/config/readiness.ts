@@ -1,6 +1,7 @@
 // Deploy-time readiness checks for the health route (since v0.8.2). Edge-safe: web fetch only.
 // Details name permissions, migrations and variables only, never a value.
 import { LIVE_BASE, PADDLE_API_VERSION, SANDBOX_BASE, type FetchLike } from '../core/paddle-api';
+import { MIGRATION_OF_TABLE } from '../core/schema';
 import type { CheckResult, Store } from '../core/types';
 
 /** What `recoverBilling` reads. */
@@ -21,7 +22,10 @@ export interface ReadinessOptions {
   /** `process.env.CRON_SECRET`. Pass the key (even when unset) to check it; leave it out to skip. */
   cronSecret?: string | undefined;
   fetch?: FetchLike;
-  /** How long a good answer from Paddle is reused. Default 600 s; a failure is asked again after 60 s. */
+  /**
+   * How long a good answer from Paddle is reused, per server instance (not fleet-wide). Default 600 s; a failure is
+   * asked again after 60 s. Simultaneous checks on one instance share one request.
+   */
   cacheSeconds?: number;
   now?: () => number;
 }
@@ -30,7 +34,10 @@ export interface ReadinessOptions {
  * Health checks for `createBilling({ healthChecks })`, or `billingFromEnv({ readiness })`:
  * - `paddle_api_key`: one `GET /` to Paddle (cached): the key is accepted, is for this environment, and has the
  *   permissions recovery (and price lookup, and `permissions`) need;
- * - `migrations`: the store answers for `003_recovery` and `004_claim_tokens_owned_ids` (when `store` is given);
+ * - `migrations`: every table and column the kit needs (`REQUIRED_SCHEMA`) is there (when `store` is given; the
+ *   built-in Postgres and SQLite stores check `information_schema` / `pragma_table_info`). A database that does not
+ *   answer is reported as such, not as a missing migration. The Postgres check sees only what the connection's role
+ *   may see, in its current schema;
  * - `cron_secret`: CRON_SECRET is set and at least 16 characters (when `cronSecret` is passed).
  * A failing check turns the health report and `paddle-kit-doctor` red, with the detail.
  */
@@ -39,6 +46,8 @@ export function readinessChecks(opts: ReadinessOptions): Record<string, () => Pr
   const fetchImpl: FetchLike = opts.fetch ?? ((url, init) => fetch(url, init));
   const needed = [...new Set([...RECOVERY_PERMISSIONS, ...(opts.resolvesPrices ? PRICE_PERMISSIONS : []), ...(opts.permissions ?? [])])];
   let cached: { at: number; result: CheckResult } | null = null;
+  // Per server instance: simultaneous health checks share one request; other instances ask Paddle on their own.
+  let inFlight: Promise<CheckResult> | null = null;
 
   async function askPaddle(): Promise<CheckResult> {
     if (!opts.apiKey) return { ok: false, detail: 'PADDLE_API_KEY is missing' };
@@ -67,28 +76,42 @@ export function readinessChecks(opts: ReadinessOptions): Record<string, () => Pr
     async paddle_api_key() {
       const ttl = (cached?.result.ok ? (opts.cacheSeconds ?? 600) : 60) * 1000;
       if (cached && now() - cached.at < ttl) return cached.result;
-      const result = await askPaddle();
-      cached = { at: now(), result };
-      return result;
+      inFlight ??= askPaddle()
+        .then((result) => {
+          cached = { at: now(), result };
+          return result;
+        })
+        .finally(() => {
+          inFlight = null;
+        });
+      return inFlight;
     },
   };
 
   if (opts.store) {
     const store = opts.store;
     checks.migrations = async () => {
+      if (store.checkSchema) {
+        let missing: string[];
+        try {
+          ({ missing } = await store.checkSchema());
+        } catch {
+          return { ok: false, detail: 'the store did not answer (connection or permissions), so the schema was not checked' };
+        }
+        if (missing.length === 0) return { ok: true };
+        const migrations = [...new Set(missing.map((m) => MIGRATION_OF_TABLE[m.split('.')[0]!]).filter(Boolean))];
+        return { ok: false, detail: `missing ${missing.join(', ')} (run ${migrations.join(', ')})` };
+      }
+      // A custom store without checkSchema: read what recovery and ownership need. This cannot tell a missing table
+      // from a database that does not answer, and does not see the claim table.
       try {
-        if (!store.recovery) return { ok: false, detail: 'migration 003_recovery is missing' };
+        if (!store.recovery || !store.getOwnedIds) return { ok: false, detail: 'the store has no recovery or owned ids (migrations 003, 004)' };
         await store.recovery.getRecovery(opts.environment);
-      } catch {
-        return { ok: false, detail: 'migration 003_recovery is missing' };
-      }
-      try {
-        if (!store.getOwnedIds) return { ok: false, detail: 'migration 004_claim_tokens_owned_ids is missing' };
         await store.getOwnedIds();
+        return { ok: true, detail: 'partly checked: the store has no checkSchema' };
       } catch {
-        return { ok: false, detail: 'migration 004_claim_tokens_owned_ids is missing' };
+        return { ok: false, detail: 'reading paddle_recovery or paddle_owned_ids failed (migration 003/004 missing, or the store did not answer)' };
       }
-      return { ok: true };
     };
   }
 

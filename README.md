@@ -743,6 +743,9 @@ CREATE INDEX unlocks_user_idx ON unlocks (user_id, feature);
 -- Every adjustment, kept against its transaction even before the payment arrives (a refund can come first).
 CREATE TABLE unlock_adjustments (id text PRIMARY KEY, transaction_id text NOT NULL, action text NOT NULL, type text,
   status text NOT NULL, rank int NOT NULL);
+-- Paid, but not unlocked automatically (no user, or a price that unlocks nothing): a person refunds or unlocks by hand.
+CREATE TABLE unlock_reviews (transaction_id text PRIMARY KEY, reason text NOT NULL, detail text,
+  created_at timestamptz NOT NULL DEFAULT now(), resolved_at timestamptz);
 ```
 
 ```ts
@@ -759,15 +762,26 @@ async function settle(q: Tx, transactionId: string) {
   await q.query('UPDATE unlocks SET revoked = $1 WHERE transaction_id = $2', [paymentRevoked(adjustments), transactionId]);
 }
 
-/** `features`: price id -> the feature it unlocks, e.g. `{ [priceIdOf(config.prices, 'lifetime')]: 'pro' }`. */
-export function unlockHooks(features: Record<string, string>): Pick<BillingConfig, 'onTransaction' | 'onAdjustment'> {
+/**
+ * `features`: price id -> the feature it unlocks, or a function returning that map (read when a payment arrives, so
+ * it can use the config `billingFromEnv` returns): `() => ({ [priceIdOf(config!.prices, 'lifetime')]: 'pro' })`.
+ */
+export function unlockHooks(features: Record<string, string> | (() => Record<string, string>)): Pick<BillingConfig, 'onTransaction' | 'onAdjustment'> {
   return {
     onTransaction: async (tx) => {
       if (tx.subscriptionId !== null) return; // a subscription payment: entitlements handle it
+      const map = typeof features === 'function' ? features() : features;
       const userId = tx.customData?.userId; // untrusted, but a user can only pay for someone else
-      const unlocked = tx.items.map((i) => features[i.priceId]).filter((f): f is string => !!f);
-      if (typeof userId !== 'string' || unlocked.length === 0) return; // not ours to unlock: see the credit example's reviews table
+      const unlocked = tx.items.map((i) => map[i.priceId]).filter((f): f is string => !!f);
       await db.transaction(async (q) => {
+        if (typeof userId !== 'string' || unlocked.length === 0) {
+          // Paid, but nothing to unlock automatically. Keep it (never just log), keyed by the payment, so a replay
+          // adds nothing and the payment stays visible until a person refunds it or unlocks by hand.
+          const reason = typeof userId !== 'string' ? 'no_user' : 'unknown_price';
+          await q.query('INSERT INTO unlock_reviews (transaction_id, reason, detail) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+            [tx.transactionId, reason, `${tx.currency} ${tx.total}: ${tx.items.map((i) => i.priceId).join(', ')}`]);
+          return;
+        }
         await lockPayment(q, tx.transactionId);
         for (const feature of unlocked) {
           await q.query('INSERT INTO unlocks (transaction_id, user_id, feature) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [tx.transactionId, userId, feature]);
@@ -798,9 +812,35 @@ export async function hasUnlock(userId: string, feature: string): Promise<boolea
 }
 ```
 
-This example is a test too (`tests/readme-presets.test.ts`, on PGlite): a payment unlocked the feature, a replay did not
-duplicate it, a full refund took it away and its reversal gave it back, a refund that arrived first kept it locked, a
-partial refund changed nothing, and an unknown price unlocked nothing.
+Wire it in `lib/billing.ts` (the Quickstart's, with a `lifetime` price) and let `canUse` ask both:
+
+```ts
+// lib/billing.ts: the Quickstart's call, plus the hooks
+export const { billing, config, problems, enforce } = billingFromEnv(process.env, {
+  requiredPrices: ['lifetime'],
+  store: postgresStore({ query: (text, params) => pool.query(text, params) }),
+  ...unlockHooks(() => ({ [priceIdOf(config!.prices, 'lifetime')]: 'pro' })),
+  readiness: { cronSecret: process.env.CRON_SECRET },
+});
+```
+
+`lib/policy.ts` with unlocks
+
+```ts
+import { billing, enforce } from '@/lib/billing';
+import { hasUnlock } from '@/lib/unlocks';
+
+export async function canUse(userId: string | null, feature: string): Promise<boolean> {
+  if (!userId) return false;
+  if (!billing) return !enforce;
+  return (await billing.hasAccess(userId, feature)) || hasUnlock(userId, feature);
+}
+```
+
+This example is a test too (`tests/readme-presets.test.ts`, on PGlite). Through a signed `transaction.completed` and
+`canUse`: a payment unlocked the feature, a replay did not duplicate it, a full refund took it away and its reversal
+gave it back. A refund that arrived first kept it locked; a partial refund changed nothing. A payment with no user or
+an unknown price unlocked nothing and stayed in `unlock_reviews`, once per payment.
 
 ### Refunds, chargebacks and reversals (`adjustmentEffect`, since v0.7.0)
 
