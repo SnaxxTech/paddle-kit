@@ -523,17 +523,46 @@ The kit calls a hook after it records the event and before it marks the event `p
 
 ### Example
 
+A credit pack, refunds and chargebacks included. The tables (Postgres):
+
+```sql
+CREATE TABLE orders (id text PRIMARY KEY, user_id text NOT NULL, credits int NOT NULL, granted int NOT NULL DEFAULT 0,
+  currency text, total text);
+-- Every adjustment, kept against its transaction even before the payment arrives (a refund can come first).
+CREATE TABLE adjustments (id text PRIMARY KEY, transaction_id text NOT NULL, action text NOT NULL, type text,
+  status text NOT NULL, rank int NOT NULL);
+CREATE INDEX adjustments_transaction_id_idx ON adjustments (transaction_id);
+CREATE TABLE reviews (id text PRIMARY KEY, kind text NOT NULL, detail text);
+CREATE TABLE accounts (user_id text PRIMARY KEY, credits int NOT NULL CHECK (credits >= 0));
+```
+
 ```ts
-import { adjustmentEffect, type BillingConfig } from 'paddle-kit/core';
+import { adjustmentEffect, paymentRevoked, type BillingConfig } from 'paddle-kit/core';
 
 type Tx = { query(text: string, params?: unknown[]): Promise<{ rows: any[] }> };
 declare const db: { transaction<T>(fn: (q: Tx) => Promise<T>): Promise<T> };
 
 // `db` is your Postgres client with real transactions (pg, @neondatabase/serverless Pool, PGlite, ...).
-// Tables: orders(id PRIMARY KEY, user_id, credits, currency, total), applied(id PRIMARY KEY, order_id, effect),
-//         reviews(id PRIMARY KEY, kind, detail), accounts(user_id PRIMARY KEY, credits CHECK (credits >= 0)).
 const review = (q: Tx, id: string, kind: string, detail: string) =>
   q.query('INSERT INTO reviews (id, kind, detail) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [id, kind, detail]);
+
+// One payment's changes run one at a time: its payment and adjustments can arrive in any order, and at the same moment.
+const lockPayment = (q: Tx, transactionId: string) => q.query('SELECT pg_advisory_xact_lock(hashtext($1))', [transactionId]);
+
+// Grants what the order should grant now: its credits, unless an adjustment that still stands took the payment back.
+// Derived from all the adjustments, never counted event by event, so replays, reorderings and overlapping refunds
+// and chargebacks all end in the same balance.
+async function settle(q: Tx, transactionId: string) {
+  const order = (await q.query('SELECT user_id, credits, granted FROM orders WHERE id = $1', [transactionId])).rows[0];
+  if (!order) return; // not paid yet: the payment settles when it arrives
+  const adjustments = (await q.query('SELECT action, type, status FROM adjustments WHERE transaction_id = $1', [transactionId])).rows;
+  const target = paymentRevoked(adjustments) ? 0 : order.credits;
+  if (target === order.granted) return;
+  await q.query('UPDATE orders SET granted = $1 WHERE id = $2', [target, transactionId]);
+  await q.query('INSERT INTO accounts (user_id, credits) VALUES ($1, 0) ON CONFLICT DO NOTHING', [order.user_id]);
+  // Never below zero: credits already spent are gone (a person decides, e.g. from the reviews table).
+  await q.query('UPDATE accounts SET credits = GREATEST(credits + $1, 0) WHERE user_id = $2', [target - order.granted, order.user_id]);
+}
 
 export function packHooks(packPriceId: string, creditsPerUnit = 5): Pick<BillingConfig, 'onTransaction' | 'onAdjustment'> {
   return {
@@ -549,44 +578,34 @@ export function packHooks(packPriceId: string, creditsPerUnit = 5): Pick<Billing
           await review(q, `txn:${tx.transactionId}`, 'unfulfilled_order', `${tx.currency} ${tx.total}`);
           return;
         }
+        await lockPayment(q, tx.transactionId);
         const credits = creditsPerUnit * tx.items.reduce((n, i) => n + i.quantity, 0); // grant by quantity
         // The currency is recorded, not required: Paddle can localise the price (EUR for a USD list price).
         const ins = await q.query(
           'INSERT INTO orders (id, user_id, credits, currency, total) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING RETURNING id',
           [tx.transactionId, userId, credits, tx.currency, tx.total],
         );
-        if (ins.rows.length === 0) return; // replay of a transaction already fulfilled
-        await q.query(
-          'INSERT INTO accounts (user_id, credits) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET credits = accounts.credits + EXCLUDED.credits',
-          [userId, credits],
-        );
+        if (ins.rows.length === 0) return; // replay of a transaction already recorded
+        await settle(q, tx.transactionId); // a refund that arrived first is already in `adjustments`: then nothing is granted
       });
     },
     onAdjustment: async (adj) => {
       // revoke (approved full refund, chargeback) · restore (chargeback won, refund or chargeback reversed)
       // review (partial refund, chargeback warning, unknown action) · none (pending, rejected, credits)
       const effect = adjustmentEffect(adj);
-      if (effect === 'none') return;
       await db.transaction(async (q) => {
-        const order = (await q.query('SELECT id, user_id, credits FROM orders WHERE id = $1', [adj.transactionId])).rows[0];
-        if (effect === 'review' || !order) {
-          // A partial refund does not say which credits to take back; a warning may still turn into a refund: a human decides.
-          await review(q, `adj:${adj.adjustmentId}:${adj.status}`, `${adj.action}${order ? '' : '_unknown_order'}`, `${adj.currency} ${adj.total}`);
-          return;
-        }
-        if (effect === 'restore') {
-          // Give back only what was taken back: a reversed partial refund, reviewed by hand, restores nothing here.
-          const open = (await q.query(
-            "SELECT count(*) FILTER (WHERE effect = 'revoke') - count(*) FILTER (WHERE effect = 'restore') AS n FROM applied WHERE order_id = $1",
-            [order.id],
-          )).rows[0];
-          if (Number(open?.n ?? 0) <= 0) return;
-        }
-        // One row per adjustment and status: a redelivery or a reconcilePayments replay changes nothing.
-        const ins = await q.query('INSERT INTO applied (id, order_id, effect) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING RETURNING id', [`${adj.adjustmentId}:${adj.status}`, order.id, effect]);
-        if (ins.rows.length === 0) return;
-        const delta = effect === 'revoke' ? -order.credits : order.credits;
-        await q.query('UPDATE accounts SET credits = GREATEST(credits + $1, 0) WHERE user_id = $2', [delta, order.user_id]);
+        await lockPayment(q, adj.transactionId);
+        // Kept whatever the effect, even for a payment not seen yet (`ctx.known === false`). A status only moves
+        // forward (pending_approval → approved / rejected → reversed), so a late, older delivery changes nothing.
+        await q.query(
+          `INSERT INTO adjustments (id, transaction_id, action, type, status, rank)
+           VALUES ($1, $2, $3, $4, $5, CASE $5 WHEN 'pending_approval' THEN 0 WHEN 'reversed' THEN 2 ELSE 1 END)
+           ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, rank = EXCLUDED.rank WHERE adjustments.rank < EXCLUDED.rank`,
+          [adj.adjustmentId, adj.transactionId, adj.action, adj.type, adj.status],
+        );
+        // A partial refund does not say which credits to take back; a warning may still turn into a refund: a human decides.
+        if (effect === 'review') await review(q, `adj:${adj.adjustmentId}:${adj.status}`, adj.action, `${adj.currency} ${adj.total}`);
+        await settle(q, adj.transactionId);
       });
     },
   };
@@ -609,7 +628,7 @@ We ran this example against a real SQL database (PGlite), through the built pack
 - Two partial refunds did not change the balance.
 - An approved full refund took the credits back one time, and never below zero.
 
-Since v0.7.0 the example itself is a test (`tests/readme-hooks.test.ts`, on PGlite): a chargeback took the credits and a won dispute gave them back one time; a refund that was approved and then reversed took them and gave them back; a give-back with nothing taken back gave nothing; redeliveries changed nothing; a partial refund, a chargeback warning and an unknown order became review rows. Not yet seen from real Paddle: a chargeback, its reversal, or a reversed refund.
+The example itself is a test (`tests/readme-hooks.test.ts`, on PGlite): the test reads the SQL and TypeScript blocks above out of this file and runs them as written. Since v0.8.0 it also covers the two cases the v0.7 example got wrong: a full refund that arrived **before** its payment (the payment now grants nothing), and a won chargeback while a separate full refund still stands (nothing is given back). A chargeback took the credits and a won dispute gave them back one time; a refund that was approved and then reversed took them and gave them back; a give-back with nothing taken back gave nothing; redeliveries and older, late statuses changed nothing; a partial refund and a chargeback warning became review rows. Not yet seen from real Paddle: a chargeback, its reversal, or a reversed refund.
 
 ### Refunds, chargebacks and reversals (`adjustmentEffect`, since v0.7.0)
 
