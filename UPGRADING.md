@@ -1,5 +1,13 @@
 # Upgrading paddle-kit
 
+## 0.8.6 (from 0.8.5)
+
+1. Run migration `005_fulfilment_outbox` (CREATE-only; Postgres). Harmless if you do not use `paddle-kit/fulfil`.
+2. Optional: replace hand-written credit or unlock hooks with `createFulfilment` (README "Fulfilment module"). Existing
+   orders kept by the hand-written example are not moved; keep the old hooks for them or migrate by hand.
+3. With the module: `readiness: { fulfilment: true }`, `outboxCheck(query)` in `healthChecks`, and
+   `createRecoveryRoute({ drainOutbox })`.
+
 ## 0.8.5 (from 0.8.4)
 
 No migration. Install `#v0.8.5`. With `openTransaction`, pass the signed-in user's email: `openTransaction(id, { email })`.
@@ -90,7 +98,7 @@ Check first that your database has no tables of the new names with a different s
 ## 3. Bump the tag
 
 ```bash
-npm i github:SnaxxTech/paddle-kit#v0.8.5
+npm i github:SnaxxTech/paddle-kit#v0.8.6
 ```
 
 Commit the `package.json` and lockfile change. Since v0.5.0 the repository is public, so CI needs no token (README checklist, step 7). Then run the app's own tests and its sandbox end-to-end check.

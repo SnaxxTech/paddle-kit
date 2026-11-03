@@ -1,7 +1,7 @@
 // Deploy-time readiness checks for the health route (since v0.8.2). Edge-safe: web fetch only.
 // Details name permissions, migrations and variables only, never a value.
 import { LIVE_BASE, PADDLE_API_VERSION, SANDBOX_BASE, type FetchLike } from '../core/paddle-api';
-import { MIGRATION_OF_TABLE } from '../core/schema';
+import { FULFILMENT_SCHEMA, MIGRATION_OF_TABLE } from '../core/schema';
 import type { CheckResult, Store } from '../core/types';
 
 /** What `recoverBilling` reads. */
@@ -19,6 +19,8 @@ export interface ReadinessOptions {
   permissions?: readonly string[];
   /** The app finds prices by label: `price.read` and `product.read` are needed too. */
   resolvesPrices?: boolean;
+  /** The app uses `paddle-kit/fulfil`: its tables (migration 005) are checked too. Since v0.8.6. */
+  fulfilment?: boolean;
   /** `process.env.CRON_SECRET`. Pass the key (even when unset) to check it; leave it out to skip. */
   cronSecret?: string | undefined;
   fetch?: FetchLike;
@@ -94,7 +96,7 @@ export function readinessChecks(opts: ReadinessOptions): Record<string, () => Pr
       if (store.checkSchema) {
         let missing: string[];
         try {
-          ({ missing } = await store.checkSchema());
+          ({ missing } = await store.checkSchema(opts.fulfilment ? FULFILMENT_SCHEMA : undefined));
         } catch {
           return { ok: false, detail: 'the store did not answer (connection or permissions), so the schema was not checked' };
         }

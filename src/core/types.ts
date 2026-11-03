@@ -236,7 +236,7 @@ export interface Store {
    * `table.column`. Throws when the database does not answer, so a connection failure is never reported as a missing
    * migration. Built-in Postgres and SQLite stores implement it.
    */
-  checkSchema?(): Promise<{ missing: string[] }>;
+  checkSchema?(extra?: Readonly<Record<string, readonly string[]>>): Promise<{ missing: string[] }>;
   /** Built-in stores support durable recovery after migration 003. Custom stores may supply their own adapter. */
   recovery?: RecoveryStore;
 }

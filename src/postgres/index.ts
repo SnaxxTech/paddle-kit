@@ -177,7 +177,7 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
         [jsonParam(rows), at],
       );
     },
-    async checkSchema() {
+    async checkSchema(extra) {
       // The schema the connection resolves unqualified names in, so a per-app schema (search_path) is checked.
       const { rows } = await query(
         `SELECT table_name, column_name FROM information_schema.columns
@@ -189,7 +189,7 @@ export function postgresStore({ query }: { query: SqlQuery }): Store {
         if (!found.has(t)) found.set(t, new Set());
         found.get(t)!.add(r.column_name as string);
       }
-      return { missing: missingSchema(found) };
+      return { missing: missingSchema(found, extra) };
     },
     async getOwnedIds() {
       const { rows } = await query(`SELECT id, kind FROM paddle_owned_ids ORDER BY id`);
