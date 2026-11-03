@@ -30,6 +30,13 @@ describe('README standard setup: lib/billing.ts', () => {
     expect(Object.keys(billing.config.entitlements).sort()).toEqual(ids);
     for (const id of ids) expect(billing.config.entitlements[id]).toEqual(['pro']);
   });
+
+  it('returns products: checkout gets the price on sale', () => {
+    const cycles = libBilling({ PADDLE_PRICES: JSON.stringify({ pro: { monthly: 'pri_m', yearly: 'pri_y' } }) });
+    expect(cycles.products.checkoutPriceId('pro', 'yearly')).toBe('pri_y');
+    const flat = libBilling({ PADDLE_PRICES: JSON.stringify({ pro: 'pri_pro' }) });
+    expect(flat.products.checkoutPriceId('pro')).toBe('pri_pro');
+  });
 });
 
 describe('README standard setup: the recovery route', () => {

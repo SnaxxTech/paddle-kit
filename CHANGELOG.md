@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.3 (2026-11-03)
+
+One product definition for access and checkout (second review). No migration; nothing changes unless an app passes
+`products`.
+
+### Added
+- **`defineProducts(prices, products)`** (`paddle-kit/config`) and **`billingFromEnv({ products })`**: product key →
+  `features` and `retiredPriceIds`. Entitlements are every price on sale plus every retired one; `owns` gains the
+  retired ids (ownership and "still grants" stay separate: a retired id is listed on purpose); checkout reads only the
+  prices on sale (`products.checkoutPriceId('pro', 'monthly')`); `productOf(priceId)` names the product, cycle and
+  whether the price is retired. Product keys are required prices, so a missing one is a named env problem (billing off),
+  never a throw at import. Fixes the known limit "a renewal on a retired price that is not in `entitlements` loses
+  access" for apps that list the retired id (test: a signed renewal on a retired price had no access before, has it now).
+- The README Quickstart uses `products`.
+
+### Notes
+- Measured for the 0.8.2 readiness check: a cold `GET /` to Paddle from a fresh Node process took 342-904 ms (6 runs,
+  host load ~13), so the 3 s `healthCheckTimeoutMs` default stays. A >3 s first check seen on a local `next dev` server
+  was the route compiling.
+
 ## 0.8.2 (2026-11-03)
 
 The second review's next two items: a readiness check, and the Quickstart's three presets as tested examples. No

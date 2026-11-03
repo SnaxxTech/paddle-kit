@@ -1,5 +1,10 @@
 # Upgrading paddle-kit
 
+## 0.8.3 (from 0.8.2)
+
+No migration. Install `#v0.8.3`; nothing else to do. Optional: replace a hand-built `entitlements` map with `products: { pro: { features: ['pro'] } }` and
+open checkout with `products.checkoutPriceId(...)`. When you replace a price, move the old id to `retiredPriceIds`.
+
 ## 0.8.2 (from 0.8.1)
 
 No migration. Install `#v0.8.2`. Nothing else to do. Optional: add `readiness: { cronSecret: process.env.CRON_SECRET }` to `billingFromEnv` (add
@@ -76,7 +81,7 @@ Check first that your database has no tables of the new names with a different s
 ## 3. Bump the tag
 
 ```bash
-npm i github:SnaxxTech/paddle-kit#v0.8.2
+npm i github:SnaxxTech/paddle-kit#v0.8.3
 ```
 
 Commit the `package.json` and lockfile change. Since v0.5.0 the repository is public, so CI needs no token (README checklist, step 7). Then run the app's own tests and its sandbox end-to-end check.

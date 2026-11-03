@@ -20,7 +20,7 @@ it('package.json exports exactly the v0.7 subpaths (unchanged since v0.6) and bi
 });
 
 it('runtime exports of core, client, reconcile, next, price and config', () => {
-  expect(Object.keys(config).sort()).toEqual(['billingFromEnv', 'priceIdOf', 'priceIds', 'readBillingEnv', 'readinessChecks']);
+  expect(Object.keys(config).sort()).toEqual(['billingFromEnv', 'defineProducts', 'priceIdOf', 'priceIds', 'readBillingEnv', 'readinessChecks']);
   expect(Object.keys(next).sort()).toEqual(['createNextRoute', 'createWebhookRoute']);
   expect(Object.keys(price).sort()).toEqual(['PriceError', 'findPrice', 'findPriceMap', 'formatPrice', 'getPrice']);
   expect(Object.keys(core).sort()).toEqual(['MAX_WEBHOOK_BODY_BYTES', 'PaddleTransportError', 'adjustmentEffect', 'createBilling', 'createPaddleTransport', 'paymentRevoked']);
