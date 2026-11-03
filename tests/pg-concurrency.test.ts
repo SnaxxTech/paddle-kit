@@ -10,6 +10,7 @@ import { MIGRATIONS, postgresStore, type SqlQuery } from '../src/postgres';
 import { sign } from './helpers/sign';
 import { loadFixture, subscriptionEvent } from './helpers/fixtures';
 import { readmePackHooks, readmeSql, type Tx } from './helpers/readme-example';
+import { createFulfilment, drainOutbox, enqueue, type FulfilmentActions, type SqlTx } from '../src/fulfil';
 import type { Adjustment, Transaction } from '../src/core/types';
 
 type Pool = { query: SqlQuery; end(): Promise<void>; on(event: 'error', fn: (e: Error) => void): void };
@@ -251,6 +252,63 @@ describe.skipIf(!live)('real Postgres: concurrency', () => {
       const { rows } = await pool.query('SELECT credits FROM accounts WHERE user_id = $1', [user]);
       expect(rows[0]?.credits ?? 0).toBe(0);
     }
+  });
+
+  // paddle-kit/fulfil: the same race, through the module (migration 005) and a two-line credit app.
+  const txDb = (p: Pool) => ({
+    async transaction<T>(fn: (q: SqlTx) => Promise<T>): Promise<T> {
+      const client = await (p as unknown as { connect(): Promise<SqlTx & { release(): void }> }).connect();
+      try {
+        await client.query('BEGIN');
+        const out = await fn(client);
+        await client.query('COMMIT');
+        return out;
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      } finally {
+        client.release();
+      }
+    },
+  });
+
+  it('fulfil: a payment, its refund, chargeback and won dispute racing on separate connections end at 0 credits (20 rounds)', async () => {
+    await pool.query('CREATE TABLE f_accounts (user_id text PRIMARY KEY, credits int NOT NULL CHECK (credits >= 0))');
+    const actions: FulfilmentActions<{ credits: number }> = {
+      orderOf: (tx) => ({ userId: tx.customData!.userId as string, grants: { credits: 5 } }),
+      grant: async (q, f) => { await q.query('INSERT INTO f_accounts VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET credits = f_accounts.credits + $2', [f.userId, f.grants.credits]); },
+      revoke: async (q, f) => {
+        const balance = (await q.query('SELECT credits FROM f_accounts WHERE user_id = $1 FOR UPDATE', [f.userId])).rows[0]?.credits ?? 0;
+        const take = Math.min(balance, f.grants.credits);
+        await q.query('UPDATE f_accounts SET credits = credits - $1 WHERE user_id = $2', [take, f.userId]);
+        return take;
+      },
+      restore: async (q, f) => { await q.query('UPDATE f_accounts SET credits = credits + $1 WHERE user_id = $2', [Number(f.taken), f.userId]); },
+    };
+    const hooks = createFulfilment(txDb(pool), actions);
+    const ctx = { eventId: 'e', eventType: 't', store: {} as never, known: true };
+    for (let round = 0; round < 20; round++) {
+      const txn = `ftxn_${round}`;
+      const user = `fu_${round}`;
+      const pay = () => hooks.onTransaction!({ transactionId: txn, status: 'completed', customerId: null, subscriptionId: null, customData: { userId: user }, items: [{ priceId: 'pri_pack', productId: null, quantity: 1 }], currency: 'USD', total: '1500', subtotal: '1500', occurredAt: '', raw: {} } as Transaction, ctx);
+      const adjust = (id: string, action: string) => hooks.onAdjustment!({ adjustmentId: id, transactionId: txn, action, status: 'approved', type: 'full', subscriptionId: null, customerId: null, currency: 'USD', total: '1500', subtotal: '1500', occurredAt: '', raw: {} } as Adjustment, ctx);
+      await Promise.all(shuffle([pay, pay, () => adjust(`fr_${round}`, 'refund'), () => adjust(`fcb_${round}`, 'chargeback'), () => adjust(`fcbr_${round}`, 'chargeback_reverse')]).map((f) => f()));
+      const { rows } = await pool.query('SELECT credits FROM f_accounts WHERE user_id = $1', [user]);
+      expect(rows[0]?.credits ?? 0).toBe(0);
+    }
+  });
+
+  it('outbox: four drains racing on separate connections send each of 40 items exactly once', async () => {
+    const db = txDb(pool);
+    await db.transaction(async (q) => { for (let i = 0; i < 40; i++) await enqueue(q, { id: `o_${i}`, kind: 'email', payload: { i } }); });
+    const sent = new Map<string, number>();
+    const handlers = { email: async (_p: unknown, item: { id: string }) => { sent.set(item.id, (sent.get(item.id) ?? 0) + 1); await new Promise((r) => setTimeout(r, 5)); } };
+    const results = await Promise.all(Array.from({ length: 4 }, () => drainOutbox((t, p) => pool.query(t, p), handlers, { limit: 40 })));
+    expect(results.reduce((n, r) => n + r.sent, 0)).toBe(40);
+    expect(sent.size).toBe(40);
+    expect([...sent.values()].every((n) => n === 1)).toBe(true);
+    const { rows } = await pool.query('SELECT count(*)::int AS n FROM paddle_outbox WHERE sent_at IS NULL');
+    expect(rows[0]!.n).toBe(0);
   });
 
   it('load: 1,000 events through handleWebhook — p95 latency and error count, samples reconciled against sent', async () => {

@@ -745,7 +745,7 @@ describe('npx hint', () => {
   test('only from the npx cache, and only outside an app that depends on the kit', () => {
     const hint = npxHint(NPX, app(null));
     expect(hint).toMatch(/^Note: paddle-kit runs from the npx cache, and .+ is not an app that depends on it/);
-    expect(hint).toContain('npm i github:SnaxxTech/paddle-kit#v0.8.5');
+    expect(hint).toContain('npm i github:SnaxxTech/paddle-kit#v0.8.6');
     expect(hint!.split('\n')).toHaveLength(1);
     expect(npxHint(NPX, app({ name: 'other', dependencies: { next: '16' } }))).not.toBeNull();
     expect(npxHint('C:\\Users\\u\\AppData\\Local\\npm-cache\\_npx\\3f2a\\node_modules\\paddle-kit\\dist\\catalog\\cli.js', app(null))).not.toBeNull();

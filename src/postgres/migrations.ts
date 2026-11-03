@@ -93,4 +93,49 @@ CREATE TABLE IF NOT EXISTS paddle_owned_ids (
 );
 `,
   },
+  {
+    name: '005_fulfilment_outbox',
+    // Used only by paddle-kit/fulfil (since v0.8.6); harmless and empty for apps that do not use it. Postgres only.
+    sql: `CREATE TABLE IF NOT EXISTS paddle_fulfilments (
+  transaction_id text PRIMARY KEY,
+  user_id text NOT NULL,
+  grants jsonb NOT NULL,
+  state text NOT NULL,
+  taken jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS paddle_fulfilment_adjustments (
+  adjustment_id text PRIMARY KEY,
+  transaction_id text NOT NULL,
+  action text NOT NULL,
+  type text,
+  status text NOT NULL,
+  rank int NOT NULL
+);
+CREATE INDEX IF NOT EXISTS paddle_fulfilment_adjustments_txn_idx ON paddle_fulfilment_adjustments (transaction_id);
+
+CREATE TABLE IF NOT EXISTS paddle_fulfilment_reviews (
+  id text PRIMARY KEY,
+  transaction_id text NOT NULL,
+  kind text NOT NULL,
+  detail text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  resolved_at timestamptz
+);
+
+CREATE TABLE IF NOT EXISTS paddle_outbox (
+  id text PRIMARY KEY,
+  kind text NOT NULL,
+  payload jsonb NOT NULL,
+  attempts int NOT NULL DEFAULT 0,
+  next_at timestamptz NOT NULL DEFAULT now(),
+  last_error text,
+  sent_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS paddle_outbox_due_idx ON paddle_outbox (next_at) WHERE sent_at IS NULL;
+`,
+  },
 ];

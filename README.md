@@ -15,7 +15,7 @@ subscriptions and recovery checkpoint. Give each its own database, Neon branch o
 3. **One scheduled recovery job** (`app/api/cron/billing-recovery/route.ts`): `recoverBilling`.
 4. **One app policy module** (`lib/policy.ts`): the only place that decides what a user may do.
 
-Run migrations `001`–`004` (Run the migrations) before the first deploy of this version.
+Run migrations `001`–`005` (Run the migrations) before the first deploy of this version (`005` is used only by `paddle-kit/fulfil`; it is harmless and empty otherwise).
 
 **Three presets**, each a tested example (the tests run the blocks of this file as written):
 
@@ -23,7 +23,7 @@ Run migrations `001`–`004` (Run the migrations) before the first deploy of thi
 |---|---|
 | A subscription | This setup as it is: `entitlements` maps the plan's price ids to features, `canUse` checks them. |
 | A one-time unlock (lifetime licence) | This setup plus the hooks of "Example: a one-time unlock"; `canUse` also asks `hasUnlock`. |
-| Credit packs | This setup plus the hooks of "Example" (credits, refunds and chargebacks). |
+| Credit packs | This setup plus `paddle-kit/fulfil` ("Fulfilment module", since v0.8.6): you write only grant / revoke / restore. The hand-written "Example" below still works. |
 
 `lib/billing.ts`
 
@@ -255,7 +255,7 @@ What it does **not** do: in-app purchases in mobile store apps. Google Play and 
 
 ## Add the kit to a new Next.js app (since v0.6.0)
 
-1. Install: `npm i github:SnaxxTech/paddle-kit#v0.8.5`.
+1. Install: `npm i github:SnaxxTech/paddle-kit#v0.8.6`.
 2. Run one CLI command in the app folder: `npx paddle-kit-catalog --webhook-url https://<host>/api/paddle` (see Catalog CLI). It makes the product, the prices, the webhook destination and the client token, and writes `.env.local`.
 3. Paste the host block that the CLI prints into your host's settings (Vercel: add `--host vercel` to get the commands). Redeploy.
 4. Add the four files of the Quickstart (`lib/billing.ts`, the webhook route, the recovery route with `vercel.json`, `lib/policy.ts`), and call `canUse` where a paid feature starts.
@@ -282,13 +282,13 @@ What each version changed, in simple words: [docs/HISTORY.md](docs/HISTORY.md). 
 ## Install
 
 ```bash
-npm i github:SnaxxTech/paddle-kit#v0.8.5
+npm i github:SnaxxTech/paddle-kit#v0.8.6
 ```
 
 **The kit is not on the npm registry.** So `npx paddle-kit-catalog` in a folder that has not installed the kit fails with `npm error 404 Not Found`: npx looks for a package of that name on the registry. Two ways work:
 
-- Run it in the app, after `npm i github:SnaxxTech/paddle-kit#v0.8.5`. Then `npx paddle-kit-catalog …` (and `npx paddle-kit-doctor …`) use the installed copy.
-- Outside an app: `npx --package=github:SnaxxTech/paddle-kit#v0.8.5 paddle-kit-catalog …` (the same for `paddle-kit-doctor`). The catalog CLI then prints one line to say that it runs from the npx cache, because it writes its env file in the current folder.
+- Run it in the app, after `npm i github:SnaxxTech/paddle-kit#v0.8.6`. Then `npx paddle-kit-catalog …` (and `npx paddle-kit-doctor …`) use the installed copy.
+- Outside an app: `npx --package=github:SnaxxTech/paddle-kit#v0.8.6 paddle-kit-catalog …` (the same for `paddle-kit-doctor`). The catalog CLI then prints one line to say that it runs from the npx cache, because it writes its env file in the current folder.
 
 - The repository is public (since v0.5.0). CI and the host install it with no token. Your secrets never go in this repository: each app keeps its own Paddle keys and webhook secret in its own env files and host settings (see Environment variables).
 - The kit pins the Paddle API to version 1: each REST call sends `Paddle-Version: 1`, and the catalog CLI sets `api_version: 1` on the webhook destination. A new Paddle API version can then not change the payloads that the kit reads. Paddle refuses a version older than the account's default. So if a future Paddle account has a default newer than 1, each REST call and the destination step fail with `PaddleError`. This is on purpose: the kit's parsers must be updated first.
@@ -326,6 +326,9 @@ The kit never changes your database schema itself. Do one of these two steps in 
 |---|---|---|
 | `001_init` | `paddle_events`, `paddle_subscriptions`, `paddle_customers` (unused since v0.5.0; see UPGRADING), `paddle_failures` | v0.1.0 |
 | `002_claims_transactions` | `paddle_event_claims` (one row per event while a delivery runs its hooks), `paddle_transactions` (each transaction seen, and if it was this app's) | v0.4.0 |
+| `003_recovery` | `paddle_recovery` (the recovery job's lease and checkpoint) | v0.8.0 |
+| `004_claim_tokens_owned_ids` | `paddle_event_leases`, `paddle_owned_ids` | v0.8.0 |
+| `005_fulfilment_outbox` | `paddle_fulfilments`, `paddle_fulfilment_adjustments`, `paddle_fulfilment_reviews`, `paddle_outbox` (used only by `paddle-kit/fulfil`; Postgres; SQLite has no 005) | v0.8.6 |
 
 Rules:
 
@@ -631,6 +634,77 @@ How `owns` works:
 owns: ({ items, customData }) =>
   items.some((i) => i.priceId === fullScanPriceId) || (typeof customData?.order_id === 'string' && customData.order_id.length > 0),
 ```
+
+## Fulfilment module (`paddle-kit/fulfil`, since v0.8.6)
+
+The payment and refund rules of the examples below, kept by the kit: each payment's state and every adjustment in
+kit tables (migration `005_fulfilment_outbox`, Postgres), one payment's changes at a time (an advisory lock), inside
+your database transaction. You write only what a grant, a revoke and a restore mean for your users:
+
+- a refund or chargeback that arrived **before** its payment: nothing is granted until it is reversed;
+- a reversal gives back **what the revoke took** (`revoke` returns it), never more: spent credits stay spent;
+- a partial refund, a chargeback warning, and a paid order `orderOf` does not fulfil become rows in
+  `paddle_fulfilment_reviews` (a person decides), never only a log line;
+- replays and late, older statuses change nothing; subscription payments are left to entitlements.
+
+Side effects (a receipt email, a job) go to the **outbox** in the same transaction: `enqueue(q, { id, kind, payload })`
+with `id` as the idempotency key, so they are sent only if the payment's changes commit, and once. `drainOutbox(query,
+handlers)` sends due items at least once (retries 1 min, 2, 4, … 6 h; a handler must be safe to call twice), and
+`outboxCheck(query)` turns health red for an item that gave up or waits over an hour.
+
+`lib/credits.ts`
+
+```ts
+import { createFulfilment, enqueue, type FulfilmentActions, type SqlDb } from 'paddle-kit/fulfil';
+
+// Your own table: CREATE TABLE accounts (user_id text PRIMARY KEY, credits int NOT NULL CHECK (credits >= 0));
+declare const db: SqlDb; // your Postgres client with real transactions (pg, @neondatabase/serverless Pool, PGlite, ...)
+
+export function creditPack(packPriceId: string, creditsPerUnit = 5) {
+  const actions: FulfilmentActions<{ credits: number }> = {
+    orderOf: (tx) => {
+      const userId = tx.customData?.userId;
+      const known = tx.items.length > 0 && tx.items.every((i) => i.priceId === packPriceId);
+      if (typeof userId !== 'string' || !known) return null; // kept as a review row
+      return { userId, grants: { credits: creditsPerUnit * tx.items.reduce((n, i) => n + i.quantity, 0) } };
+    },
+    async grant(q, f) {
+      await q.query(
+        'INSERT INTO accounts (user_id, credits) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET credits = accounts.credits + $2',
+        [f.userId, f.grants.credits],
+      );
+      await enqueue(q, { id: `${f.transactionId}:receipt`, kind: 'receipt', payload: { userId: f.userId, credits: f.grants.credits } });
+    },
+    async revoke(q, f) {
+      // Take back what is left of this pack; the balance is shared by the user's packs, so lock its row.
+      const balance = (await q.query('SELECT credits FROM accounts WHERE user_id = $1 FOR UPDATE', [f.userId])).rows[0]?.credits ?? 0;
+      const take = Math.min(balance, f.grants.credits);
+      await q.query('UPDATE accounts SET credits = credits - $1 WHERE user_id = $2', [take, f.userId]);
+      return take;
+    },
+    async restore(q, f) {
+      await q.query('UPDATE accounts SET credits = credits + $1 WHERE user_id = $2', [Number(f.taken), f.userId]);
+    },
+  };
+  return createFulfilment(db, actions);
+}
+```
+
+Spread `creditPack(packPriceId)` into the `billingFromEnv` options. It needs the pack's price id when it is built: read
+it with `readBillingEnv` first (`priceIdOf(config.prices, 'pack')`). Add `readiness: { fulfilment: true, … }` so health
+checks migration 005, and drain the outbox from the recovery cron:
+
+```ts
+export const { GET } = createRecoveryRoute({
+  billing, problems, apiKey: config?.apiKey, cronSecret: process.env.CRON_SECRET,
+  drainOutbox: () => drainOutbox((text, params) => pool.query(text, params), { receipt: (p) => sendReceiptEmail(p) }),
+});
+```
+
+Tested: `tests/fulfil.test.ts` runs every scenario of the hand-written examples through the module on PGlite, and
+`tests/readme-presets.test.ts` runs `lib/credits.ts` above as written; on a real Postgres 17
+(`tests/pg-concurrency.test.ts`) a payment, its refund, chargeback and won dispute racing on separate connections end
+at 0 credits in 20 of 20 rounds, and four outbox drains racing send each of 40 items exactly once.
 
 ## One-time purchases and refunds (hooks)
 
@@ -1204,7 +1278,7 @@ jobs:
         run: |
           mkdir -p site
           set +e
-          npx --yes --package=github:SnaxxTech/paddle-kit#v0.8.5 paddle-kit-doctor --apps apps.json --json --html site/index.html > results.json
+          npx --yes --package=github:SnaxxTech/paddle-kit#v0.8.6 paddle-kit-doctor --apps apps.json --json --html site/index.html > results.json
           code=$?
           [ "$code" -eq 2 ] && exit 2   # the file or flags are wrong: fail loudly, publish nothing
           exit 0                        # red apps are shown on the page (and, later, as issues)
@@ -1288,7 +1362,7 @@ Do these steps one time for each app: first in sandbox, then again for live.
    4. Start Paddle.js when that page loads (for example, call `createCheckout` in an effect on mount, not only in a button click). Paddle opens a checkout link from the `_ptxn` query parameter when the page loads.
 
    We found no API for this setting (**UNVERIFIED** that there is none).
-2. **Install the kit in the app:** `npm i github:SnaxxTech/paddle-kit#v0.8.5`. The kit is not on the npm registry, so run the CLIs in the app folder (or see Install for `npx --package=…`).
+2. **Install the kit in the app:** `npm i github:SnaxxTech/paddle-kit#v0.8.6`. The kit is not on the npm registry, so run the CLIs in the app folder (or see Install for `npx --package=…`).
 3. **Make the catalog.** Run `npx paddle-kit-catalog --webhook-url https://<host>/api/paddle` (see Catalog CLI). Read the table that it shows. Never copy the webhook secret by hand.
 4. **Put the variables on the host.** Paste the host block that the CLI prints (`--host vercel` prints the commands). Add `PADDLE_HEALTH_TOKEN` (any long random value), and `PADDLE_API_KEY` if the app uses `getPrice`, `findPrice`, `resolvePrices` or `reconcile`. Redeploy.
 5. **Add the code:** the four Quickstart files: `lib/billing.ts` with `billingFromEnv`, the webhook route, the recovery route with its `vercel.json` cron and `CRON_SECRET`, and `lib/policy.ts` with `canUse`. Pass `onError` so a failure's cause reaches your error tracker. Optional: show the price with `findPrice` or `getPrice` (see Show the price from Paddle), so that the price lives only in Paddle, and report its source with a `healthChecks` entry. A one-time-purchase app may drop `PADDLE_PRICES` with `resolvePrices` (see Find prices by their label).

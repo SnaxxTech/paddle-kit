@@ -156,3 +156,42 @@ describe('preset: a one-time unlock (README "Example: a one-time unlock": wiring
     expect(await t.canUse()).toBe(false);
   });
 });
+
+describe('preset: credit packs through paddle-kit/fulfil (README lib/credits.ts, on PGlite)', () => {
+  const opened: PGlite[] = [];
+  afterEach(async () => { await Promise.all(opened.splice(0).map((d) => d.close())); });
+
+  async function setup() {
+    const { MIGRATIONS } = await import('../src/postgres');
+    const fulfil = await import('../src/fulfil');
+    const pg = new PGlite();
+    opened.push(pg);
+    for (const m of MIGRATIONS) await pg.exec(m.sql);
+    await pg.exec('CREATE TABLE accounts (user_id text PRIMARY KEY, credits int NOT NULL CHECK (credits >= 0))');
+    const db = { transaction: <T>(fn: (q: any) => Promise<T>) => pg.transaction((t) => fn(t)) };
+    const block = runReadmeBlock('\n`lib/credits.ts`\n', { 'paddle-kit/fulfil': fulfil }, { db });
+    const hooks = block.creditPack('pri_pack');
+    const ctx = { eventId: 'e', eventType: 't', store: {} as any, known: true };
+    const pay = (id: string, quantity = 1) => hooks.onTransaction({ transactionId: id, status: 'completed', customerId: null, subscriptionId: null, customData: { userId: 'u1' }, items: [{ priceId: 'pri_pack', productId: null, quantity }], currency: 'USD', total: '1500', subtotal: '1500', occurredAt: '', raw: {} } as Transaction, ctx);
+    const adjust = (adjustmentId: string, transactionId: string, action: string, status: string) =>
+      hooks.onAdjustment({ adjustmentId, transactionId, action, status, type: 'full', subscriptionId: null, customerId: null, currency: 'USD', total: '1500', subtotal: '1500', occurredAt: '', raw: {} } as Adjustment, ctx);
+    const balance = async () => (await pg.query<{ credits: number }>(`SELECT credits FROM accounts WHERE user_id = 'u1'`)).rows[0]?.credits ?? 0;
+    return { pg, pay, adjust, balance };
+  }
+
+  it('grants by quantity once, queues one receipt; buy 5, spend 3, refund, reverse = 2; a refund first grants nothing', async () => {
+    const t = await setup();
+    await t.pay('txn_1', 2);
+    await t.pay('txn_1', 2);
+    expect(await t.balance()).toBe(10);
+    expect((await t.pg.query('SELECT id FROM paddle_outbox')).rows).toEqual([{ id: 'txn_1:receipt' }]);
+    await t.pg.query(`UPDATE accounts SET credits = 7 WHERE user_id = 'u1'`); // 3 of 10 spent
+    await t.adjust('adj_r', 'txn_1', 'refund', 'approved');
+    expect(await t.balance()).toBe(0);
+    await t.adjust('adj_r', 'txn_1', 'refund', 'reversed');
+    expect(await t.balance()).toBe(7);
+    await t.adjust('adj_r2', 'txn_2', 'refund', 'approved');
+    await t.pay('txn_2');
+    expect(await t.balance()).toBe(7);
+  });
+});

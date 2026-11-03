@@ -325,6 +325,12 @@ export interface RecoveryRouteOptions {
   cronSecret: string | undefined;
   /** Passed to `recoverBilling` (limits, `fetch`, `now`). */
   recovery?: Omit<RecoveryOptions, 'apiKey'>;
+  /**
+   * Since v0.8.6: runs after recovery (also when it failed), e.g. `() => drainOutbox(query, handlers)` from
+   * paddle-kit/fulfil. Its result is in the response as `outbox`; a throw is reported as `outbox: { error }` and makes
+   * the response 500, so the cron log shows it.
+   */
+  drainOutbox?: () => Promise<unknown>;
 }
 
 /**
@@ -346,7 +352,16 @@ export function createRecoveryRoute(opts: RecoveryRouteOptions) {
       }
       if (!opts.apiKey) return Response.json({ status: 'misconfigured', problems: ['PADDLE_API_KEY is missing'] }, { status: 500 });
       const result = await recoverBilling(opts.billing, { ...opts.recovery, apiKey: opts.apiKey });
-      return Response.json(result, { status: result.status === 'failed' ? 500 : 200 });
+      if (!opts.drainOutbox) return Response.json(result, { status: result.status === 'failed' ? 500 : 200 });
+      let outbox: unknown;
+      let outboxFailed = false;
+      try {
+        outbox = await opts.drainOutbox();
+      } catch (error) {
+        outboxFailed = true;
+        outbox = { error: (error as Error)?.name ?? 'Error' }; // the name only: a driver message may hold a secret
+      }
+      return Response.json({ ...result, outbox }, { status: result.status === 'failed' || outboxFailed ? 500 : 200 });
     },
   };
 }

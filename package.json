@@ -1,6 +1,6 @@
 {
   "name": "paddle-kit",
-  "version": "0.8.5",
+  "version": "0.8.6",
   "private": true,
   "type": "module",
   "bin": {
@@ -61,6 +61,10 @@
     "./server": {
       "types": "./dist/server/index.d.ts",
       "default": "./dist/server/index.js"
+    },
+    "./fulfil": {
+      "types": "./dist/fulfil/index.d.ts",
+      "default": "./dist/fulfil/index.js"
     }
   },
   "scripts": {

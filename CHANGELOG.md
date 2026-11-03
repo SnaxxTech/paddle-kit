@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.8.6 (2026-11-03)
+
+The fulfilment module and an outbox (second review: "reusable fulfilment contracts … where apps supply only the
+business action; for external work, write an outbox job in the same transaction"). **New migration
+`005_fulfilment_outbox`** (CREATE-only, Postgres): run it before using the module; apps that do not use it are not
+affected (its tables stay empty, and readiness checks them only with `readiness: { fulfilment: true }`).
+
+### Added
+- **`paddle-kit/fulfil`** (edge-safe, Postgres): `createFulfilment(db, { orderOf, grant, revoke, restore })` returns
+  `onTransaction` / `onAdjustment` hooks. The kit keeps each payment's state (`held` / `granted` / `revoked`, and what
+  the revoke took) and every adjustment, runs one payment's changes under an advisory lock in the app's transaction,
+  and decides: a refund first keeps the payment from being granted; a reversal gives back what `revoke` returned;
+  partial refunds, chargeback warnings and unfulfilled paid orders become `paddle_fulfilment_reviews` rows; replays
+  and late, older statuses change nothing; subscription payments are skipped. A throw in the app's action rolls the
+  whole payment back, so Paddle's retry grants exactly once.
+- **Outbox:** `enqueue(q, { id, kind, payload })` in the same transaction (the id is the idempotency key);
+  `drainOutbox(query, handlers, { limit, maxAttempts, leaseSeconds })` sends at least once with backoff and stores
+  the error redacted; `outboxCheck(query)` is a health check (red for an item that gave up or waits > 60 min).
+- **`createRecoveryRoute({ drainOutbox })`** runs the drain after recovery; its result is `outbox` in the response, a
+  throw makes it a 500 with the error name only.
+- **`readinessChecks({ fulfilment: true })`** / `billingFromEnv({ readiness: { fulfilment: true } })` checks migration
+  005's tables and columns; `Store.checkSchema(extra?)`.
+- README: "Fulfilment module", with a credit-pack `lib/credits.ts` that a test runs as written; the credit preset
+  points to it. The hand-written examples stay (and stay tested).
+
+### Tests
+- `tests/fulfil.test.ts` (PGlite): every scenario of the hand-written examples through the module (grant by quantity
+  once, buy 5 / spend 3 / refund / reverse = 2, chargeback and won dispute, refund before payment, a won chargeback
+  while a refund stands, late older status, reviews, subscription payments skipped, a throwing action rolled back),
+  an unlock, and the outbox (once per key, backoff, redaction, give-up, `outboxCheck`, no handler).
+- Real Postgres 17 (`tests/pg-concurrency.test.ts`): payment + refund + chargeback + won dispute racing on separate
+  connections end at 0 credits in 20/20 rounds (without the advisory lock: 5 credits, the test fails); four drains
+  racing send each of 40 items exactly once. That test also passed with the claim's `SKIP LOCKED` and recheck removed,
+  so it does not isolate them; they stay as the standard pattern.
+
 ## 0.8.5 (2026-11-03)
 
 ### Fixes

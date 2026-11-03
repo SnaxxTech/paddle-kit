@@ -15,7 +15,19 @@ export const REQUIRED_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   paddle_owned_ids: ['id', 'kind', 'first_seen_at'],
 };
 
+/** The tables `paddle-kit/fulfil` uses (migration 005, Postgres). Checked only for apps that use the module. */
+export const FULFILMENT_SCHEMA: Readonly<Record<string, readonly string[]>> = {
+  paddle_fulfilments: ['transaction_id', 'user_id', 'grants', 'state', 'taken', 'created_at', 'updated_at'],
+  paddle_fulfilment_adjustments: ['adjustment_id', 'transaction_id', 'action', 'type', 'status', 'rank'],
+  paddle_fulfilment_reviews: ['id', 'transaction_id', 'kind', 'detail', 'created_at', 'resolved_at'],
+  paddle_outbox: ['id', 'kind', 'payload', 'attempts', 'next_at', 'last_error', 'sent_at', 'created_at'],
+};
+
 export const MIGRATION_OF_TABLE: Readonly<Record<string, string>> = {
+  paddle_fulfilments: '005_fulfilment_outbox',
+  paddle_fulfilment_adjustments: '005_fulfilment_outbox',
+  paddle_fulfilment_reviews: '005_fulfilment_outbox',
+  paddle_outbox: '005_fulfilment_outbox',
   paddle_events: '001_init',
   paddle_failures: '001_init',
   paddle_subscriptions: '001_init',
@@ -26,9 +38,9 @@ export const MIGRATION_OF_TABLE: Readonly<Record<string, string>> = {
 };
 
 /** What is missing from `found` (table → its columns): `table` for a missing table, `table.column` for a column. */
-export function missingSchema(found: ReadonlyMap<string, ReadonlySet<string>>): string[] {
+export function missingSchema(found: ReadonlyMap<string, ReadonlySet<string>>, extra: Readonly<Record<string, readonly string[]>> = {}): string[] {
   const missing: string[] = [];
-  for (const [table, columns] of Object.entries(REQUIRED_SCHEMA)) {
+  for (const [table, columns] of Object.entries({ ...REQUIRED_SCHEMA, ...extra })) {
     const have = found.get(table);
     if (!have) missing.push(table);
     else for (const c of columns) if (!have.has(c)) missing.push(`${table}.${c}`);
