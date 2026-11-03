@@ -11,6 +11,12 @@ export function readmeBlockAfter(marker: string): string {
   return /```ts\n([\s\S]*?)```/.exec(readme.slice(at))![1]!;
 }
 
+export function readmeSqlAfter(marker: string): string {
+  const at = readme.indexOf(marker);
+  if (at < 0) throw new Error(`README has no ${marker}`);
+  return /```sql\n([\s\S]*?)```/.exec(readme.slice(at))![1]!;
+}
+
 export function runReadmeBlock(marker: string, modules: Record<string, unknown>, globals: Record<string, unknown> = {}): Record<string, any> {
   const js = ts.transpileModule(readmeBlockAfter(marker), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const exports: Record<string, any> = {};

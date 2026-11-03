@@ -17,6 +17,14 @@ subscriptions and recovery checkpoint. Give each its own database, Neon branch o
 
 Run migrations `001`–`004` (Run the migrations) before the first deploy of this version.
 
+**Three presets**, each a tested example (the tests run the blocks of this file as written):
+
+| You sell | Use |
+|---|---|
+| A subscription | This setup as it is: `entitlements` maps the plan's price ids to features, `canUse` checks them. |
+| A one-time unlock (lifetime licence) | This setup plus the hooks of "Example: a one-time unlock"; `canUse` also asks `hasUnlock`. |
+| Credit packs | This setup plus the hooks of "Example" (credits, refunds and chargebacks). |
+
 `lib/billing.ts`
 
 ```ts
@@ -33,6 +41,9 @@ export const { billing, config, problems, enforce } = billingFromEnv(process.env
   // `priceIds` reads both forms of a PADDLE_PRICES entry: "pri_…" and { "monthly": "pri_…", "yearly": "pri_…" }.
   entitlements: (c) => Object.fromEntries(priceIds(c.prices.pro).map((id) => [id, ['pro']])),
   onError: (error, ctx) => console.error('paddle-kit failure', ctx, error), // may hold secrets: your error tracker only
+  // Health shows whether the API key has the permissions recovery needs, migrations 003/004 are in, and CRON_SECRET is
+  // set (since v0.8.2). Add `permissions: ['subscription.write']` if the app changes plans through the API.
+  readiness: { cronSecret: process.env.CRON_SECRET },
 });
 if (problems.length > 0) console.error('billing misconfigured:', problems.join('; ')); // names only, never values
 ```
@@ -719,6 +730,77 @@ We ran this example against a real SQL database (PGlite), through the built pack
 - An approved full refund took the credits back one time, and never below zero.
 
 The example itself is a test (`tests/readme-hooks.test.ts`, on PGlite): the test reads the SQL and TypeScript blocks above out of this file and runs them as written. Since v0.8.0 it also covers the two cases the v0.7 example got wrong: a full refund that arrived **before** its payment (the payment now grants nothing), and a won chargeback while a separate full refund still stands (nothing is given back). A chargeback took the credits and a won dispute gave them back one time; a refund that was approved and then reversed took them and gave them back; a give-back with nothing taken back gave nothing; redeliveries and older, late statuses changed nothing; a partial refund and a chargeback warning became review rows. Since v0.8.1 a reversal gives back only what the revoke took: buy 5, spend 3, refund (takes the 2 left), reverse: 2 come back, not 5. Not yet seen from real Paddle: a chargeback, its reversal, or a reversed refund.
+
+### Example: a one-time unlock
+
+A price that unlocks a feature for good (a lifetime licence, a template pack). A full refund or a chargeback that still
+stands takes it away; a reversal gives it back. The tables (Postgres):
+
+```sql
+CREATE TABLE unlocks (transaction_id text NOT NULL, user_id text NOT NULL, feature text NOT NULL,
+  revoked boolean NOT NULL DEFAULT false, PRIMARY KEY (transaction_id, feature));
+CREATE INDEX unlocks_user_idx ON unlocks (user_id, feature);
+-- Every adjustment, kept against its transaction even before the payment arrives (a refund can come first).
+CREATE TABLE unlock_adjustments (id text PRIMARY KEY, transaction_id text NOT NULL, action text NOT NULL, type text,
+  status text NOT NULL, rank int NOT NULL);
+```
+
+```ts
+import { paymentRevoked, type BillingConfig } from 'paddle-kit/core';
+
+type Tx = { query(text: string, params?: unknown[]): Promise<{ rows: any[] }> };
+declare const db: { transaction<T>(fn: (q: Tx) => Promise<T>): Promise<T>; query: Tx['query'] };
+
+const lockPayment = (q: Tx, transactionId: string) => q.query('SELECT pg_advisory_xact_lock(hashtext($1))', [transactionId]);
+
+// The unlocks of a payment stand unless an adjustment that still stands took the payment back.
+async function settle(q: Tx, transactionId: string) {
+  const adjustments = (await q.query('SELECT action, type, status FROM unlock_adjustments WHERE transaction_id = $1', [transactionId])).rows;
+  await q.query('UPDATE unlocks SET revoked = $1 WHERE transaction_id = $2', [paymentRevoked(adjustments), transactionId]);
+}
+
+/** `features`: price id -> the feature it unlocks, e.g. `{ [priceIdOf(config.prices, 'lifetime')]: 'pro' }`. */
+export function unlockHooks(features: Record<string, string>): Pick<BillingConfig, 'onTransaction' | 'onAdjustment'> {
+  return {
+    onTransaction: async (tx) => {
+      if (tx.subscriptionId !== null) return; // a subscription payment: entitlements handle it
+      const userId = tx.customData?.userId; // untrusted, but a user can only pay for someone else
+      const unlocked = tx.items.map((i) => features[i.priceId]).filter((f): f is string => !!f);
+      if (typeof userId !== 'string' || unlocked.length === 0) return; // not ours to unlock: see the credit example's reviews table
+      await db.transaction(async (q) => {
+        await lockPayment(q, tx.transactionId);
+        for (const feature of unlocked) {
+          await q.query('INSERT INTO unlocks (transaction_id, user_id, feature) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [tx.transactionId, userId, feature]);
+        }
+        await settle(q, tx.transactionId); // a refund that arrived first keeps it revoked
+      });
+    },
+    onAdjustment: async (adj) => {
+      await db.transaction(async (q) => {
+        await lockPayment(q, adj.transactionId);
+        // A status only moves forward (pending_approval → approved / rejected → reversed).
+        await q.query(
+          `INSERT INTO unlock_adjustments (id, transaction_id, action, type, status, rank)
+           VALUES ($1, $2, $3, $4, $5, CASE $5 WHEN 'pending_approval' THEN 0 WHEN 'reversed' THEN 2 ELSE 1 END)
+           ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, rank = EXCLUDED.rank WHERE unlock_adjustments.rank < EXCLUDED.rank`,
+          [adj.adjustmentId, adj.transactionId, adj.action, adj.type, adj.status],
+        );
+        await settle(q, adj.transactionId);
+      });
+    },
+  };
+}
+
+/** For `canUse` in lib/policy.ts: a subscription (`billing.hasAccess`) or an unlock that still stands. */
+export async function hasUnlock(userId: string, feature: string): Promise<boolean> {
+  const rows = (await db.query('SELECT 1 FROM unlocks WHERE user_id = $1 AND feature = $2 AND NOT revoked LIMIT 1', [userId, feature])).rows;
+  return rows.length > 0;
+}
+```
+
+This example is a test too (`tests/readme-presets.test.ts`, on PGlite): a payment unlocked the feature, a replay did not
+duplicate it, a full refund took it away and its reversal gave it back, a refund that arrived first kept it locked, a
+partial refund changed nothing, and an unknown price unlocked nothing.
 
 ### Refunds, chargebacks and reversals (`adjustmentEffect`, since v0.7.0)
 

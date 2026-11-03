@@ -1,5 +1,11 @@
 # Upgrading paddle-kit
 
+## 0.8.2 (from 0.8.1)
+
+Nothing to do. Optional: add `readiness: { cronSecret: process.env.CRON_SECRET }` to `billingFromEnv` (add
+`permissions: ['subscription.write']` if the app changes plans through the API), so health shows a missing permission,
+migration or cron secret. It makes one request to Paddle per 10 minutes of health checks.
+
 ## 0.8.1 (from 0.8.0)
 
 No `paddle_*` migration. Install `#v0.8.1`: the Quickstart imports `priceIds` and `createRecoveryRoute`, which 0.8.0 does not have. Only if you copied these README examples:
