@@ -80,6 +80,30 @@ describe('README hooks example on real SQL', () => {
     expect(await t.credits()).toBe(5);
   });
 
+  it('a reversed refund gives back only what the refund took: spent credits stay spent', async () => {
+    const t = await setup();
+    await t.pay('txn_1');
+    await t.pg.query(`UPDATE accounts SET credits = 2 WHERE user_id = 'u1'`); // 3 of 5 spent
+    await t.adjust('adj_r', 'txn_1', 'refund', 'approved');
+    expect(await t.credits()).toBe(0); // the 2 left were taken back
+    await t.adjust('adj_r', 'txn_1', 'refund', 'reversed');
+    expect(await t.credits()).toBe(2); // the 2 come back, not 5
+    await t.adjust('adj_cb', 'txn_1', 'chargeback', 'approved');
+    expect(await t.credits()).toBe(0);
+    await t.adjust('adj_cbr', 'txn_1', 'chargeback_reverse', 'approved');
+    expect(await t.credits()).toBe(2);
+  });
+
+  it('a revoke while other packs fund the balance takes this pack back in full, and a restore returns it', async () => {
+    const t = await setup();
+    await t.pay('txn_1');
+    await t.pay('txn_2');
+    await t.adjust('adj_r', 'txn_1', 'refund', 'approved');
+    expect(await t.credits()).toBe(5);
+    await t.adjust('adj_r', 'txn_1', 'refund', 'reversed');
+    expect(await t.credits()).toBe(10);
+  });
+
   it('an older status delivered late changes nothing', async () => {
     const t = await setup();
     await t.pay('txn_1');

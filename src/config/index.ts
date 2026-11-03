@@ -231,7 +231,28 @@ export function readBillingEnv(
   return { config: withLookup, problems };
 }
 
-const priceIdsOf = (prices: PriceMap) => [...new Set(Object.values(prices).flatMap((p) => (typeof p === 'string' ? [p] : Object.values(p))))];
+/**
+ * Every price id of one entry of a price map, whichever form it has: `'pri_1'` → `['pri_1']`,
+ * `{ monthly: 'pri_m', yearly: 'pri_y' }` → `['pri_m', 'pri_y']`, missing → `[]`. Since v0.8.1. Use it instead of
+ * `Object.values(prices.pro)`, which splits a flat id into characters.
+ */
+export function priceIds(entry: PriceMap[string] | undefined): string[] {
+  if (entry === undefined) return [];
+  return typeof entry === 'string' ? [entry] : Object.values(entry);
+}
+
+/**
+ * The one price id for `key` (and `cycle`, when the entry is a cycle map), e.g. for checkout. Throws when it is not
+ * there, naming the key and cycle only. Since v0.8.1. Use it instead of `prices.pro as string`.
+ */
+export function priceIdOf(prices: PriceMap, key: string, cycle?: string): string {
+  const entry = prices[key];
+  const id = typeof entry === 'string' ? (cycle === undefined ? entry : undefined) : cycle === undefined ? undefined : entry?.[cycle];
+  if (!id) throw new Error(`paddle-kit: no price "${key}"${cycle === undefined ? '' : ` for cycle "${cycle}"`}`);
+  return id;
+}
+
+const priceIdsOf = (prices: PriceMap) => [...new Set(Object.values(prices).flatMap(priceIds))];
 
 /** The required keys and cycles of a map found in Paddle, checked like PADDLE_PRICES is. */
 function checkRequired(map: PriceMap, app: string, opts: ReadBillingEnvOptions): PriceMap {

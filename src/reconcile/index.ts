@@ -6,6 +6,7 @@ import { resolveOwnership } from '../core/owns';
 import { LIVE_BASE, PaddleError, SANDBOX_BASE, paddleClient, type FetchLike, type Json } from '../core/paddle-api';
 import type { RecoveryStore } from '../core/types';
 import { PaddleTransportError } from '../core/transport';
+import { safeEqual } from '../core/signature';
 
 export type { FetchLike };
 
@@ -311,4 +312,41 @@ export async function recoverBilling(billing: Billing, opts: RecoveryOptions): P
     }
     return { status: 'failed', reason, ...(error instanceof PaddleError && error.status !== undefined ? { httpStatus: error.status } : {}), ...(incomplete ? partial : {}) };
   }
+}
+
+export interface RecoveryRouteOptions {
+  /** `null` when billing is off or misconfigured. */
+  billing: Billing | null;
+  /** `problems` from `readBillingEnv` / `billingFromEnv`. */
+  problems: readonly string[];
+  /** `config.apiKey` (PADDLE_API_KEY). */
+  apiKey: string | undefined;
+  /** `process.env.CRON_SECRET`. Unset or empty: every call is refused, so a missing secret never opens the job. */
+  cronSecret: string | undefined;
+  /** Passed to `recoverBilling` (limits, `fetch`, `now`). */
+  recovery?: Omit<RecoveryOptions, 'apiKey'>;
+}
+
+/**
+ * The scheduled recovery job as a route (since v0.8.1):
+ * `export const { GET } = createRecoveryRoute({ billing, problems, apiKey: config?.apiKey, cronSecret: process.env.CRON_SECRET })`.
+ * - `Authorization` must be `Bearer <cronSecret>` (Vercel Cron sends it); otherwise, or with no secret set, 401.
+ * - Billing deliberately off (no billing variable, `problems` empty): 200 `{ status: "off" }`.
+ * - Misconfigured (`problems`, or billing on without an API key): 500 `{ status: "misconfigured", problems }`, names only.
+ * - Otherwise `recoverBilling`: 500 when the run failed, 200 when it is done or another run holds the lease.
+ */
+export function createRecoveryRoute(opts: RecoveryRouteOptions) {
+  return {
+    GET: async (req: Request): Promise<Response> => {
+      const secret = opts.cronSecret;
+      if (!secret || !(await safeEqual(req.headers.get('authorization') ?? '', `Bearer ${secret}`))) return new Response(null, { status: 401 });
+      if (!opts.billing) {
+        if (opts.problems.length === 0) return Response.json({ status: 'off' });
+        return Response.json({ status: 'misconfigured', problems: [...opts.problems] }, { status: 500 });
+      }
+      if (!opts.apiKey) return Response.json({ status: 'misconfigured', problems: ['PADDLE_API_KEY is missing'] }, { status: 500 });
+      const result = await recoverBilling(opts.billing, { ...opts.recovery, apiKey: opts.apiKey });
+      return Response.json(result, { status: result.status === 'failed' ? 500 : 200 });
+    },
+  };
 }

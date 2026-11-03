@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.8.1 (2026-11-03)
+
+Fixes the README copy-paste traps the second review of 0.8.0 found. Each fix has a test that runs the README block as
+written and failed before. **No `paddle_*` migration**, and no behaviour change for apps that did not copy these
+examples. **Apps that copied the credit-pack example need an app-side schema change:** add `orders.revoked` and
+`orders.taken`, adopt the new `settle`, and review orders revoked under the old example (UPGRADING 0.8.1, step 3).
+The Quickstart imports `priceIds` and `createRecoveryRoute`, which exist from 0.8.1 on.
+
+### Fixes
+- **Price maps (README Quickstart).** The entitlements example split a flat `PADDLE_PRICES` entry (`{ "pro": "pri_pro" }`)
+  into single characters (`_ i o p r`), so nobody got access. New helpers in `paddle-kit/config`: `priceIds(entry)`
+  (every id of an entry, either form) and `priceIdOf(prices, key, cycle?)` (one id, or a clear error). The README's
+  examples use them instead of `Object.values(...)` and `as string`; `readBillingEnv` uses `priceIds` too.
+- **Recovery route.** The README route let `Bearer undefined` in while `CRON_SECRET` was unset, and answered 200 `off`
+  for a misconfigured app, hiding a recovery job that never ran. New `createRecoveryRoute` in `paddle-kit/reconcile`:
+  401 without the secret (and always while it is unset), 500 `misconfigured` with the problem names for env problems or
+  a missing `PADDLE_API_KEY`, 200 `off` only when billing is deliberately off, 500 for a failed run.
+- **Credit example: a reversed refund gave back the full pack.** Buy 5, spend 3, refund (takes the 2 left), reverse:
+  5 came back instead of 2. Orders now record what a revoke actually took (`revoked`, `taken`), and a give-back returns
+  exactly that; the account row is locked while a payment settles. Apps that copied the example: see UPGRADING.
+
+### Docs
+- The README starts with one Quickstart (the supported setup). The `createBilling`-by-hand section says what it skips;
+  its duplicate one-call block is gone. Version notes moved to `docs/HISTORY.md`.
+- Stated: one set of `paddle_*` tables per app and per environment (the tables have no app or environment column).
+
 ## 0.8.0 (2026-11-03)
 
 Fixes the four gaps the 2026-11-03 review of 0.8.0-qr.1 reproduced, each with a test that failed before and passes
