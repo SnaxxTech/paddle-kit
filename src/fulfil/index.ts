@@ -260,9 +260,9 @@ export interface DrainOptions {
  * worker that ran past its lease cannot overwrite the retry state of the run that took the item over (`lost` counts
  * those); a send that finished is always marked sent.
  * A handler that runs past `leaseSeconds` can be called again by another run, and a crash after sending sends it again:
- * handlers must be idempotent on `item.id` (pass it as the idempotency key of the email or API call). Run it from a
- * frequent cron, or from the recovery cron (`createRecoveryRoute({ drainOutbox })`). Errors are stored redacted and
- * cut to 200 characters.
+ * handlers must be idempotent on `item.id` (pass it as the idempotency key of the email or API call). Call it right
+ * after the payment commits, and hourly as the backstop (`createOutboxRoute`, or `createRecoveryRoute({ drainOutbox })`).
+ * Errors are stored redacted and cut to 200 characters.
  */
 export async function drainOutbox(
   query: SqlTx['query'],
@@ -356,8 +356,8 @@ export async function resolveReview(q: SqlTx, id: string): Promise<boolean> {
 }
 
 /**
- * The outbox's own worker route (since v0.9.0), for a frequent cron (every few minutes), separate from the hourly
- * or daily recovery job: `export const { GET } = createOutboxRoute({ cronSecret, drain: () => drainOutbox(…) })`.
+ * The outbox's own worker route (since v0.9.0): the hourly backstop for sends that failed right after the payment.
+ * On a free-tier database keep it hourly (README "Free-tier databases"): `export const { GET } = createOutboxRoute({ cronSecret, drain: () => drainOutbox(…) })`.
  * Refuses (401) without `Authorization: Bearer <cronSecret>`, and always when `cronSecret` is unset. Answers the
  * drain's result, or 500 with the error's name only (a driver message may hold a secret). Bound it with the
  * drain's `limit` and `budgetMs`, below the route's own time limit.

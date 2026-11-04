@@ -76,18 +76,21 @@ describe.skipIf(!live)('starters, run as written', () => {
     expect((await app.cron('app/api/cron/billing-recovery/route', 'Bearer wrong')).status).toBe(401);
   });
 
-  it('unlock: payment unlocks once, the receipt goes out through the outbox route, a refund locks it, a second payment is a review', async () => {
+  it('unlock: payment unlocks once and sends its receipt during the webhook, a refund locks it, a second payment is a review', async () => {
     const app = await boot('unlock', { lifetime: 'pri_life' });
     expect(app.problems.join("; ")).toBe("");
     const { canUse } = await app.load('lib/policy');
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
     const paid = payment({ priceId: 'pri_life', userId: 'u1' });
     expect((await app.send(paid)).status).toBe(200);
-    expect((await app.send({ ...paid, event_id: `evt_${n()}` })).status).toBe(200); // a replay: nothing more
-    expect(await canUse('u1')).toBe(true);
-    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
-    expect((await app.cron('app/api/cron/outbox/route', 'Bearer wrong')).status).toBe(401);
-    expect(await (await app.cron('app/api/cron/outbox/route')).json()).toEqual({ sent: 1, failed: 0, gaveUp: 0, lost: 0 });
+    // Sent right after the payment committed, by the webhook itself: no cron needed, no extra database wake-up.
     expect(info).toHaveBeenCalledWith('paddle-kit receipt', `${paid.data.id}:receipt`, 'u1');
+    expect((await app.send({ ...paid, event_id: `evt_${n()}` })).status).toBe(200); // a replay: nothing more
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(await canUse('u1')).toBe(true);
+    // The outbox route stays the backstop (an item whose send failed): nothing is left for it here.
+    expect((await app.cron('app/api/cron/outbox/route', 'Bearer wrong')).status).toBe(401);
+    expect(await (await app.cron('app/api/cron/outbox/route')).json()).toEqual({ sent: 0, failed: 0, gaveUp: 0, lost: 0 });
     expect((await app.health()).checks).toMatchObject({ outbox: { ok: true }, reviews: { ok: true }, migrations: { ok: true } });
 
     const again = payment({ priceId: 'pri_life', userId: 'u1' }); // paid twice: declined, a person refunds it
@@ -100,17 +103,43 @@ describe.skipIf(!live)('starters, run as written', () => {
 
   it('credits: a 2-pack grants 200, spending is atomic, a refund takes back only what is left; an unmatched payment is a review', async () => {
     const app = await boot('credits', { pack: 'pri_pack' });
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
     expect(app.problems.join("; ")).toBe("");
     const { creditsOf, spendCredits } = await app.load('lib/credits');
     const paid = payment({ priceId: 'pri_pack', userId: 'u2', quantity: 2 });
     expect((await app.send(paid)).status).toBe(200);
     expect(await creditsOf('u2')).toBe(200);
+    expect(info).toHaveBeenCalledWith('paddle-kit receipt', `${paid.data.id}:receipt`, 'u2');
     expect(await Promise.all([spendCredits('u2', 150), spendCredits('u2', 150)])).toEqual(expect.arrayContaining([true, false]));
     expect((await app.send(refund(paid.data.id))).status).toBe(200);
     expect(await creditsOf('u2')).toBe(0); // 50 were left: those are taken, the 150 spent stay spent
-    vi.spyOn(console, 'info').mockImplementation(() => {});
-    expect(await (await app.cron('app/api/cron/outbox/route')).json()).toMatchObject({ sent: 1 });
+    expect(await (await app.cron('app/api/cron/outbox/route')).json()).toMatchObject({ sent: 0 }); // sent during the webhook
+    // A receipt whose send fails during the webhook: the payment still applies, and the receipt waits for the backstop.
+    // (drainOutbox records a failing handler itself; the starter's .catch is only for a database error during the send.)
+    info.mockImplementationOnce(() => { throw new Error('email provider down'); });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const second = payment({ priceId: 'pri_pack', userId: 'u3' });
+    expect((await app.send(second)).status).toBe(200);
+    expect(await creditsOf('u3')).toBe(100);
+    const { db } = await app.load('lib/db');
+    expect((await db.query('SELECT attempts, sent_at FROM paddle_outbox WHERE id = $1', [`${second.data.id}:receipt`])).rows)
+      .toEqual([{ attempts: 1, sent_at: null }]); // queued, retried by the hourly outbox route after its backoff
     expect((await app.send(payment({ priceId: 'pri_pack', userId: null }))).status).toBe(200);
     expect((await app.health()).checks.reviews).toEqual({ ok: false, detail: '1 unresolved fulfilment review (unfulfilled_payment)' });
+  });
+});
+
+// Neon's free plan: 100 CU-hours per project per month, and a compute suspends 5 minutes after its last query. A cron
+// every 5 minutes keeps it awake all month (about 182 CU-hours at 0.25 CU), so the database is suspended mid-month.
+// Hourly costs about 15. Starters are copied as they are: none may schedule a cron more often than once an hour.
+describe('starter crons fit a free-tier database', () => {
+  it('every cron in examples/*/vercel.json runs at most once an hour', async () => {
+    const { readdirSync, readFileSync } = await import('node:fs');
+    const schedules = readdirSync('examples', { withFileTypes: true }).filter((d) => d.isDirectory())
+      .flatMap((d) => (JSON.parse(readFileSync(`examples/${d.name}/vercel.json`, 'utf8')).crons as Array<{ path: string; schedule: string }>)
+        .map((c) => ({ starter: d.name, ...c })));
+    expect(schedules.length).toBeGreaterThan(0);
+    const tooOften = schedules.filter((c) => !/^\d+$/.test(c.schedule.split(/\s+/)[0]!)); // minute must be one fixed number
+    expect(tooOften).toEqual([]);
   });
 });
