@@ -81,3 +81,26 @@ export async function customerPortalSession(
   }
   return { overview: portalUrl(urls?.general?.overview), subscriptions };
 }
+
+/**
+ * Cancels a subscription (since v0.9.2), immediately by default: Paddle sets it `canceled` and the
+ * `subscription.canceled` webhook ends access. Paddle never cancels a subscription because a payment was refunded or
+ * charged back; the subscription starter calls this from `onAdjustment` for an approved full refund or a chargeback.
+ * A canceled subscription cannot be reinstated (a won dispute does not bring it back). Needs `subscription.write`.
+ * Idempotent: when Paddle refuses because the subscription is already canceled (a replay, or a second refund or
+ * chargeback before the canceled webhook arrives), it answers `{ status: 'canceled' }` instead of throwing.
+ */
+export async function cancelSubscription(api: PaddleApi, subscriptionId: string, o: { effectiveFrom?: 'immediately' | 'next_billing_period' } = {}): Promise<{ status: string }> {
+  if (!/^sub_[a-z\d]+$/.test(subscriptionId)) throw new PaddleError('subscriptionId must be a Paddle subscription id (sub_…)');
+  const paddle = client(api);
+  try {
+    const res = await paddle.call('POST', `/subscriptions/${subscriptionId}/cancel`, { effective_from: o.effectiveFrom ?? 'immediately' });
+    return { status: String(res.data?.status ?? '') };
+  } catch (error) {
+    if (!(error instanceof PaddleError) || error.status === undefined || error.status >= 500) throw error;
+    // Refused: read the subscription. Already canceled is the outcome we wanted; anything else is a real failure.
+    const now = await paddle.call('GET', `/subscriptions/${subscriptionId}`).catch(() => null);
+    if (now?.data?.status === 'canceled') return { status: 'canceled' };
+    throw error;
+  }
+}

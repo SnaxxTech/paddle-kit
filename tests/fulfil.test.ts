@@ -447,3 +447,19 @@ describe('reviews health and the outbox worker route (since v0.9.0)', () => {
     expect(JSON.stringify(await b.json())).not.toContain('hunter2');
   });
 });
+
+describe('drainOutbox handlerTimeoutMs (since v0.9.2)', () => {
+  it('a handler that overruns its deadline stops holding the drain: counted failed, kept for a retry', async () => {
+    const { pg, db } = await database();
+    await db.transaction((q) => enqueue(q, { id: 'slow', kind: 'email', payload: {} }));
+    const query = (t: string, p?: unknown[]) => pg.query(t, p);
+    const started = Date.now();
+    const out = await drainOutbox(query, { email: () => new Promise((r) => setTimeout(r, 1_000)) }, { handlerTimeoutMs: 50 });
+    const took = Date.now() - started;
+    expect(out).toMatchObject({ sent: 0, failed: 1 });
+    expect(took).toBeLessThan(700);
+    const row = (await pg.query<any>(`SELECT attempts, sent_at, last_error FROM paddle_outbox WHERE id = 'slow'`)).rows[0];
+    expect(row).toMatchObject({ attempts: 1, sent_at: null });
+    expect(row.last_error).toContain('no answer in 50 ms');
+  });
+});

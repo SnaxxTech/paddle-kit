@@ -27,7 +27,12 @@ const TOKEN_SHAPE = /\b(?:pdl_(?:sdbx|live)_[A-Za-z0-9_]+|test_[A-Za-z0-9]{8,}|l
 export function redactSecrets(text: string, known: readonly string[] = []): string {
   let out = text;
   for (const secret of known) if (secret.length >= 6) out = out.split(secret).join('[redacted]');
-  return out.replace(TOKEN_SHAPE, '[redacted]');
+  return out
+    .replace(TOKEN_SHAPE, '[redacted]')
+    // Not only Paddle's shapes (since v0.9.2): a URL's password, a bearer token, and key=value secrets.
+    .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+):[^\s@/]+@/gi, '$1:[redacted]@')
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{6,}/g, '$1 [redacted]')
+    .replace(/\b((?:api[_-]?key|access[_-]?token|token|secret|password|passwd|pwd)=)[^\s&;,]+/gi, '$1[redacted]');
 }
 
 export type Json = Record<string, any>;

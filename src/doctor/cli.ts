@@ -267,6 +267,8 @@ export function readApps(text: string, env: Record<string, string | undefined>):
     if (names.has(a.name)) throw new Error(`${at}.name "${a.name}" is used twice`);
     names.add(a.name);
     if (typeof a.tokenEnv !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(a.tokenEnv)) throw new Error(`${at}.tokenEnv must be an environment variable name`);
+    // The token is sent to the url above: only a health token, never another secret of the job (since v0.9.2).
+    if (!/_HEALTH_TOKEN$/.test(a.tokenEnv)) throw new Error(`${at}.tokenEnv must name a health token variable ending in _HEALTH_TOKEN (e.g. QRLAB_HEALTH_TOKEN)`);
     if (a.staleHours !== undefined && (typeof a.staleHours !== 'number' || !(a.staleHours > 0))) throw new Error(`${at}.staleHours must be a number of hours above 0`);
     return { name: a.name, url: checkUrl(a.url, `${at}.url`), token: env[a.tokenEnv] || undefined, tokenEnv: a.tokenEnv, staleHours: a.staleHours };
   });

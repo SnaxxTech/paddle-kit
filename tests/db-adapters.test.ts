@@ -3,7 +3,7 @@
 // better-sqlite3 needs no adapter: sqliteStore(db) takes the Database itself (fulfilment is Postgres-only).
 import { PGlite } from '@electric-sql/pglite';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
-import { fromPg, fromPglite, fromPostgresJs, type Db } from '../src/db';
+import { fromPg, fromPglite, fromPostgresJs, fromPostgresJsPerCall, type Db } from '../src/db';
 import { createFulfilment, enqueue, type FulfilmentActions } from '../src/fulfil';
 import { MIGRATIONS, postgresStore } from '../src/postgres';
 import type { Transaction, Adjustment } from '../src/core/types';
@@ -95,6 +95,14 @@ if (live) {
   };
   adapterContract('pg Pool / Neon Pool (fromPg), real Postgres', pgDb);
   adapterContract('postgres-js (fromPostgresJs), real Postgres', pjsDb);
+  // Cloudflare Workers' adapter (tests/workerd-db.test.ts runs it in workerd): a client per query and per transaction.
+  adapterContract('postgres-js per call (fromPostgresJsPerCall), real Postgres', async () => {
+    const s = schema();
+    const admin = postgres(live.url, { max: 1, onnotice: () => {} });
+    await admin.unsafe(`CREATE SCHEMA ${s}`);
+    await admin.end();
+    return fromPostgresJsPerCall(() => postgres(live.url, { max: 1, onnotice: () => {}, connection: { search_path: s } }));
+  });
   // The whole store contract through postgres-js: its own type mapping (jsonb, timestamptz, arrays) on every query.
   runStoreContract('postgres (postgres-js via fromPostgresJs)', async () => {
     const db = await pjsDb();

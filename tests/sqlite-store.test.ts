@@ -50,3 +50,29 @@ it('out-of-order + duplicate deliveries converge in SQLite', async () => {
     { event_id: 'u', status: 'processed' },
   ]);
 });
+
+it('a claim won just after another delivery finished sees the finished event (two processes on one file)', () => {
+  // Process B reads the event as received; process A then marks it processed and releases its lease; B's claim then
+  // succeeds. B must not run the hooks again (Postgres re-reads the status after its claim; SQLite must too).
+  const db = freshDb();
+  const a = sqliteStore({ db });
+  let between: (() => void) | null = null;
+  const wrapped = new Proxy(db, { get(target, key) {
+    if (key !== 'prepare') return (target as any)[key].bind ? (target as any)[key].bind(target) : (target as any)[key];
+    return (text: string) => {
+      const stmt = target.prepare(text);
+      if (!/INSERT INTO paddle_event_leases/.test(text)) return stmt;
+      return new Proxy(stmt, { get(s, k) {
+        if (k !== 'run') return (s as any)[k].bind ? (s as any)[k].bind(s) : (s as any)[k];
+        return (...args: unknown[]) => { const hook = between; between = null; hook?.(); return s.run(...(args as [])); };
+      } });
+    };
+  } });
+  const b = sqliteStore({ db: wrapped as typeof db });
+  const ev = { eventId: 'evt_race', eventType: 'subscription.updated', occurredAt: '2026-10-15T09:59:59.000Z' };
+  return (async () => {
+    expect(await a.recordEvent({ ...ev, receivedAt: '2026-10-15T10:00:00.000Z', leaseExpiredBefore: '2026-10-15T09:59:00.000Z', claimToken: 'A' })).toEqual({ alreadyDone: false });
+    between = () => { void a.markEvent('evt_race', 'processed', null, 'A'); };
+    expect(await b.recordEvent({ ...ev, receivedAt: '2026-10-15T10:00:01.000Z', leaseExpiredBefore: '2026-10-15T10:00:00.500Z', claimToken: 'B' })).toEqual({ alreadyDone: true });
+  })();
+});

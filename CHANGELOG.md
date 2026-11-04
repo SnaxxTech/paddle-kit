@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.9.2 (2026-11-04)
+
+### Added
+- **`fromPostgresJsPerCall(make)`** in `paddle-kit/db`: postgres-js on Cloudflare Workers. A client per query and per
+  whole transaction, ended after it. Workers forbids using a socket from a request other than the one that opened it.
+
+### Security (an independent review by two reviewers, then a third review; each fix has a test that failed first)
+- **A refunded or charged-back subscription is canceled at once** (owner's rule). Paddle never cancels a subscription
+  for a refund or chargeback, so it stayed `active`. New `cancelSubscription(api, id)` in `paddle-kit/server`; the
+  subscription starter calls it from `onAdjustment` for an approved full refund or a chargeback (a partial refund does
+  nothing). A failed cancel fails the webhook, so Paddle sends it again. It is idempotent: an already canceled
+  subscription (a replay, a second refund or chargeback) is a success. A canceled subscription cannot be reinstated.
+- **Broken config refuses paid features in production by default.** `enforce` is now on when `PADDLE_ENV=production`
+  unless `BILLING_ENFORCE=0` (was: only with `BILLING_ENFORCE=1`, so a mistyped variable made everything free).
+- **Retired prices:** Paddle.js can open a checkout for any active price, so a retired price could still be bought at its
+  old price and grant features. New readiness check `retired_prices` (red while one is still active in Paddle;
+  `billingFromEnv` passes the products' `retiredPriceIds`). Archive retired prices in Paddle.
+- **`paddle-kit-doctor --apps`** sends a token only from a variable ending in `_HEALTH_TOKEN`: a tampered `apps.json`
+  could name any secret of the job's environment (`VERCEL_TOKEN`, cloud keys) and a host to send it to.
+- **Redaction** also removes a URL's password, `Bearer`/`Basic` tokens and `key=value` secrets (outbox `last_error`,
+  API errors): only Paddle-shaped secrets were removed before.
+- **Starters log an error's name only**, never the object (it may hold a connection string or a provider key).
+- **`spendCredits`** (credits starter) refuses anything but a positive safe integer: `-50` added 50 credits.
+
+### Fixed
+- **Unlock starter kept one row per user,** so buy A, refund A, buy B, reverse A's refund, refund B left no unlock
+  although A was valid. Grants are now one row per payment (`unlock_grants`); access while any remains.
+- **`drainOutbox({ handlerTimeoutMs })`**: a handler not done in time counts as a failed attempt (retried later), so
+  the starters' send right after a payment is really bounded (about 2 s): `budgetMs` only stopped new claims.
+- **Recovery kept saved progress for a day only;** a daily schedule or a multi-day backlog started over. Progress is
+  now kept until its window completes (a window past Paddle's event retention reads the full lists).
+- **SQLite store:** a claim won just after another process finished an event now sees it done (as Postgres did).
+- **Starters on Cloudflare Workers.** Their `lib/db.ts` kept one postgres-js client at module scope: in real workerd
+  the first request worked and every later one failed with "Cannot perform I/O on behalf of a different request".
+  `lib/db.ts` now uses `fromPostgresJsPerCall` on Workers (detected by `navigator.userAgent`) and the pooled client
+  elsewhere. `tests/workerd-db.test.ts` bundles each starter's `lib/db.ts`, runs it in real workerd on real Postgres,
+  and sends three requests with a query and a transaction each: it failed on all three starters before.
+
 ## 0.9.1 (2026-11-04)
 
 ### Fixed

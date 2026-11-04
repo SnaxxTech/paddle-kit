@@ -16,15 +16,18 @@ export const { billing, config, problems, enforce, products } = billingFromEnv(p
   // One-time payments: the kit keeps each payment's state and decides; lib/fulfilment.ts says what one grants.
   onTransaction: async (tx, ctx) => {
     await fulfilment.onTransaction!(tx, ctx);
-    // The receipt the payment queued goes out now, with no cron waiting. Bounded; a failed send stays queued for the
+    // The receipt the payment queued goes out now, with no cron waiting. Bounded to about 2 s (no claim after 1 s,
+    // each send cut off at 1 s), well inside Paddle's 5 s; a failed or late send stays queued for the
     // hourly outbox route. The catch keeps a database error here from failing the payment, which is already applied.
-    await sendOutbox({ limit: 5, budgetMs: 2_000 }).catch((error) => console.error('paddle-kit outbox send failed', error));
+    await sendOutbox({ limit: 3, budgetMs: 1_000, handlerTimeoutMs: 1_000 }).catch((error) => console.error('paddle-kit outbox send failed', (error as Error)?.name ?? 'Error'));
   },
   onAdjustment: (adj, ctx) => fulfilment.onAdjustment!(adj, ctx),
   healthChecks: { outbox: outboxCheck(db.query), reviews: reviewsCheck(db.query) },
   // Health turns red before a customer notices: the API key's permissions, the migrations, CRON_SECRET, and
   // outbox items or fulfilment reviews that wait for a person.
   readiness: { cronSecret: process.env.CRON_SECRET, fulfilment: true },
-  onError: (error, ctx) => console.error('paddle-kit failure', ctx, error), // may hold secrets: your error tracker only
+  // The error may hold a secret (a connection string, a provider key): the log gets its name; send the whole error
+  // to your error tracker here if you have one.
+  onError: (error, ctx) => console.error('paddle-kit failure', ctx, (error as Error)?.name ?? 'Error'),
 });
 if (problems.length > 0) console.error('billing misconfigured:', problems.join('; '));

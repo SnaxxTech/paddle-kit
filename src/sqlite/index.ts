@@ -217,7 +217,15 @@ export function sqliteStore({ db }: { db: SqliteDatabase }): Store {
       const claim = q(`INSERT INTO paddle_event_leases (event_id, claimed_at, claim_token) VALUES (?, ?, ?)
          ON CONFLICT (event_id) DO UPDATE SET claimed_at = excluded.claimed_at, claim_token = excluded.claim_token
          WHERE paddle_event_leases.claimed_at < ?`).run(e.eventId, ms(e.receivedAt), e.claimToken ?? null, ms(e.leaseExpiredBefore));
-      return claim.changes > 0 ? { alreadyDone: false } : { alreadyDone: false, inProgress: true };
+      if (claim.changes === 0) return { alreadyDone: false, inProgress: true };
+      // As in Postgres: a claim won just after another process finished and released it sees that status (two
+      // processes on one file). markEvent writes the status before it releases the claim.
+      const now = q(`SELECT status FROM paddle_events WHERE event_id = ?`).get(e.eventId) as { status: EventStatus };
+      if (DONE.has(now.status)) {
+        q(`DELETE FROM paddle_event_leases WHERE event_id = ?`).run(e.eventId);
+        return { alreadyDone: true };
+      }
+      return { alreadyDone: false };
     },
     async markEvent(eventId, status, reason, claimToken) {
       if (claimToken === undefined) {

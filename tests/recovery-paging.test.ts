@@ -184,4 +184,16 @@ describe('recoverBilling resumes an interrupted run (third review)', () => {
     expect(state?.checkpointAt).toBe(t1.toISOString());
     for (const id of ['sub_0', 'sub_1', 'sub_2', 'sub_3']) expect(await b.store.getSubscription(id)).not.toBeNull();
   });
+
+  it('progress saved more than a day ago is still continued (a daily schedule, or a backlog over several days)', async () => {
+    const b = createBilling({ environment: 'sandbox', webhookSecret: 's', store: memoryStore(), entitlements: {}, owns: () => true });
+    const p = backlog();
+    const t1 = new Date(Date.now() - 25 * 3_600_000);
+    expect(await recoverBilling(b, { apiKey: 'pdl_sdbx_k', fetch: p.fetch, timeoutMs: 100, now: () => t1 })).toMatchObject({ status: 'failed' });
+    await new Promise((r) => setTimeout(r, 60));
+    p.calls.length = 0;
+    expect((await recoverBilling(b, { apiKey: 'pdl_sdbx_k', fetch: p.fetch, timeoutMs: 10_000 })).status).toBe('done');
+    expect(p.calls.find((c) => c.startsWith('/subscriptions'))).toContain('after=sub_p');
+    expect((await b.store.recovery!.getRecovery('sandbox'))?.checkpointAt).toBe(t1.toISOString());
+  });
 });

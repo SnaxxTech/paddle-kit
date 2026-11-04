@@ -5,5 +5,5 @@ import { billing, enforce } from './billing';
 export async function canUse(userId: string | null): Promise<boolean> {
   if (!userId) return false;
   if (!billing) return !enforce;
-  return (await db.query('SELECT 1 FROM user_unlocks WHERE user_id = $1', [userId])).rows.length > 0;
+  return (await db.query('SELECT 1 FROM unlock_grants WHERE user_id = $1 LIMIT 1', [userId])).rows.length > 0;
 }
