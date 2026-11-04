@@ -26,8 +26,9 @@ Run migrations `001`–`006` (Run the migrations) before the first deploy of thi
 | A one-time unlock (lifetime licence) | [`examples/unlock`](examples/unlock) | `paddle-kit/fulfil` with a `user_unlocks` table; a second payment for an unlock becomes a review. |
 | Credit packs | [`examples/credits`](examples/credits) | `paddle-kit/fulfil` with a `credit_accounts` table; a refund takes back only the credits that are left. |
 
-The unlock and credits starters also have a **fifth piece**: an outbox worker route (`app/api/cron/outbox/route.ts`,
-every 5 minutes, bounded) that sends the receipts queued with each payment. Health covers all of it by default:
+The unlock and credits starters also send the receipt queued with each payment **right after the payment commits**
+(`lib/outbox.ts`, called from `onTransaction`, bounded to 5 items and 2 s), and have a **fifth piece**: an hourly
+outbox route (`app/api/cron/outbox/route.ts`) as the backstop for a send that failed. Health covers all of it by default:
 the API key, the migrations, `CRON_SECRET`, outbox items that wait or gave up (`outboxCheck`), and fulfilment reviews
 that need a person (`reviewsCheck`; `resolveReview(q, id)` clears one). Each starter's `lib/db.ts` uses postgres-js
 through `paddle-kit/db`; for pg, the Neon Pool or PGlite, change that one line (see "Postgres clients"). The blocks
@@ -267,7 +268,7 @@ What it does **not** do: in-app purchases in mobile store apps. Google Play and 
 
 ## Add the kit to a new Next.js app (since v0.6.0)
 
-1. Install: `npm i github:SnaxxTech/paddle-kit#v0.9.0`.
+1. Install: `npm i github:SnaxxTech/paddle-kit#v0.9.1`.
 2. Run one CLI command in the app folder: `npx paddle-kit-catalog --webhook-url https://<host>/api/paddle` (see Catalog CLI). It makes the product, the prices, the webhook destination and the client token, and writes `.env.local`.
 3. Paste the host block that the CLI prints into your host's settings (Vercel: add `--host vercel` to get the commands). Redeploy.
 4. Add the four files of the Quickstart (`lib/billing.ts`, the webhook route, the recovery route with `vercel.json`, `lib/policy.ts`), and call `canUse` where a paid feature starts.
@@ -294,13 +295,13 @@ What each version changed, in simple words: [docs/HISTORY.md](docs/HISTORY.md). 
 ## Install
 
 ```bash
-npm i github:SnaxxTech/paddle-kit#v0.9.0
+npm i github:SnaxxTech/paddle-kit#v0.9.1
 ```
 
 **The kit is not on the npm registry.** So `npx paddle-kit-catalog` in a folder that has not installed the kit fails with `npm error 404 Not Found`: npx looks for a package of that name on the registry. Two ways work:
 
-- Run it in the app, after `npm i github:SnaxxTech/paddle-kit#v0.9.0`. Then `npx paddle-kit-catalog …` (and `npx paddle-kit-doctor …`) use the installed copy.
-- Outside an app: `npx --package=github:SnaxxTech/paddle-kit#v0.9.0 paddle-kit-catalog …` (the same for `paddle-kit-doctor`). The catalog CLI then prints one line to say that it runs from the npx cache, because it writes its env file in the current folder.
+- Run it in the app, after `npm i github:SnaxxTech/paddle-kit#v0.9.1`. Then `npx paddle-kit-catalog …` (and `npx paddle-kit-doctor …`) use the installed copy.
+- Outside an app: `npx --package=github:SnaxxTech/paddle-kit#v0.9.1 paddle-kit-catalog …` (the same for `paddle-kit-doctor`). The catalog CLI then prints one line to say that it runs from the npx cache, because it writes its env file in the current folder.
 
 - The repository is public (since v0.5.0). CI and the host install it with no token. Your secrets never go in this repository: each app keeps its own Paddle keys and webhook secret in its own env files and host settings (see Environment variables).
 - The kit pins the Paddle API to version 1: each REST call sends `Paddle-Version: 1`, and the catalog CLI sets `api_version: 1` on the webhook destination. A new Paddle API version can then not change the payloads that the kit reads. Paddle refuses a version older than the account's default. So if a future Paddle account has a default newer than 1, each REST call and the destination step fail with `PaddleError`. This is on purpose: the kit's parsers must be updated first.
@@ -473,7 +474,7 @@ const db = fromPostgresJs(postgres(process.env.DATABASE_URL!));       // postgre
 ```
 
 - A transaction holds one connection from BEGIN to COMMIT. Neon's HTTP `neon()` has no interactive transactions: use its Pool.
-- **postgres-js before v0.9.0:** it JSON-encodes a parameter Postgres types as jsonb, so the kit's JSON text was stored as a jsonb *string* (`price_ids` read back as `'["pri_…"]'`). The kit now sends jsonb as `$n::text::jsonb`, and reads such old rows as their value.
+- **postgres-js before v0.9.0, without drizzle:** postgres-js JSON-encodes a parameter Postgres types as jsonb, so the kit's JSON text was stored as a jsonb *string* (`price_ids` read back as `'["pri_…"]'`). A client wrapped by `drizzle(client)` was not affected: drizzle sets postgres-js's json/jsonb serializers to pass-through (QR-Lab and Slop Remover checked: every row stored correctly). The kit now sends jsonb as `$n::text::jsonb` on any client, and reads such old rows as their value.
 - `pg` `Pool#query`, `@neondatabase/serverless` `Pool#query` and PGlite `db.query` fit directly. Put them in an arrow function (as above), so that `this` stays bound.
 - Neon's HTTP driver: use `neon(url, { fullResults: true }).query`. A call to `neon(...)` itself as `sql(text, params)` throws in `@neondatabase/serverless` v1 and later. **UNVERIFIED** (not run against a real Neon HTTP endpoint).
 
@@ -693,8 +694,16 @@ handlers)` sends due items at least once (retries 1 min, 2, 4, … 6 h). **Handl
 (pass it as the idempotency key of the email or API call): a crash after sending, or a handler that runs past
 `leaseSeconds`, sends the item again. Since v0.8.7 the drain claims one item at a time, counts each claim as an
 attempt, and a worker whose lease was taken over cannot change the new run's retry state (`lost` in the result); a
-finished send is always marked sent. Run it from its own frequent route, `createOutboxRoute({ cronSecret, drain })`
-(since v0.9.0; `drainOutbox`'s `budgetMs`, default 20 s, stops new claims), apart from the hourly recovery job. `outboxCheck(query)` turns health red for an item that gave up or waits over an hour.
+finished send is always marked sent. Call it right after the payment commits (as the starters do), and
+from an hourly route as the backstop, `createOutboxRoute({ cronSecret, drain })` (since v0.9.0; `drainOutbox`'s `budgetMs`,
+default 20 s, stops new claims).
+
+**Free-tier databases: no cron more often than hourly** (since v0.9.1). On Neon's free plan each project gets 100
+CU-hours a month, a compute suspends 5 minutes after its last query, and a project over its allowance is suspended
+until the next month. Each wake-up costs the work plus 5 idle minutes, so at 0.25 CU a cron every 5 minutes keeps it
+awake all month (about 182 CU-hours: suspended around day 16), every 15 minutes about 61, hourly about 15, daily about
+0. Webhooks already wake the database, so sending right after the payment costs nothing extra. `tests/starters.test.ts`
+fails if a starter schedules a cron more often than once an hour. `outboxCheck(query)` turns health red for an item that gave up or waits over an hour.
 
 `lib/credits.ts`
 
@@ -1326,7 +1335,7 @@ jobs:
         run: |
           mkdir -p site
           set +e
-          npx --yes --package=github:SnaxxTech/paddle-kit#v0.9.0 paddle-kit-doctor --apps apps.json --json --html site/index.html > results.json
+          npx --yes --package=github:SnaxxTech/paddle-kit#v0.9.1 paddle-kit-doctor --apps apps.json --json --html site/index.html > results.json
           code=$?
           [ "$code" -eq 2 ] && exit 2   # the file or flags are wrong: fail loudly, publish nothing
           exit 0                        # red apps are shown on the page (and, later, as issues)
@@ -1421,7 +1430,7 @@ Do these steps one time for each app: first in sandbox, then again for live.
    4. Start Paddle.js when that page loads (for example, call `createCheckout` in an effect on mount, not only in a button click). Paddle opens a checkout link from the `_ptxn` query parameter when the page loads.
 
    We found no API for this setting (**UNVERIFIED** that there is none).
-2. **Install the kit in the app:** `npm i github:SnaxxTech/paddle-kit#v0.9.0`. The kit is not on the npm registry, so run the CLIs in the app folder (or see Install for `npx --package=…`).
+2. **Install the kit in the app:** `npm i github:SnaxxTech/paddle-kit#v0.9.1`. The kit is not on the npm registry, so run the CLIs in the app folder (or see Install for `npx --package=…`).
 3. **Make the catalog.** Run `npx paddle-kit-catalog --webhook-url https://<host>/api/paddle` (see Catalog CLI). Read the table that it shows. Never copy the webhook secret by hand.
 4. **Put the variables on the host.** Paste the host block that the CLI prints (`--host vercel` prints the commands). Add `PADDLE_HEALTH_TOKEN` (any long random value), and `PADDLE_API_KEY` if the app uses `getPrice`, `findPrice`, `resolvePrices` or `reconcile`. Redeploy.
 5. **Add the code:** the four Quickstart files: `lib/billing.ts` with `billingFromEnv`, the webhook route, the recovery route with its `vercel.json` cron and `CRON_SECRET`, and `lib/policy.ts` with `canUse`. Pass `onError` so a failure's cause reaches your error tracker. Optional: show the price with `findPrice` or `getPrice` (see Show the price from Paddle), so that the price lives only in Paddle, and report its source with a `healthChecks` entry. A one-time-purchase app may drop `PADDLE_PRICES` with `resolvePrices` (see Find prices by their label).

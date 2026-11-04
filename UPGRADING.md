@@ -1,10 +1,16 @@
 # Upgrading paddle-kit
 
+## 0.9.1 (from 0.9.0)
+
+Nothing to run. If you copied the unlock or credits starter: send the outbox right after the payment (`lib/outbox.ts`
+and `onTransaction` in its `lib/billing.ts`) and move the outbox cron to hourly (`"0 * * * *"`). A cron more often than
+hourly can exhaust a free-tier database (README "Free-tier databases").
+
 ## 0.9.0 (from 0.8.7)
 
-1. **postgres-js apps (QR-Lab):** nothing to run. Rows the kit wrote before are read correctly; each row is written
-   properly again on its next webhook or recovery run. To check now: `SELECT count(*) FROM paddle_subscriptions WHERE
-   jsonb_typeof(price_ids) = 'string'`.
+1. **postgres-js apps:** nothing to run. An app that wraps its client with drizzle was never affected (QR-Lab and Slop
+   Remover: every row checked fine). Without drizzle, rows the kit wrote before are read correctly and rewritten on their
+   next webhook or recovery run. To check: `SELECT count(*) FROM paddle_subscriptions WHERE jsonb_typeof(price_ids) = 'string'`.
 2. Optional: replace `{ query: (t, p) => … }` wrappers with `paddle-kit/db` (`fromPostgresJs(sql)` etc.).
 3. One-time sales with the outbox: add the outbox route (`createOutboxRoute`) on its own cron, and
    `reviews: reviewsCheck(query)` to `healthChecks`.

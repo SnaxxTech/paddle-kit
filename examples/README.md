@@ -14,8 +14,10 @@ Defaults you may change:
 
 - **postgres-js** in `lib/db.ts`: it runs on Node (Vercel) and Cloudflare Workers. On Workers, create the client per
   request (a socket cannot cross requests). For pg or the Neon Pool use `fromPg`, for PGlite `fromPglite`.
-- **Crons** (`vercel.json`): recovery hourly, outbox every 5 minutes (Vercel Pro; the Hobby plan runs crons once a
-  day). On Neon's free plan a 5-minute cron keeps the compute awake: about 180 CU-hours a month against 100 included.
-  Slow it to hourly there if receipts may wait.
+- **Receipts** go out right after the payment commits (`lib/outbox.ts`); the outbox route is an **hourly** backstop.
+- **Crons** (`vercel.json`): recovery and outbox, both hourly at minute 0, so they share one database wake-up (Vercel
+  Pro; the Hobby plan runs crons once a day, which is still enough). Never more often than hourly on a free-tier database:
+  on Neon's free plan a 5-minute cron uses about 182 CU-hours a month against 100 included, and the database is
+  suspended until the next month (main README, "Free-tier databases").
 - **`lib/email.ts`** logs the receipt: put your email provider's call there, keyed on `item.id`.
 - Imports are relative, so a folder works without a path alias.

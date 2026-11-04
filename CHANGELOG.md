@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.1 (2026-11-04)
+
+### Fixed
+- **Starters no longer exhaust a free-tier database.** The unlock and credits starters scheduled the outbox every
+  5 minutes. On Neon's free plan (100 CU-hours per project per month; a compute suspends 5 minutes after its last
+  query) that keeps the compute awake all month, about 182 CU-hours at 0.25 CU, so the database would be suspended
+  around day 16. Receipts now go out right after the payment commits (`lib/outbox.ts`, from `onTransaction`, bounded to
+  5 items and 2 s; the webhook has already woken the database), and the outbox route runs hourly as the backstop, at
+  the same minute as recovery. A test fails if any starter schedules a cron more often than once an hour.
+
+### Docs
+- README "Free-tier databases": what each cron frequency costs on Neon's free plan.
+- The postgres-js jsonb note: apps that wrap their client with drizzle were not affected (`drizzle(client)` sets
+  postgres-js's json/jsonb serializers to pass-through); a postgres-js client used without drizzle was.
+
 ## 0.9.0 (2026-11-04)
 
 Integration (third review): three starters, database adapters, the outbox's own worker, review health, and a test
