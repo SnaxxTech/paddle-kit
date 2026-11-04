@@ -1,5 +1,10 @@
 # Upgrading paddle-kit
 
+## 0.9.2 (from 0.9.1)
+
+Nothing to run. If you copied a starter and deploy to Cloudflare Workers, take its new `lib/db.ts` (one client per
+query and transaction on Workers, through `fromPostgresJsPerCall`).
+
 ## 0.9.1 (from 0.9.0)
 
 Nothing to run. If you copied the unlock or credits starter: send the outbox right after the payment (`lib/outbox.ts`

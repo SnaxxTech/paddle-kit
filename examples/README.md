@@ -12,8 +12,10 @@ deploy. `tests/starters.test.ts` runs every file here as written, on real Postgr
 
 Defaults you may change:
 
-- **postgres-js** in `lib/db.ts`: it runs on Node (Vercel) and Cloudflare Workers. On Workers, create the client per
-  request (a socket cannot cross requests). For pg or the Neon Pool use `fromPg`, for PGlite `fromPglite`.
+- **postgres-js** in `lib/db.ts`: one pooled client on Node (Vercel); on Cloudflare Workers a client per query and per
+  transaction (`fromPostgresJsPerCall`, chosen by itself), because a socket cannot cross requests there. Put Hyperdrive
+  in front of Neon and set `DATABASE_URL` to its connection string. For pg or the Neon Pool use `fromPg`, for PGlite
+  `fromPglite`.
 - **Receipts** go out right after the payment commits (`lib/outbox.ts`); the outbox route is an **hourly** backstop.
 - **Crons** (`vercel.json`): recovery and outbox, both hourly at minute 0, so they share one database wake-up (Vercel
   Pro; the Hobby plan runs crons once a day, which is still enough). Never more often than hourly on a free-tier database:

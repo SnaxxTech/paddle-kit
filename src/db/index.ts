@@ -41,13 +41,36 @@ export function fromPg(pool: {
 }
 
 type PostgresJsSql = { unsafe(text: string, params?: any[]): PromiseLike<any[]> };
+type PostgresJsClient = PostgresJsSql & { begin<T>(fn: (tx: PostgresJsSql) => Promise<T>): Promise<unknown> };
+
+const on = (s: PostgresJsSql): SqlTx['query'] => async (text, params) => ({ rows: [...(await s.unsafe(text, (params ?? []) as any[]))] });
 
 /** postgres-js (`postgres(url)`): `$n` queries through `sql.unsafe`, transactions through `sql.begin`. */
-export function fromPostgresJs(sql: PostgresJsSql & { begin<T>(fn: (tx: PostgresJsSql) => Promise<T>): Promise<unknown> }): Db {
-  const on = (s: PostgresJsSql): SqlTx['query'] => async (text, params) => ({ rows: [...(await s.unsafe(text, (params ?? []) as any[]))] });
+export function fromPostgresJs(sql: PostgresJsClient): Db {
   return {
     query: on(sql),
     transaction: async (fn) => (await sql.begin((tx) => fn({ query: on(tx) }))) as never,
+  };
+}
+
+/**
+ * postgres-js on Cloudflare Workers (since v0.9.2). A socket cannot be used by a request other than the one that
+ * opened it, so a client kept at module scope fails from the second request on ("Cannot perform I/O on behalf of a
+ * different request"). Here each query, and each whole transaction, opens a client from `make()` and ends it.
+ * Pair it with Hyperdrive, whose pool makes each connect cheap; straight to Neon, every call is a new connection.
+ */
+export function fromPostgresJsPerCall(make: () => PostgresJsClient & { end(o?: { timeout?: number }): Promise<void> }): Db {
+  const scoped = async <T>(fn: (sql: PostgresJsClient) => Promise<T>): Promise<T> => {
+    const sql = make();
+    try {
+      return await fn(sql);
+    } finally {
+      await sql.end({ timeout: 5 });
+    }
+  };
+  return {
+    query: (text, params) => scoped((sql) => on(sql)(text, params)),
+    transaction: (fn) => scoped(async (sql) => (await sql.begin((tx) => fn({ query: on(tx) }))) as never),
   };
 }
 

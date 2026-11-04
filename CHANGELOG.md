@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.2 (2026-11-04)
+
+### Added
+- **`fromPostgresJsPerCall(make)`** in `paddle-kit/db`: postgres-js on Cloudflare Workers. A client per query and per
+  whole transaction, ended after it. Workers forbids using a socket from a request other than the one that opened it.
+
+### Fixed
+- **Starters on Cloudflare Workers.** Their `lib/db.ts` kept one postgres-js client at module scope: in real workerd
+  the first request worked and every later one failed with "Cannot perform I/O on behalf of a different request".
+  `lib/db.ts` now uses `fromPostgresJsPerCall` on Workers (detected by `navigator.userAgent`) and the pooled client
+  elsewhere. `tests/workerd-db.test.ts` bundles each starter's `lib/db.ts`, runs it in real workerd on real Postgres,
+  and sends three requests with a query and a transaction each: it failed on all three starters before.
+
 ## 0.9.1 (2026-11-04)
 
 ### Fixed
