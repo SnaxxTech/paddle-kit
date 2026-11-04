@@ -1,5 +1,11 @@
 # Upgrading paddle-kit
 
+## 0.9.3 (from 0.9.2)
+
+**If you copied the subscription starter's `onAdjustment` (cancel on refund):** take the new one. It must return unless
+`ctx.known` is true and `ctx.store.getSubscription(id)` finds the subscription in your mirror; otherwise, on a shared
+seller account, another app's refund cancels that app's customer.
+
 ## 0.9.2 (from 0.9.1)
 
 1. **Production enforcement is on by default.** With `PADDLE_ENV=production`, a broken billing config now refuses paid

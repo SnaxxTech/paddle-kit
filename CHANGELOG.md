@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.3 (2026-11-04)
+
+### Security
+- **The subscription starter could cancel a sibling app's customer.** On a shared seller account every app receives
+  every app's adjustments; the kit calls `onAdjustment` for one on a subscription this app never mirrored
+  (`ctx.known` false). v0.9.2's starter checked only "not already canceled", so a full refund or chargeback in another
+  app made it call `cancelSubscription` on that app's subscription with the shared API key. It now cancels only when
+  `ctx.known` is true and the subscription is in this app's mirror. Found in review of QR-Lab's copy; the test failed
+  first (`POST /subscriptions/sub_01otherappcustomer/cancel`).
+
 ## 0.9.2 (2026-11-04)
 
 ### Added

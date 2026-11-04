@@ -12,9 +12,12 @@ export const { billing, config, problems, enforce, products, transport } = billi
   products: { pro: { features: ['pro'], retiredPriceIds: [] } },
   // A full refund or a chargeback ends the subscription at once: Paddle never cancels it by itself. A failed cancel
   // throws, so the webhook fails and Paddle sends it again; an already canceled one is left alone.
+  // Only this app's own subscription: on a shared seller account every app receives every app's adjustments, and the
+  // shared API key could cancel a sibling app's customer. Ours = known to the kit and in this app's mirror.
   onAdjustment: async (adj, ctx) => {
-    if (!adj.subscriptionId || adjustmentEffect(adj) !== 'revoke') return;
-    if ((await ctx.store.getSubscription(adj.subscriptionId))?.status === 'canceled') return;
+    if (!adj.subscriptionId || adjustmentEffect(adj) !== 'revoke' || !ctx.known) return;
+    const sub = await ctx.store.getSubscription(adj.subscriptionId);
+    if (!sub || sub.status === 'canceled') return;
     if (!config?.apiKey) throw new Error('PADDLE_API_KEY is needed to cancel a refunded subscription');
     await cancelSubscription({ apiKey: config.apiKey, environment: config.environment, fetch: transport?.fetch }, adj.subscriptionId);
   },

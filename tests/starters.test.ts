@@ -99,6 +99,12 @@ describe.skipIf(!live)('starters, run as written', () => {
     };
     expect((await app.send(adjust('refund', 'partial'))).status).toBe(200);
     expect(paddleWrites).toEqual([]);
+    // Shared seller account: another app's customer is refunded in full. This app never mirrored that subscription
+    // (ctx.known false), so it must never cancel it with the shared API key.
+    const sibling = adjust('refund', 'full');
+    sibling.data = { ...sibling.data, subscription_id: 'sub_01otherappcustomer' };
+    expect((await app.send(sibling)).status).toBe(200);
+    expect(paddleWrites).toEqual([]);
     expect((await app.send(adjust('chargeback', null))).status).toBe(200);
     expect(paddleWrites).toEqual([{ method: 'POST', path: `/subscriptions/${event.data.id}/cancel`, body: { effective_from: 'immediately' } }]);
     // Idempotent: a second revoking adjustment (or a replay) before the canceled webhook arrives must not fail.
