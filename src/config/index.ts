@@ -217,7 +217,7 @@ export function readBillingEnv(
     prices,
     clientToken,
     launchAt,
-    enforce: env.BILLING_ENFORCE === '1',
+    enforce: enforcedBy(env),
   };
   if (env.PADDLE_HEALTH_TOKEN) config.healthToken = env.PADDLE_HEALTH_TOKEN; // whitespace rejected above
   if (apiKey) config.apiKey = apiKey;
@@ -316,6 +316,17 @@ export type BillingFromEnvOptions = Omit<ReadBillingEnvOptions, 'requiredPrices'
   };
 
 /**
+ * Whether a broken billing config must refuse paid operations (since v0.9.2: on by default in production).
+ * `BILLING_ENFORCE=1` turns it on anywhere, `BILLING_ENFORCE=0` off; otherwise it is on when `PADDLE_ENV=production`,
+ * so a mistyped variable in production never makes every paid feature free.
+ */
+function enforcedBy(env: Record<string, string | undefined>): boolean {
+  if (env.BILLING_ENFORCE === '1') return true;
+  if (env.BILLING_ENFORCE === '0') return false;
+  return env.PADDLE_ENV === 'production';
+}
+
+/**
  * The whole setup in one call: `readBillingEnv`, then `createBilling` only when the env is valid, with the env's
  * environment, every webhook secret, the health token and `owns` filled in. `billing` is null while billing is off or
  * misconfigured (then `problems` names the variables), so it is safe at module scope in a build without secrets:
@@ -339,7 +350,7 @@ export function billingFromEnv(
   /** Since v0.8.3, with `products`: entitlements, checkout prices and `productOf`. Null while billing is off. */
   products?: Products | null;
 } {
-  const enforce = env.BILLING_ENFORCE === '1';
+  const enforce = enforcedBy(env);
   const { requiredPrices: required, requiredCycles, requireLaunchAt, resolvePrices: lookup, entitlements, owns, readiness, products: productDefs, ...rest } = opts;
   const requiredPrices = [...new Set([...(required ?? []), ...Object.keys(productDefs ?? {})])];
   // One resilient transport for this app and environment: price lookups and recovery share its circuit breaker.
@@ -382,6 +393,7 @@ export function billingFromEnv(
             environment: config.environment,
             store: rest.store,
             resolvesPrices: !!resolvePrices,
+            retiredPriceIds: Object.values(productDefs ?? {}).flatMap((d) => [...(d.retiredPriceIds ?? [])]),
           }),
           ...rest.healthChecks,
         }

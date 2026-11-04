@@ -1,6 +1,6 @@
 // Deploy-time readiness checks for the health route (since v0.8.2). Edge-safe: web fetch only.
 // Details name permissions, migrations and variables only, never a value.
-import { LIVE_BASE, PADDLE_API_VERSION, SANDBOX_BASE, type FetchLike } from '../core/paddle-api';
+import { LIVE_BASE, PADDLE_API_VERSION, SANDBOX_BASE, paddleClient, type FetchLike } from '../core/paddle-api';
 import { FULFILMENT_SCHEMA, MIGRATION_OF_TABLE } from '../core/schema';
 import type { CheckResult, Store } from '../core/types';
 
@@ -21,6 +21,11 @@ export interface ReadinessOptions {
   resolvesPrices?: boolean;
   /** The app uses `paddle-kit/fulfil`: its tables (migration 005) are checked too. Since v0.8.6. */
   fulfilment?: boolean;
+  /**
+   * Retired price ids (since v0.9.2; `billingFromEnv` passes the products' `retiredPriceIds`): `retired_prices` is red
+   * while one is still active in Paddle, because Paddle.js can open a checkout for any active price. Needs `price.read`.
+   */
+  retiredPriceIds?: readonly string[];
   /** `process.env.CRON_SECRET`. Pass the key (even when unset) to check it; leave it out to skip. */
   cronSecret?: string | undefined;
   fetch?: FetchLike;
@@ -46,7 +51,8 @@ export interface ReadinessOptions {
 export function readinessChecks(opts: ReadinessOptions): Record<string, () => Promise<CheckResult>> {
   const now = opts.now ?? Date.now;
   const fetchImpl: FetchLike = opts.fetch ?? ((url, init) => fetch(url, init));
-  const needed = [...new Set([...RECOVERY_PERMISSIONS, ...(opts.resolvesPrices ? PRICE_PERMISSIONS : []), ...(opts.permissions ?? [])])];
+  const retired = [...new Set(opts.retiredPriceIds ?? [])];
+  const needed = [...new Set([...RECOVERY_PERMISSIONS, ...(opts.resolvesPrices ? PRICE_PERMISSIONS : []), ...(retired.length > 0 ? ['price.read'] : []), ...(opts.permissions ?? [])])];
   let cached: { at: number; result: CheckResult } | null = null;
   // Per server instance: simultaneous health checks share one request; other instances ask Paddle on their own.
   let inFlight: Promise<CheckResult> | null = null;
@@ -114,6 +120,25 @@ export function readinessChecks(opts: ReadinessOptions): Record<string, () => Pr
       } catch {
         return { ok: false, detail: 'reading paddle_recovery or paddle_owned_ids failed (migration 003/004 missing, or the store did not answer)' };
       }
+    };
+  }
+
+  if (retired.length > 0) {
+    let good: { at: number; result: CheckResult } | null = null;
+    checks.retired_prices = async () => {
+      if (good && now() - good.at < (opts.cacheSeconds ?? 600) * 1000) return good.result;
+      if (!opts.apiKey) return { ok: false, detail: 'PADDLE_API_KEY is missing, so retired prices were not checked' };
+      const api = paddleClient(opts.environment === 'production' ? LIVE_BASE : SANDBOX_BASE, opts.apiKey, fetchImpl, [opts.apiKey]);
+      const onSale: string[] = [];
+      try {
+        for (const id of retired) if ((await api.call('GET', `/prices/${encodeURIComponent(id)}`)).data?.status !== 'archived') onSale.push(id);
+      } catch {
+        return { ok: false, detail: 'Paddle did not answer, so retired prices were not checked' };
+      }
+      if (onSale.length > 0) return { ok: false, detail: `still on sale in Paddle: ${onSale.join(', ')} (archive retired prices: Paddle.js can open a checkout for any active price)` };
+      const result = { ok: true, detail: `${retired.length} retired price${retired.length === 1 ? '' : 's'} archived` };
+      good = { at: now(), result };
+      return result;
     };
   }
 

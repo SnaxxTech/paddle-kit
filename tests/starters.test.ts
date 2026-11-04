@@ -12,12 +12,28 @@ afterAll(async () => { await live?.stop(); });
 const SECRET = 'pdl_ntfset_starter_secret';
 const HEALTH = 'health_token_starter';
 const CRON = 'cron_secret_starter';
-const PERMISSIONS = ['notification.read', 'subscription.read', 'transaction.read', 'adjustment.read', 'price.read', 'product.read'];
+const PERMISSIONS = ['notification.read', 'subscription.read', 'subscription.write', 'transaction.read', 'adjustment.read', 'price.read', 'product.read'];
 
+const paddleWrites: Array<{ method: string; path: string; body: unknown }> = [];
+const canceledInPaddle = new Set<string>();
 beforeEach(() => {
-  vi.stubGlobal('fetch', async (url: string) => {
-    if (url !== 'https://sandbox-api.paddle.com/') throw new Error(`unexpected Paddle call ${url}`);
-    return Response.json({ data: { api: { environment: 'sandbox' }, caller: { permissions: PERMISSIONS } } });
+  paddleWrites.length = 0;
+  canceledInPaddle.clear();
+  vi.stubGlobal('fetch', async (url: string, init?: { method?: string; body?: string }) => {
+    const u = new URL(url);
+    if (u.origin !== 'https://sandbox-api.paddle.com') throw new Error(`unexpected call ${url}`);
+    if (u.pathname === '/') return Response.json({ data: { api: { environment: 'sandbox' }, caller: { permissions: PERMISSIONS } } });
+    const cancel = /^\/subscriptions\/(sub_[a-z0-9_]+)\/cancel$/.exec(u.pathname);
+    if (cancel && init?.method === 'POST') {
+      paddleWrites.push({ method: 'POST', path: u.pathname, body: JSON.parse(init.body ?? '{}') });
+      // Like Paddle: a canceled subscription cannot be canceled again.
+      if (canceledInPaddle.has(cancel[1]!)) return Response.json({ error: { code: 'subscription_locked', detail: 'canceled' } }, { status: 400 });
+      canceledInPaddle.add(cancel[1]!);
+      return Response.json({ data: { id: cancel[1], status: 'canceled' } });
+    }
+    const sub = /^\/subscriptions\/(sub_[a-z0-9_]+)$/.exec(u.pathname);
+    if (sub && (init?.method ?? 'GET') === 'GET') return Response.json({ data: { id: sub[1], status: canceledInPaddle.has(sub[1]!) ? 'canceled' : 'active' } });
+    throw new Error(`unexpected Paddle call ${init?.method ?? 'GET'} ${u.pathname}`);
   });
 });
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
@@ -74,6 +90,24 @@ describe.skipIf(!live)('starters, run as written', () => {
     expect(h.checks.paddle_api_key.ok).toBe(true);
     expect(h.checks.migrations.ok).toBe(true);
     expect((await app.cron('app/api/cron/billing-recovery/route', 'Bearer wrong')).status).toBe(401);
+
+    // A partial refund changes nothing; a full refund or a chargeback cancels the subscription at once (owner's rule).
+    const adjust = (action: string, type: string | null) => {
+      const b = loadFixture('adjustment.created');
+      return { ...b, event_id: `evt_${n()}`, event_type: 'adjustment.updated', occurred_at: new Date().toISOString(),
+        data: { ...b.data, id: `adj_${n()}`, subscription_id: event.data.id, transaction_id: `txn_${n()}`, action, type, status: 'approved', updated_at: new Date().toISOString() } };
+    };
+    expect((await app.send(adjust('refund', 'partial'))).status).toBe(200);
+    expect(paddleWrites).toEqual([]);
+    expect((await app.send(adjust('chargeback', null))).status).toBe(200);
+    expect(paddleWrites).toEqual([{ method: 'POST', path: `/subscriptions/${event.data.id}/cancel`, body: { effective_from: 'immediately' } }]);
+    // Idempotent: a second revoking adjustment (or a replay) before the canceled webhook arrives must not fail.
+    expect((await app.send(adjust('refund', 'full'))).status).toBe(200);
+    expect(paddleWrites).toHaveLength(2);
+    const canceled = { ...event, event_id: `evt_${n()}`, event_type: 'subscription.canceled', occurred_at: new Date(Date.now() + 1000).toISOString(),
+      data: { ...event.data, status: 'canceled', updated_at: new Date(Date.now() + 1000).toISOString() } };
+    expect((await app.send(canceled)).status).toBe(200);
+    expect(await canUse('u_sub', 'pro')).toBe(false);
   });
 
   it('unlock: payment unlocks once and sends its receipt during the webhook, a refund locks it, a second payment is a review', async () => {
@@ -99,6 +133,17 @@ describe.skipIf(!live)('starters, run as written', () => {
 
     expect((await app.send(refund(paid.data.id))).status).toBe(200);
     expect(await canUse('u1')).toBe(false);
+    // Reported by review: buy A, refund A, buy B, reverse A's refund, refund B. A is valid again, so the unlock stays.
+    const A = payment({ priceId: 'pri_life', userId: 'u4' });
+    expect((await app.send(A)).status).toBe(200);
+    expect((await app.send(refund(A.data.id))).status).toBe(200);
+    expect(await canUse('u4')).toBe(false);
+    const B = payment({ priceId: 'pri_life', userId: 'u4' });
+    expect((await app.send(B)).status).toBe(200);
+    expect(await canUse('u4')).toBe(true);
+    expect((await app.send(refund(A.data.id, 'reversed'))).status).toBe(200);
+    expect((await app.send(refund(B.data.id))).status).toBe(200);
+    expect(await canUse('u4')).toBe(true);
   });
 
   it('credits: a 2-pack grants 200, spending is atomic, a refund takes back only what is left; an unmatched payment is a review', async () => {
@@ -111,6 +156,9 @@ describe.skipIf(!live)('starters, run as written', () => {
     expect(await creditsOf('u2')).toBe(200);
     expect(info).toHaveBeenCalledWith('paddle-kit receipt', `${paid.data.id}:receipt`, 'u2');
     expect(await Promise.all([spendCredits('u2', 150), spendCredits('u2', 150)])).toEqual(expect.arrayContaining([true, false]));
+    // A negative, fractional or huge amount is refused, never a top-up (review: -50 turned 100 into 150).
+    for (const bad of [-50, 0, 1.5, Number.NaN, 2 ** 53]) expect(await spendCredits('u2', bad)).toBe(false);
+    expect(await creditsOf('u2')).toBe(50);
     expect((await app.send(refund(paid.data.id))).status).toBe(200);
     expect(await creditsOf('u2')).toBe(0); // 50 were left: those are taken, the 150 spent stay spent
     expect(await (await app.cron('app/api/cron/outbox/route')).json()).toMatchObject({ sent: 0 }); // sent during the webhook
@@ -141,5 +189,14 @@ describe('starter crons fit a free-tier database', () => {
     expect(schedules.length).toBeGreaterThan(0);
     const tooOften = schedules.filter((c) => !/^\d+$/.test(c.schedule.split(/\s+/)[0]!)); // minute must be one fixed number
     expect(tooOften).toEqual([]);
+  });
+});
+
+describe('starters keep errors out of the platform log', () => {
+  it('no starter prints a raw error object (it may carry a connection string or a provider key)', async () => {
+    const { readFileSync, readdirSync } = await import('node:fs');
+    const files = readdirSync('examples', { recursive: true }).map(String).filter((f) => f.endsWith('.ts'));
+    const raw = files.filter((f) => /console\.(error|warn|log)\([^;]*\b(error|e|err)\)/.test(readFileSync(`examples/${f}`, 'utf8')));
+    expect(raw).toEqual([]);
   });
 });

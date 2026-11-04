@@ -249,11 +249,11 @@ describe('diagnose: v0.7.0 health fields', () => {
 
 describe('paddle-kit-doctor --apps', () => {
   const APPS = JSON.stringify([
-    { name: 'leakscan', url: 'https://leakscan.example/api/paddle', tokenEnv: 'LEAKSCAN_TOKEN', staleHours: 48 },
-    { name: 'offday', url: 'https://offday.example/api/paddle', tokenEnv: 'OFFDAY_TOKEN', staleHours: 1 },
-    { name: 'qrlab', url: 'https://qrlab.example/api/paddle', tokenEnv: 'QRLAB_TOKEN' },
+    { name: 'leakscan', url: 'https://leakscan.example/api/paddle', tokenEnv: 'LEAKSCAN_HEALTH_TOKEN', staleHours: 48 },
+    { name: 'offday', url: 'https://offday.example/api/paddle', tokenEnv: 'OFFDAY_HEALTH_TOKEN', staleHours: 1 },
+    { name: 'qrlab', url: 'https://qrlab.example/api/paddle', tokenEnv: 'QRLAB_HEALTH_TOKEN' },
   ]);
-  const ENV = { LEAKSCAN_TOKEN: 'tok-leakscan-1234', OFFDAY_TOKEN: 'tok-offday-5678', QRLAB_TOKEN: 'tok-qrlab-9012' };
+  const ENV = { LEAKSCAN_HEALTH_TOKEN: 'tok-leakscan-1234', OFFDAY_HEALTH_TOKEN: 'tok-offday-5678', QRLAB_HEALTH_TOKEN: 'tok-qrlab-9012' };
   // Each host answers its own report; the bearer token must be that app's own.
   const hosts: Record<string, [string, number, string]> = {
     'leakscan.example': ['tok-leakscan-1234', 200, health({ checks: { price: { ok: true, detail: 'paddle' } } })],
@@ -288,7 +288,7 @@ describe('paddle-kit-doctor --apps', () => {
     expect(out.checkedAt).toBe(new Date(NOW).toISOString());
     expect(out.apps.map((a: any) => [a.name, a.ok])).toEqual([['leakscan', true], ['offday', false], ['qrlab', false]]);
     expect(out.apps[0]).toMatchObject({
-      url: 'https://leakscan.example/api/paddle', tokenEnv: 'LEAKSCAN_TOKEN', reachable: true, httpStatus: 200, billing: 'on', environment: 'production',
+      url: 'https://leakscan.example/api/paddle', tokenEnv: 'LEAKSCAN_HEALTH_TOKEN', reachable: true, httpStatus: 200, billing: 'on', environment: 'production',
       kitVersion: '0.6.0', lastEventAt: '2026-10-29T09:00:00.000Z', lastEventAgeHours: 3, staleHours: 48, stale: false, failedLast24h: 0,
       checks: { price: { ok: true, detail: 'paddle' } }, problems: [],
     });
@@ -300,7 +300,7 @@ describe('paddle-kit-doctor --apps', () => {
   });
 
   it('all green: exit 0', async () => {
-    const one = JSON.stringify([{ name: 'leakscan', url: 'https://leakscan.example/api/paddle', tokenEnv: 'LEAKSCAN_TOKEN' }]);
+    const one = JSON.stringify([{ name: 'leakscan', url: 'https://leakscan.example/api/paddle', tokenEnv: 'LEAKSCAN_HEALTH_TOKEN' }]);
     const r = await run(['--apps', 'a.json'], fleet, ENV, { 'a.json': one });
     expect([r.code, r.output.split('\n').at(-1)]).toEqual([0, 'Result: OK (1 app)']);
   });
@@ -309,16 +309,16 @@ describe('paddle-kit-doctor --apps', () => {
     const seen: string[] = [];
     const r = await run(['--apps', 'apps.json', '--json'], async (url, init) => {
       seen.push(new URL(url).hostname);
-      if (url.includes('offday')) throw new TypeError(`ECONNREFUSED ${ENV.OFFDAY_TOKEN}`);
+      if (url.includes('offday')) throw new TypeError(`ECONNREFUSED ${ENV.OFFDAY_HEALTH_TOKEN}`);
       return fleet(url, init);
-    }, { OFFDAY_TOKEN: ENV.OFFDAY_TOKEN, QRLAB_TOKEN: 'wrong' }, { 'apps.json': APPS });
+    }, { OFFDAY_HEALTH_TOKEN: ENV.OFFDAY_HEALTH_TOKEN, QRLAB_HEALTH_TOKEN: 'wrong' }, { 'apps.json': APPS });
     const out = JSON.parse(r.output);
     expect(r.code).toBe(1);
     expect(seen.sort()).toEqual(['offday.example', 'qrlab.example']);
-    expect(out.apps[0]).toMatchObject({ name: 'leakscan', ok: false, reachable: false, problems: ['LEAKSCAN_TOKEN is not set in this environment'] });
+    expect(out.apps[0]).toMatchObject({ name: 'leakscan', ok: false, reachable: false, problems: ['LEAKSCAN_HEALTH_TOKEN is not set in this environment'] });
     expect(out.apps[1]).toMatchObject({ name: 'offday', ok: false, reachable: false, problems: ['the app is not reachable at this URL'] });
     expect(out.apps[2].problems[0]).toMatch(/health token was refused/);
-    expect(r.output).not.toContain(ENV.OFFDAY_TOKEN);
+    expect(r.output).not.toContain(ENV.OFFDAY_HEALTH_TOKEN);
   });
 
   it('a bad apps file or bad flags: exit 2 before any request (a scheduled job must not close issues on it)', async () => {
@@ -327,12 +327,15 @@ describe('paddle-kit-doctor --apps', () => {
     const bad: Array<[string, RegExp]> = [
       ['not json', /not valid JSON/],
       ['[]', /non-empty JSON array/],
-      ['[{"name":"a","url":"https://a.example/x","tokenEnv":"A","token":"secret-in-file"}]', /never put a token in the file/],
-      ['[{"name":"a","url":"http://a.example/x","tokenEnv":"A"}]', /apps\[0\]\.url needs https/],
-      ['[{"name":"a","url":"https://a.example/x","tokenEnv":"A"},{"name":"a","url":"https://b.example/x","tokenEnv":"B"}]', /used twice/],
+      ['[{"name":"a","url":"https://a.example/x","tokenEnv":"A_HEALTH_TOKEN","token":"secret-in-file"}]', /never put a token in the file/],
+      ['[{"name":"a","url":"http://a.example/x","tokenEnv":"A_HEALTH_TOKEN"}]', /apps\[0\]\.url needs https/],
+      ['[{"name":"a","url":"https://a.example/x","tokenEnv":"A_HEALTH_TOKEN"},{"name":"a","url":"https://b.example/x","tokenEnv":"B_HEALTH_TOKEN"}]', /used twice/],
       ['[{"name":"a","url":"https://a.example/x","tokenEnv":"no-dash"}]', /tokenEnv must be/],
-      ['[{"name":"a","url":"https://a.example/x","tokenEnv":"A","staleHours":0}]', /staleHours/],
-      ['[{"name":"a","url":"https://a.example/x","tokenEnv":"A","extra":1}]', /unknown key/],
+      // A tampered apps.json must not send another secret of the job's environment to a host it names (since v0.9.2).
+      ['[{"name":"a","url":"https://attacker.example/x","tokenEnv":"VERCEL_TOKEN"}]', /_HEALTH_TOKEN/],
+      ['[{"name":"a","url":"https://attacker.example/x","tokenEnv":"AWS_SECRET_ACCESS_KEY"}]', /_HEALTH_TOKEN/],
+      ['[{"name":"a","url":"https://a.example/x","tokenEnv":"A_HEALTH_TOKEN","staleHours":0}]', /staleHours/],
+      ['[{"name":"a","url":"https://a.example/x","tokenEnv":"A_HEALTH_TOKEN","extra":1}]', /unknown key/],
     ];
     for (const [file, match] of bad) {
       const r = await run(['--apps', 'f.json'], fetch, { A: 't' }, { 'f.json': file });
@@ -367,8 +370,8 @@ describe('paddle-kit-doctor --apps', () => {
     await recovered(billing);
     const on = viaRoute(createWebhookRoute({ billing, problems: [] }));
     const off = viaRoute(createWebhookRoute({ billing: null, problems: [] }));
-    const apps = JSON.stringify([{ name: 'on', url: 'https://on.example/api/paddle', tokenEnv: 'T' }, { name: 'off', url: 'https://off.example/api/paddle', tokenEnv: 'T' }]);
-    const r = await run(['--apps', 'a.json', '--json'], async (url, init) => (url.includes('//on.') ? on : off)(url, init), { T: TOKEN }, { 'a.json': apps });
+    const apps = JSON.stringify([{ name: 'on', url: 'https://on.example/api/paddle', tokenEnv: 'T_HEALTH_TOKEN' }, { name: 'off', url: 'https://off.example/api/paddle', tokenEnv: 'T_HEALTH_TOKEN' }]);
+    const r = await run(['--apps', 'a.json', '--json'], async (url, init) => (url.includes('//on.') ? on : off)(url, init), { T_HEALTH_TOKEN: TOKEN }, { 'a.json': apps });
     const out = JSON.parse(r.output);
     expect(out.apps[0]).toMatchObject({ billing: 'on', checks: { price: { ok: false, detail: 'fallback: not_found' } }, problems: ['check "price" failed: fallback: not_found'] });
     expect(out.apps[1]).toMatchObject({ billing: 'off', ok: false });
@@ -378,8 +381,8 @@ describe('paddle-kit-doctor --apps', () => {
 
 describe('paddle-kit-doctor --html (dashboard)', () => {
   const apps = JSON.stringify([
-    { name: 'green', url: 'https://green.example/api/paddle', tokenEnv: 'G' },
-    { name: 'red', url: 'https://red.example/api/paddle', tokenEnv: 'R' },
+    { name: 'green', url: 'https://green.example/api/paddle', tokenEnv: 'G_HEALTH_TOKEN' },
+    { name: 'red', url: 'https://red.example/api/paddle', tokenEnv: 'R_HEALTH_TOKEN' },
   ]);
   const hostile = '<script>alert(1)</script>';
   const fleet: DoctorFetch = async (url) =>
@@ -391,7 +394,7 @@ describe('paddle-kit-doctor --html (dashboard)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'doctor-html-'));
     const file = join(dir, 'index.html');
     let written = '';
-    const r = await run(['--apps', 'apps.json', '--html', file], fleet, { G: 'tok-green-secret', R: 'tok-red-secret' }, { 'apps.json': apps });
+    const r = await run(['--apps', 'apps.json', '--html', file], fleet, { G_HEALTH_TOKEN: 'tok-green-secret', R_HEALTH_TOKEN: 'tok-red-secret' }, { 'apps.json': apps });
     written = readFile(file, 'utf8');
     expect(r.code).toBe(1);
     expect(written).toContain('1 of 2 apps need attention');

@@ -4,7 +4,9 @@ import { MIGRATIONS } from 'paddle-kit/postgres';
 import { db } from './db';
 
 const APP_SQL: string[] = [
-  `CREATE TABLE IF NOT EXISTS user_unlocks (user_id text PRIMARY KEY, transaction_id text NOT NULL, unlocked_at timestamptz NOT NULL DEFAULT now())`,
+  // One row per payment that grants the unlock: access while any remains (a refund of one never ends another).
+  `CREATE TABLE IF NOT EXISTS unlock_grants (transaction_id text PRIMARY KEY, user_id text NOT NULL, unlocked_at timestamptz NOT NULL DEFAULT now())`,
+  `CREATE INDEX IF NOT EXISTS unlock_grants_user_idx ON unlock_grants (user_id)`,
 ];
 
 export async function migrate(): Promise<void> {

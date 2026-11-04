@@ -2,8 +2,17 @@
 
 ## 0.9.2 (from 0.9.1)
 
-Nothing to run. If you copied a starter and deploy to Cloudflare Workers, take its new `lib/db.ts` (one client per
-query and transaction on Workers, through `fromPostgresJsPerCall`).
+1. **Production enforcement is on by default.** With `PADDLE_ENV=production`, a broken billing config now refuses paid
+   features. Set `BILLING_ENFORCE=0` only if you really want the old fail-open behaviour.
+2. **Archive retired prices in Paddle.** The new `retired_prices` health check is red while one is still active, and
+   needs the API key's `price.read` permission.
+3. **`paddle-kit-doctor --apps`:** rename each `tokenEnv` to end in `_HEALTH_TOKEN` (e.g. `QRLAB_HEALTH_TOKEN`).
+4. **Subscription apps:** to end access on a full refund or chargeback, copy the subscription starter's `onAdjustment`
+   (calls `cancelSubscription`; the key needs `subscription.write`).
+5. **Copied starters:** take the new `lib/db.ts` (Cloudflare Workers), `lib/billing.ts` (error names only, bounded
+   send), `credits.ts` (amount check), and for the unlock starter the `unlock_grants` table (one row per payment) with
+   its `lib/fulfilment.ts` and `lib/policy.ts`. Move existing rows: `INSERT INTO unlock_grants (transaction_id,
+   user_id, unlocked_at) SELECT transaction_id, user_id, unlocked_at FROM user_unlocks ON CONFLICT DO NOTHING`.
 
 ## 0.9.1 (from 0.9.0)
 

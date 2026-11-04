@@ -114,7 +114,9 @@ export async function canUse(userId: string | null, feature: string): Promise<bo
 Rules for every app:
 
 - **Checkout is bound to the signed-in user on the server.** Create the transaction on the server (`createCheckoutTransaction`, below) with the user from your session, and open it in the browser with `openTransaction(id)`: the browser then cannot change who is paid for or what is bought. The older `createCheckout(...).open({ userId, items })` still works, but its `custom_data` comes from the browser (the most a user can do is pay for someone else).
-- **Broken config never unlocks paid operations when enforcement is on** (`canUse` above). Show the problem names only on the authenticated health route.
+- **Broken config never unlocks paid operations when enforcement is on** (`canUse` above), and since v0.9.2 enforcement is on by default when `PADDLE_ENV=production` (`BILLING_ENFORCE=0` opts out). Show the problem names only on the authenticated health route.
+- **Archive retired prices in Paddle.** Paddle.js can open a checkout for any active price, whatever your server allows; the `retired_prices` health check (v0.9.2) is red while a retired price is still active.
+- **A full refund or a chargeback of a subscription payment does not cancel it in Paddle.** The subscription starter cancels it at once (`cancelSubscription`, v0.9.2); do the same, or decide your own rule.
 - **Separate sandbox and live keys.** `PADDLE_ENV=sandbox` with `test_` / `pdl_sdbx_` credentials (Vercel Preview and Development), `PADDLE_ENV=production` with `live_` / `pdl_live_` (Vercel Production only). `readBillingEnv` refuses a mix, and `recoverBilling` refuses an API key of the other environment.
 - **Business effects deduplicate by Paddle's ids, not by event ids.** A recovery replay of a payment or refund carries a new event id (`reconcile_txn_…`, `reconcile_adj_…`), so grant on `transactionId` and keep adjustments by `adjustmentId` (see One-time purchases and refunds, Example).
 
@@ -210,8 +212,8 @@ unfinished original events through Paddle's documented time/type-filtered event 
 payments/adjustments through the same hooks/claims as webhooks. The checkpoint advances only after every phase succeeds.
 Since v0.8.7 (migration 006) a run reads page by page and saves its window (`from`, a fixed `to`), phase and next page
 after each page: a run cut off by its budget is continued by the next one instead of starting over, and the checkpoint
-becomes the window's `to`. A page with a failed item stops the saving, so the next run retries from that page. A saved
-window over a day old is dropped (a fresh window from the checkpoint covers it).
+becomes the window's `to`. A page with a failed item stops the saving, so the next run retries from that page. Saved
+progress is kept until the window completes, however long that takes (since v0.9.2).
 A partial result, malformed page, page limit, timeout, or remaining eligible unfinished event keeps recovery failed.
 Hook side effects remain at least once and must be idempotent. Timed-out work is aborted where the driver supports it;
 non-cancellable in-flight writes may finish, so recovery never promises exactly-once execution.
@@ -1289,7 +1291,7 @@ npx paddle-kit-doctor --url https://app.example.com/api/paddle --token "$PADDLE_
 ```jsonc
 // apps.json: names, URLs and the NAME of each token's variable. Never a token: an entry with "token" is refused.
 [
-  { "name": "leakscan", "url": "https://leakscan.app/api/paddle", "tokenEnv": "LEAKSCAN_HEALTH_TOKEN", "staleHours": 48 },
+  { "name": "leakscan", "url": "https://leakscan.app/api/paddle", "tokenEnv": "LEAKSCAN_HEALTH_TOKEN", "staleHours": 48 }, // must end in _HEALTH_TOKEN (v0.9.2)
   { "name": "offday",   "url": "https://offday.app/api/paddle",   "tokenEnv": "OFFDAY_HEALTH_TOKEN",   "staleHours": 24 }
 ]
 ```

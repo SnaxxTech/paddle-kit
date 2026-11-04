@@ -352,11 +352,12 @@ export async function recoverBilling(billing: Billing, opts: RecoveryOptions): P
     // None found for the app (a wrong label, or an empty catalog): webhooks would keep answering 503. Not done.
     const noOwnedIds = ownership !== null && ownership.priceIds + ownership.productIds === 0
       && ((await billing.store.getOwnedIds?.())?.priceIds.length ?? 0) === 0;
-    // An interrupted run's window (since v0.8.7) is continued where it stopped, unless a later run already covered it
-    // or it is over a day old (then a fresh window from the checkpoint reads the same ground).
+    // An interrupted run's window (since v0.8.7) is continued where it stopped, however long ago, unless a later run
+    // already covered it (since v0.9.2: progress older than a day used to be dropped, so a daily or multi-day backlog
+    // started over). A window whose start has left Paddle's 90-day event retention reads the full lists instead, and
+    // the saved event cursor is then ignored (it is for another endpoint).
     const saved = store.getRecoveryProgress && store.saveRecoveryProgress ? await store.getRecoveryProgress(name) : null;
-    const resume = saved && startedAt.getTime() - Date.parse(saved.to) <= 86_400_000
-      && (!state?.checkpointAt || Date.parse(saved.to) > Date.parse(state.checkpointAt)) ? saved : null;
+    const resume = saved && (!state?.checkpointAt || Date.parse(saved.to) > Date.parse(state.checkpointAt)) ? saved : null;
     const since = resume ? new Date(resume.from)
       : new Date(Math.max(initial.getTime(), state?.checkpointAt ? Date.parse(state.checkpointAt) - overlapMs : initial.getTime()));
     const until = resume ? new Date(resume.to) : startedAt;

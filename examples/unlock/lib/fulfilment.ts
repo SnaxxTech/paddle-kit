@@ -10,16 +10,20 @@ export function unlockActions(productOf: (priceId: string) => string | null): Fu
       return typeof userId === 'string' && ok ? { userId, grants: { unlock: 'lifetime' } } : null; // null: a review row
     },
     async grant(q, f) {
-      const ins = await q.query('INSERT INTO user_unlocks (user_id, transaction_id) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING RETURNING user_id', [f.userId, f.transactionId]);
-      if (ins.rows.length === 0) return { declined: 'already_unlocked' }; // paid twice: a review row, refund it in Paddle
+      // Paid while an unlock is still valid: declined (a review row, refund it in Paddle). Locked per user, so two
+      // payments at the same moment cannot both pass this check.
+      await q.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`unlock:${f.userId}`]);
+      if ((await q.query('SELECT 1 FROM unlock_grants WHERE user_id = $1 LIMIT 1', [f.userId])).rows.length > 0) return { declined: 'already_unlocked' };
+      await q.query('INSERT INTO unlock_grants (transaction_id, user_id) VALUES ($1, $2) ON CONFLICT (transaction_id) DO NOTHING', [f.transactionId, f.userId]);
       await enqueue(q, { id: `${f.transactionId}:receipt`, kind: 'receipt', payload: { userId: f.userId } });
     },
     async revoke(q, f) {
-      await q.query('DELETE FROM user_unlocks WHERE user_id = $1 AND transaction_id = $2', [f.userId, f.transactionId]);
+      await q.query('DELETE FROM unlock_grants WHERE transaction_id = $1', [f.transactionId]);
       return null;
     },
+    // A reversed refund makes this payment valid again, whatever other payments did meanwhile.
     async restore(q, f) {
-      await q.query('INSERT INTO user_unlocks (user_id, transaction_id) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING', [f.userId, f.transactionId]);
+      await q.query('INSERT INTO unlock_grants (transaction_id, user_id) VALUES ($1, $2) ON CONFLICT (transaction_id) DO NOTHING', [f.transactionId, f.userId]);
     },
   };
 }

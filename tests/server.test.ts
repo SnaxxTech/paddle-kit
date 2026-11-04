@@ -137,3 +137,38 @@ describe('README: app/billing/actions.ts, run as written', () => {
     expect(t.calls).toEqual([]);
   });
 });
+
+describe('cancelSubscription (since v0.9.2)', () => {
+  it('cancels immediately by default, refuses an id that is not sub_…, and never sends the key elsewhere', async () => {
+    const { cancelSubscription } = await import('../src/server');
+    const calls: Array<{ url: string; body: unknown }> = [];
+    const fetch = async (url: string, init: { body?: string }) => {
+      calls.push({ url, body: JSON.parse(init.body ?? '{}') });
+      return { ok: true, status: 200, json: async () => ({ data: { id: 'sub_01abc', status: 'canceled' } }) };
+    };
+    const api = { apiKey: 'pdl_sdbx_apikey_test0000000000000', environment: 'sandbox' as const, fetch: fetch as any };
+    expect(await cancelSubscription(api, 'sub_01abc')).toEqual({ status: 'canceled' });
+    expect(calls).toEqual([{ url: 'https://sandbox-api.paddle.com/subscriptions/sub_01abc/cancel', body: { effective_from: 'immediately' } }]);
+    await expect(cancelSubscription(api, '../customers/ctm_1')).rejects.toThrow('sub_');
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe('cancelSubscription is idempotent (since v0.9.2)', () => {
+  const api = (fetch: unknown) => ({ apiKey: 'pdl_sdbx_apikey_test0000000000000', environment: 'sandbox' as const, fetch: fetch as any });
+  const answer = (status: number, body: unknown) => ({ ok: status < 400, status, json: async () => body });
+  it('an already canceled subscription is a success, not an error', async () => {
+    const { cancelSubscription } = await import('../src/server');
+    const fetch = async (url: string, init: { method: string }) => init.method === 'POST'
+      ? answer(400, { error: { code: 'subscription_locked', detail: 'canceled' } })
+      : answer(200, { data: { id: 'sub_01abc', status: 'canceled' } });
+    expect(await cancelSubscription(api(fetch), 'sub_01abc')).toEqual({ status: 'canceled' });
+  });
+  it('any other refusal still throws (the webhook fails and Paddle retries)', async () => {
+    const { cancelSubscription } = await import('../src/server');
+    const fetch = async (url: string, init: { method: string }) => init.method === 'POST'
+      ? answer(400, { error: { code: 'bad_request', detail: 'nope' } })
+      : answer(200, { data: { id: 'sub_01abc', status: 'active' } });
+    await expect(cancelSubscription(api(fetch), 'sub_01abc')).rejects.toThrow('400');
+  });
+});

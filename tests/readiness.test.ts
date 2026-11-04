@@ -182,3 +182,28 @@ describe('migrations check on real schemas', () => {
     expect(await migrations(store)).toEqual({ ok: false, detail: 'the store did not answer (connection or permissions), so the schema was not checked' });
   });
 });
+
+describe('secure defaults (since v0.9.2)', () => {
+  it('production enforces billing by default: a broken config refuses paid features; BILLING_ENFORCE=0 opts out', () => {
+    const broken = { PADDLE_ENV: 'production', PADDLE_NOTIFICATION_WEBHOOK_SECRET: '' };
+    expect(billingFromEnv(broken, { store: {} as never, entitlements: {} }).enforce).toBe(true);
+    expect(billingFromEnv({ ...broken, BILLING_ENFORCE: '0' }, { store: {} as never, entitlements: {} }).enforce).toBe(false);
+    expect(billingFromEnv({ PADDLE_ENV: 'sandbox' }, { store: {} as never, entitlements: {} }).enforce).toBe(false);
+    expect(billingFromEnv({ PADDLE_ENV: 'sandbox', BILLING_ENFORCE: '1' }, { store: {} as never, entitlements: {} }).enforce).toBe(true);
+  });
+
+  it('retired_prices is red while a retired price is still active in Paddle (anyone could still buy it with Paddle.js)', async () => {
+    const status: Record<string, string> = { pri_old: 'active', pri_older: 'archived' };
+    const asked: string[] = [];
+    const fetch = async (url: string) => {
+      const id = new URL(url).pathname.split('/').pop()!;
+      asked.push(id);
+      return { ok: true, status: 200, json: async () => ({ data: { id, status: status[id] } }) };
+    };
+    const check = () => readinessChecks({ apiKey: 'pdl_sdbx_apikey_r000000000000000', environment: 'sandbox', fetch: fetch as any, retiredPriceIds: ['pri_old', 'pri_older'], cacheSeconds: 0 }).retired_prices!();
+    expect(await check()).toEqual({ ok: false, detail: 'still on sale in Paddle: pri_old (archive retired prices: Paddle.js can open a checkout for any active price)' });
+    status.pri_old = 'archived';
+    expect(await check()).toEqual({ ok: true, detail: '2 retired prices archived' });
+    expect(asked.sort()).toEqual(['pri_old', 'pri_old', 'pri_older', 'pri_older']);
+  });
+});

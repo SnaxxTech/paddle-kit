@@ -251,6 +251,12 @@ export interface DrainOptions {
   leaseSeconds?: number;
   /** No item is claimed after this many ms since the run started (since v0.9.0; default 20 s): bounded per run. */
   budgetMs?: number;
+  /**
+   * A handler not done after this many ms counts as a failed attempt and is retried later (since v0.9.2; default:
+   * no limit). It is not cancelled and may still finish, so handlers stay idempotent on `item.id`; give your provider
+   * call its own timeout too. A run then takes at most about `budgetMs` + `handlerTimeoutMs`.
+   */
+  handlerTimeoutMs?: number;
 }
 
 /**
@@ -296,7 +302,16 @@ export async function drainOutbox(
     const handler = handlers[item.kind];
     try {
       if (!handler) throw new Error(`no handler for kind "${item.kind}"`);
-      await handler(jsonValue(item.payload), { id: item.id, attempts: attempts - 1 });
+      const sending = handler(jsonValue(item.payload), { id: item.id, attempts: attempts - 1 });
+      if (o.handlerTimeoutMs === undefined) await sending;
+      else {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const late = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`no answer in ${o.handlerTimeoutMs} ms`)), o.handlerTimeoutMs);
+        });
+        sending.catch(() => {}); // a handler that fails after its deadline is already counted
+        try { await Promise.race([sending, late]); } finally { clearTimeout(timer); }
+      }
       // Sent is final and true whoever holds the lease now: marked even after a takeover, so it is not sent again.
       await query('UPDATE paddle_outbox SET sent_at = clock_timestamp(), last_error = NULL WHERE id = $1 AND sent_at IS NULL', [item.id]);
       out.sent++;

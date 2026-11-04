@@ -28,6 +28,6 @@ it('runtime exports of core, client, reconcile, next, price and config', () => {
   expect(Object.keys(core).sort()).toEqual(['MAX_WEBHOOK_BODY_BYTES', 'PaddleTransportError', 'adjustmentEffect', 'createBilling', 'createPaddleTransport', 'paymentRevoked']);
   expect(Object.keys(client).sort()).toEqual(['createCheckout']);
   expect(Object.keys(fulfil).sort()).toEqual(['createFulfilment', 'createOutboxRoute', 'drainOutbox', 'enqueue', 'fulfilmentState', 'importFulfilment', 'outboxCheck', 'resolveReview', 'reviewsCheck']);
-  expect(Object.keys(server).sort()).toEqual(['PaddleError', 'createCheckoutTransaction', 'customerPortalSession']);
+  expect(Object.keys(server).sort()).toEqual(['PaddleError', 'cancelSubscription', 'createCheckoutTransaction', 'customerPortalSession']);
   expect(Object.keys(reconcile).sort()).toEqual(['createRecoveryRoute', 'reconcile', 'reconcilePayments', 'recoverBilling', 'syncOwnership']);
 });

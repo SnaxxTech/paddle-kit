@@ -587,6 +587,11 @@ describe('fix round 1', () => {
       'a [redacted] b [redacted] c [redacted] d [redacted] e [redacted] f',
     );
     expect(redactSecrets('Sandbox API key required (pdl_sdbx_…) and test_ tokens')).toBe('Sandbox API key required (pdl_sdbx_…) and test_ tokens');
+    // Not only Paddle's shapes (since v0.9.2): what a driver or provider error carries, e.g. in the outbox's last_error.
+    const leak = redactSecrets('connect postgres://app:s3cret-pw@db.example/neondb failed; Authorization: Bearer sk_live_51AbCdEf; retry with api_key=re_123456&x=1 password=hunter2');
+    for (const secret of ['s3cret-pw', 'sk_live_51AbCdEf', 're_123456', 'hunter2']) expect(leak).not.toContain(secret);
+    expect(leak).toContain('postgres://');
+    expect(leak).toContain('db.example/neondb');
   });
 
   test('I2/M1: every environment mix is refused before any request, with the env file untouched', async () => {
