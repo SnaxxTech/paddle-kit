@@ -12,7 +12,7 @@ import * as fulfil from '../src/fulfil';
 // The public surface. Growing it is a decision: change this list on purpose (0.6.0 added ./price and the doctor bin;
 // 0.7.0 added findPrice and findPriceMap to ./price, adjustmentEffect to ./core, reconcilePayments to ./reconcile,
 // billingFromEnv to ./config).
-it('package.json exports exactly the v0.7 subpaths (unchanged since v0.6) and bins', () => {
+it('package.json exports exactly these subpaths and bins', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   expect(Object.keys(pkg.exports)).toEqual(['./core', './memory', './postgres', './sqlite', './next', './client', './reconcile', './plan', './config', './catalog', './price', './server', './fulfil', './db']);
   expect(pkg.bin).toEqual({ 'paddle-kit-catalog': './dist/catalog/cli.js', 'paddle-kit-doctor': './dist/doctor/cli.js' });

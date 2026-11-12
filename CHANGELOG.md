@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+No runtime behaviour changes: documentation, source comments and a development dependency.
+
+### Security (documentation)
+- **A server-created checkout is not locked.** The README and `createCheckoutTransaction`'s comment said that with a
+  transaction created on the server "the browser then cannot change who is paid for or what is bought". A sandbox test
+  on 2026-11-12 showed the opposite: `Paddle.Checkout.updateCheckout()` replaced the custom data (including `userId`)
+  and the items (also with another app's price on the same seller account) of a server-created transaction in status
+  `draft` and `ready`, and the API returned the changed transaction. Record and re-run steps:
+  [docs/audits/2026-11-12-checkout-edit-probe.md](docs/audits/2026-11-12-checkout-edit-probe.md). The claim is removed
+  from the README, the docs, the skill and the comments in `paddle-kit/server` and `paddle-kit/client`. What to do is
+  unchanged and already what the starters do: grant by the completed transaction's line items, treat `custom_data` as
+  untrusted, archive prices that must not be sold. `allowedPriceIds` checks the request only.
+
+### Changed
+- **The README is short** (what the kit is, the problems it solves, how it compares with the SDK alone, the
+  quickstart, the security model). The reference sections moved, unchanged, to `docs/`. The tests that run the
+  README's code blocks now read them from there.
+- **Corrected in `docs/setup.md`:** the `BILLING_ENFORCE` row said enforcement is on only for the value `1`. Since
+  v0.9.2 it is also on when the value is unset and `PADDLE_ENV=production`.
+
+### Fixed
+- **`npm ci` with `legacy-peer-deps=true` left the tests unable to start** ("Cannot find package 'vite'"): `vite` was
+  only a peer of vitest. It is now a dev dependency.
+
 ## 0.9.3 (2026-11-04)
 
 ### Security

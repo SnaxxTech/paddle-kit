@@ -1,12 +1,11 @@
-import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import * as core from '../../src/core';
 import type { BillingConfig } from '../../src/core';
+import { readme } from './readme-blocks'; // README.md plus the docs the reference moved to
 
 // The README's "One-time purchases and refunds" example, read out of README.md: its SQL block (the tables) and its
 // TypeScript block, transpiled and run with `paddle-kit/core` mapped to src, so tests run the example exactly as written.
 export type Tx = { query(text: string, params?: unknown[]): Promise<{ rows: any[] }> };
-const readme = readFileSync(new URL('../../README.md', import.meta.url), 'utf8');
 const example = readme.slice(readme.indexOf('### Example\n'), readme.indexOf('### Refunds, chargebacks and reversals'));
 const block = (lang: string) => new RegExp('```' + lang + '\\n([\\s\\S]*?)```').exec(example)![1]!;
 

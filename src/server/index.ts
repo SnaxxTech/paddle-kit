@@ -25,17 +25,22 @@ export interface CheckoutTransactionOptions {
   items: { priceId: string; quantity: number }[];
   /** The user's Paddle customer (`ctm_…`), when known: checkout opens for them. */
   customerId?: string;
-  /** Extra custom data. `userId` always comes from `userId` and cannot be overridden. */
+  /** Extra custom data. In this call `userId` always comes from `userId`; the browser can still replace custom data later. */
   customData?: Record<string, unknown>;
-  /** Prices the server allows selling (e.g. the products' prices on sale); anything else is refused. */
+  /**
+   * Prices this call accepts (e.g. the products' prices on sale); anything else is refused before Paddle is called.
+   * Not a limit on what the buyer finally pays for: the browser can change the items of an open checkout.
+   */
   allowedPriceIds?: readonly string[];
 }
 
 /**
  * Creates an automatically-collected transaction on the server and returns its id. Open it in the browser with
- * `checkout.openTransaction(transactionId)` (paddle-kit/client): the user, the items and the prices are decided here,
- * so the browser cannot change who is paid for or what is bought. `checkoutUrl` is Paddle's payment link for it (your
- * default payment link + `_ptxn`), or null.
+ * `checkout.openTransaction(transactionId)` (paddle-kit/client). The items are checked and `custom_data.userId` is
+ * set here, but the checkout is not locked: Paddle.js can replace the items and the custom data of an open checkout
+ * from the browser (tested in the sandbox on 2026-11-12, `docs/audits/2026-11-12-checkout-edit-probe.md`). So grant
+ * by the completed transaction's line items in the hook, and treat `custom_data` as untrusted. `checkoutUrl` is
+ * Paddle's payment link for it (your default payment link + `_ptxn`), or null.
  */
 export async function createCheckoutTransaction(api: PaddleApi, o: CheckoutTransactionOptions): Promise<{ transactionId: string; checkoutUrl: string | null }> {
   if (!o.userId) throw new PaddleError('userId is required so the purchase can be linked to the user');
