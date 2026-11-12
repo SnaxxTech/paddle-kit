@@ -5,7 +5,7 @@ export type CheckoutOptions = {
   items: CheckoutItem[];
   userId: string;
   email?: string;
-  /** Extra custom data (e.g. an order id) sent with the checkout. `userId` is always set from `userId` and cannot be overridden. */
+  /** Extra custom data (e.g. an order id) sent with the checkout. In this call `userId` is always set from `userId`; a buyer can still change custom data in the browser, so the server treats it as untrusted. */
   customData?: Record<string, unknown>;
 };
 
@@ -36,7 +36,8 @@ export async function createCheckout(cfg: {
     },
     /**
      * Since v0.8.4: opens the checkout for a transaction the server created (`createCheckoutTransaction` in
-     * paddle-kit/server). Paddle takes the items, customer and custom data from that transaction. Since v0.8.5:
+     * paddle-kit/server). Paddle starts from that transaction's items, customer and custom data; the buyer can still
+     * change items and custom data in the browser, so the webhook hook decides what is granted. Since v0.8.5:
      * `email` prefills the email field when the transaction has no customer yet (a first purchase); Paddle ignores it
      * for a transaction created with `customerId`.
      */

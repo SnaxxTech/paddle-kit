@@ -342,7 +342,8 @@ export function billingFromEnv(
   config: BillingEnv | BillingEnvWithLookup | null;
   problems: string[];
   /**
-   * Since v0.8.0: BILLING_ENFORCE === '1', read even when the rest of the env is broken. With `billing` null and
+   * Since v0.8.0, read even when the rest of the env is broken: on with BILLING_ENFORCE=1, off with BILLING_ENFORCE=0,
+   * otherwise on when PADDLE_ENV=production (since v0.9.2). With `billing` null and
    * `enforce` true, paid operations must be refused, never served free: a broken config never unlocks them.
    */
   enforce: boolean;

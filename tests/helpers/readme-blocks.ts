@@ -3,7 +3,11 @@ import ts from 'typescript';
 
 // Runs a TypeScript block of README.md as written: the first ```ts block after `marker`, transpiled, with its imports
 // mapped to the given modules (anything else throws, so an example can't silently import something untested).
-const readme = readFileSync(new URL('../../README.md', import.meta.url), 'utf8');
+// The reference moved from README.md to docs/*.md: they are read as one text, README.md first, so a marker finds the
+// same block it found when everything was in README.md.
+export const readme = ['README.md', 'docs/setup.md', 'docs/payments.md', 'docs/operations.md', 'docs/limits-and-tests.md']
+  .map((f) => readFileSync(new URL(`../../${f}`, import.meta.url), 'utf8'))
+  .join('\n');
 
 export function readmeBlockAfter(marker: string): string {
   const at = readme.indexOf(marker);

@@ -1,5 +1,8 @@
 # Billing status: paddle-kit and our apps
 
+> **This file is out of date (checked 2026-11-12).** It describes 2026-10-29, when v0.7.0 was in review. The kit is
+> now v0.9.3 (`CHANGELOG.md`). The app versions, pull-request states and owner actions below were not re-checked.
+
 Last update: 2026-10-29 (paddle-kit v0.7.0 in review). Update this file when a step is done.
 
 ## In simple words (ELI5)

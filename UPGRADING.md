@@ -1,5 +1,7 @@
 # Upgrading paddle-kit
 
+A section named here as "README, …" is in the README or in one of the files it lists under Documentation (`docs/`).
+
 ## 0.9.3 (from 0.9.2)
 
 **If you copied the subscription starter's `onAdjustment` (cancel on refund):** take the new one. It must return unless
